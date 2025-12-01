@@ -1,0 +1,1 @@
+// A class for handling all types of response wether success or error.

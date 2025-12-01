@@ -1,0 +1,19 @@
+# RMB FLOW
+- There will be a like a list of currency, it can be something like a select input field to select the currency you are dealing with
+- The only option for now will be RMB and GHS
+- For the GHS flow it will be coming soon
+- The RMB flow is below
+- You will be able to see the rate of conversion to that currency [BE: This is already with the exchange rate endpoint.]
+- You will be able to select the currency you are sending from and check the rate.
+- For now the option of the two currencies will be NGN and GHS
+- Once you enter the amount on the calculator and see how much you will receive, you can click proceed.
+- Then you will see a modal that will have a select option for the type of alipay whether it's Nigerian/Chinese Alipay,
+- The modal will also ask for the Alipay ID, the name of the alipay owner and then a field to upload the alipay qrcode to and the amount(in RMB) you want to send to the person, you will also select the currency you want to send from maybe NGN or GHS(under this field you will be seeing the approximate amount you will be sending to use based on whether you choose NGN or GHS),
+- Inside the same modal screen there will also be a field for the account name, bank name and account number they are sending the money from,
+- Note that the selection from the calculator is just for you to check rate, it's not meant for the modal, that's why it looks like some field are repetitive above
+- Now when the user click Next, [BE: All the information the user entered will be stored in the database]
+- Then after that inside the modal, it will show them another screen, which is the amount the person is to send and the account number they are to send the money to, it will be our NGN account number if they select NGN, and it will be our GHS account number if the person select GHS
+- They will also see a field to upload their payment receipt under and then a button, I've paid, [BE: The backend will be called and the email and whatsapp of our agent will be notified with the receipt and every other info that was saved earlier.]
+- There will be a table for the list of transactions, there will be tags or maybe status like (TODO: the status for when the person has entered the info but has not uploaded receipt and click I've paid, the status for someone that has uploaded the receipt and the payment has not been confirmed, then status for someone the payment has been confirmed but the Alipay account has not been credited and finally there will be completed too),
+- On the table the user can click on any transaction to see the details, if it's the first one, they will see the account number they are to send the money to again like that second step, if it's the second one they will see a summary of everything they've entered and something like "Payment awaiting confirmation", if it's the third case they will see a summary of everything they've entered and there will be a receipt under for them to download the receipt of the payment into the AliPay
+- Now on the admin side, when the user clicked I've paid and the admin get notified on their whatsapp and email with all the details, they can login to their dashboard and they will see all the details on the dashboard and the can mark the payment as confirmed if they have seen the user payment and then they can go and pay into the alipay account and then come to the dashboard and upload the screenshot of they payment they made into alipay as receipt for the user and then the payment will be marked as completed
