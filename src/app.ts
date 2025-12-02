@@ -102,8 +102,8 @@ class App {
      * @private
      */
     private async connectWhatsapp(): Promise<void> {
-        await this.notificationService.disconnectWhatsApp();
-        // await this.notificationService.initializeWhatsApp();
+        // await this.notificationService.disconnectWhatsApp();
+        await this.notificationService.initializeWhatsApp();
     }
 
     /**
