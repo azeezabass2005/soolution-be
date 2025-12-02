@@ -45,7 +45,13 @@ class App {
         // Security middlewares
         this.app.use(helmet());
         this.app.use(cors({
-            origin: '*',
+            origin: [
+                'http://localhost:3000',
+                'https://soolution.co',
+                'https://www.soolution.co',
+                'https://trycloudflared.com'
+            ],
+            credentials: true,
             exposedHeaders: ['set-cookie']
         }));
 

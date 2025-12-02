@@ -240,7 +240,7 @@ class AuthController extends BaseController {
                 httpOnly: true,  // Secure, not accessible via JS
                 secure: config.NODE_ENV === 'production',
                 // secure: true,
-                sameSite: 'none',
+                sameSite: 'lax',
                 path: "/",
                 maxAge: 60 * 60 * 1000,  // 1 hour
                 domain: config.COOKIE_DOMAIN,
@@ -250,7 +250,7 @@ class AuthController extends BaseController {
                 httpOnly: true,
                 secure: config.NODE_ENV === 'production',
                 // secure: true,
-                sameSite: 'none',
+                sameSite: 'lax',
                 path: "/",
                 maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
                 domain: config.COOKIE_DOMAIN,
@@ -260,7 +260,7 @@ class AuthController extends BaseController {
                 httpOnly: false, // Allow client-side access (if needed)
                 secure: config.NODE_ENV === 'production',
                 // secure: true,
-                sameSite: 'none',
+                sameSite: 'lax',
                 path: "/",
                 maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
                 domain: config.COOKIE_DOMAIN,
@@ -480,7 +480,7 @@ class AuthController extends BaseController {
                 httpOnly: true,  // Secure, not accessible via JS
                 secure: config.NODE_ENV === 'production',
                 // secure: true,
-                sameSite: 'none',
+                sameSite: 'lax',
                 maxAge: 60 * 60 * 1000,  // 1 hour
                 domain: config.COOKIE_DOMAIN,
             });
@@ -489,7 +489,7 @@ class AuthController extends BaseController {
                 httpOnly: true,
                 secure: config.NODE_ENV === 'production',
                 // secure: true,
-                sameSite: 'none',
+                sameSite: 'lax',
                 maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
                 domain: config.COOKIE_DOMAIN,
             });
@@ -524,7 +524,7 @@ class AuthController extends BaseController {
                 domain: config.COOKIE_DOMAIN,
                 secure: config.NODE_ENV === 'production',
                 // secure: true,
-                sameSite: 'none',
+                sameSite: 'lax',
                 path: "/",
                 httpOnly: true,
             });
@@ -533,7 +533,7 @@ class AuthController extends BaseController {
                 domain: config.COOKIE_DOMAIN,
                 secure: config.NODE_ENV === 'production',
                 // secure: true,
-                sameSite: 'none',
+                sameSite: 'lax',
                 path: "/",
                 httpOnly: true,
             });
@@ -542,7 +542,7 @@ class AuthController extends BaseController {
                 domain: config.COOKIE_DOMAIN,
                 secure: config.NODE_ENV === 'production',
                 // secure: true,
-                sameSite: 'none',
+                sameSite: 'lax',
                 path: "/",
                 httpOnly: false
             });
