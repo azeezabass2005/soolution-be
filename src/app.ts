@@ -45,11 +45,7 @@ class App {
         // Security middlewares
         this.app.use(helmet());
         this.app.use(cors({
-            origin: [
-                'http://localhost:3000',
-                'https://competing-singer-scholars-responsibilities.trycloudflare.com',
-                'https://trycloudflared.com'
-            ],
+            origin: '*',
             credentials: true,
             exposedHeaders: ['set-cookie']
         }));
