@@ -46,7 +46,6 @@ class App {
         this.app.use(helmet());
         this.app.use(cors({
             origin: '*',
-            credentials: true,
             exposedHeaders: ['set-cookie']
         }));
 

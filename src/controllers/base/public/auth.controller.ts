@@ -238,32 +238,32 @@ class AuthController extends BaseController {
 
             res.cookie('accessToken', accessToken, {
                 httpOnly: true,  // Secure, not accessible via JS
-                // secure: config.NODE_ENV === 'production',
-                secure: true,
+                secure: config.NODE_ENV === 'production',
+                // secure: true,
                 sameSite: 'none',
                 path: "/",
                 maxAge: 60 * 60 * 1000,  // 1 hour
-                // domain: config.COOKIE_DOMAIN,
+                domain: config.COOKIE_DOMAIN,
             });
 
             res.cookie('refreshToken', refreshToken, {
                 httpOnly: true,
-                // secure: config.NODE_ENV === 'production',
-                secure: true,
+                secure: config.NODE_ENV === 'production',
+                // secure: true,
                 sameSite: 'none',
                 path: "/",
                 maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                // domain: config.COOKIE_DOMAIN,
+                domain: config.COOKIE_DOMAIN,
             });
 
             res.cookie('role', Object.entries(ROLE_MAP).find(([_, v]) => v === user.role)?.[0], {
                 httpOnly: false, // Allow client-side access (if needed)
-                // secure: config.NODE_ENV === 'production',
-                secure: true,
+                secure: config.NODE_ENV === 'production',
+                // secure: true,
                 sameSite: 'none',
                 path: "/",
                 maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                // domain: config.COOKIE_DOMAIN,
+                domain: config.COOKIE_DOMAIN,
             });
 
             this.sendSuccess(res, {
@@ -478,20 +478,20 @@ class AuthController extends BaseController {
 
             res.cookie('accessToken', newAccessToken, {
                 httpOnly: true,  // Secure, not accessible via JS
-                // secure: config.NODE_ENV === 'production',
-                secure: true,
+                secure: config.NODE_ENV === 'production',
+                // secure: true,
                 sameSite: 'none',
                 maxAge: 60 * 60 * 1000,  // 1 hour
-                // domain: config.COOKIE_DOMAIN,
+                domain: config.COOKIE_DOMAIN,
             });
 
             res.cookie('refreshToken', refreshToken, {
                 httpOnly: true,
-                // secure: config.NODE_ENV === 'production',
-                secure: true,
+                secure: config.NODE_ENV === 'production',
+                // secure: true,
                 sameSite: 'none',
                 maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                // domain: config.COOKIE_DOMAIN,
+                domain: config.COOKIE_DOMAIN,
             });
 
             this.sendSuccess(res, {
@@ -521,27 +521,27 @@ class AuthController extends BaseController {
 
             // Clear cookies
             res.clearCookie('accessToken', {
-                // domain: config.COOKIE_DOMAIN,
-                // secure: config.NODE_ENV === 'production',
-                secure: true,
+                domain: config.COOKIE_DOMAIN,
+                secure: config.NODE_ENV === 'production',
+                // secure: true,
                 sameSite: 'none',
                 path: "/",
                 httpOnly: true,
             });
 
             res.clearCookie('refreshToken', {
-                // domain: config.COOKIE_DOMAIN,
-                // secure: config.NODE_ENV === 'production',
-                secure: true,
+                domain: config.COOKIE_DOMAIN,
+                secure: config.NODE_ENV === 'production',
+                // secure: true,
                 sameSite: 'none',
                 path: "/",
                 httpOnly: true,
             });
 
             res.clearCookie('role', {
-                // domain: config.COOKIE_DOMAIN,
-                // secure: config.NODE_ENV === 'production',
-                secure: true,
+                domain: config.COOKIE_DOMAIN,
+                secure: config.NODE_ENV === 'production',
+                // secure: true,
                 sameSite: 'none',
                 path: "/",
                 httpOnly: false
