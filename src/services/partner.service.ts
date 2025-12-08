@@ -63,7 +63,7 @@ class PartnerService extends DBService<IPartner> {
         const { page = 1, limit = 10, useTextSearch = false } = options;
 
         let query: any = { ...filters };
-        let sortOptions: Record<string, any> = { created_at: -1 };
+        let sortOptions: Record<string, any> = { createdAt: -1 };
 
         if (searchTerm?.trim()) {
             const cleanedSearchTerm = searchTerm.trim();

@@ -62,7 +62,7 @@ class PartnerController extends BaseController {
                 partners = await this.partnerService.paginate(otherQueries, {
                     page: parseInt(page as string) || 1,
                     limit: parseInt(limit as string) || 10,
-                    sort: { created_at: -1 }
+                    sort: { createdAt: -1 }
                 });
             }
 

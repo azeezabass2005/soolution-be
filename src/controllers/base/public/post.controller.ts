@@ -49,7 +49,7 @@ class PostController extends BaseController {
             const posts = await this.postService.paginate(req.query, {
                 page,
                 limit,
-                sort: {created_at: -1},
+                sort: {createdAt: -1},
                 populate: ['user']
             });
 

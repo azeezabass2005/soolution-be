@@ -175,7 +175,7 @@ class DBService<T> {
     ): Promise<HydratedDocument<T>[]> {
         return this.executeWithErrorHandling(async () => {
             const {
-                sort = { created_at: -1 },
+                sort = { createdAt: -1 },
                 limit = 300,
                 session = null,
                 select = [],
@@ -278,7 +278,7 @@ class DBService<T> {
             const {
                 page = 1,
                 limit = 10,
-                sort = { created_at: -1 },
+                sort = { createdAt: -1 },
                 select = [],
                 populate = this.defaultPopulatedPaths
             } = options;

@@ -47,7 +47,7 @@ const bankAccountDetailsSchema = new Schema<IBankAccountDetails>({
 }, {
     toJSON: { virtuals: true },
     toObject: { virtuals: true },
-    timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+    timestamps: true,
 });
 
 const BankAccount: Model<IBankAccountDetails> = model<IBankAccountDetails>(MODEL_NAME.BANK_ACCOUNT_DETAIL, bankAccountDetailsSchema);
