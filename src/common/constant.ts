@@ -73,6 +73,7 @@ export const TRANSACTION_TYPE = {
 
 export const DETAIL_TYPE = {
     ALIPAY: 'alipay',
+    WECHAT: 'wechat',
     // TODO: I will add other detail types here e.g all the GHS transaction and the likes.
 }
 

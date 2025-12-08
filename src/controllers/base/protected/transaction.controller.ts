@@ -1,7 +1,7 @@
 import BaseController from "../base-controller";
 import TransactionService from "../../../services/transaction.service";
 import {Request, Response, NextFunction} from "express";
-import {ITransaction, ITransactionDetail} from "../../../models/interface";
+import {DetailType, ITransaction, ITransactionDetail} from "../../../models/interface";
 import errorResponseMessage from "../../../common/messages/error-response-message";
 import {validateCreateAlipayTransaction} from "../../../validators/z-transaction";
 import {ROLE_MAP} from "../../../common/constant";
@@ -37,7 +37,7 @@ class TransactionController extends BaseController {
 
     private async createAlipayTransaction(req: Request, res: Response, next: NextFunction) {
         try {
-            const transactionData: Partial<ITransaction & ITransactionDetail> = req.body;
+            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType }> = req.body;
 
             const user = res.locals.user;
 
@@ -67,7 +67,7 @@ class TransactionController extends BaseController {
                 next(errorResponseMessage.payloadIncorrect("Your payment receipt is required"));
                 return;
             }
-            await this.transactionService.uploadUserPaymentReceipt(req.params.id!, req.file as Express.Multer.File, res.locals?.user?.isKYCDone);
+            await this.transactionService.uploadUserPaymentReceipt(req.params.id!, req.file as Express.Multer.File, res.locals?.user?.isVerified);
 
             return this.sendSuccess(res, {
                 message: "Payment receipt uploaded successfully"

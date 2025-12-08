@@ -1,5 +1,5 @@
 import z from "zod";
-import { ALIPAY_PLATFORM } from "../common/constant";
+import { ALIPAY_PLATFORM, DETAIL_TYPE } from "../common/constant";
 import {Request, Response, NextFunction} from "express";
 import zodErrorHandler from "./zod.error";
 
@@ -18,6 +18,10 @@ const ZCreateAlipayTransaction = z.object({
 
     platform: z.enum(Object.values(ALIPAY_PLATFORM) as [string, ...string[]], {
         errorMap: () => ({ message: "Invalid Alipay platform" })
+    }).optional(),
+
+    paymentMethod: z.enum(Object.values(DETAIL_TYPE) as [string, ...string[]], {
+        errorMap: () => ({ message: "Invalid payment method" })
     }),
 
     alipayId: z

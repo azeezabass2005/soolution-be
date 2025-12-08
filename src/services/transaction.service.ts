@@ -1,5 +1,5 @@
 import DBService from "../utils/db.utils";
-import {ITransaction, ITransactionDetail, IUser} from "../models/interface";
+import {DetailType, ITransaction, ITransactionDetail, IUser} from "../models/interface";
 import Transaction from "../models/transaction.model";
 import TransactionDetailsService from "./transaction-details.service";
 import {FileUploadFactory} from "./file-upload.factory";
@@ -43,8 +43,8 @@ class TransactionService extends DBService<ITransaction> {
         return `ALIPAY_TX_${randomPart}`;
     };
 
-    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail>, alipayQrCode: Express.Multer.File, user: string,) =>  {
-        const { amount, platform, alipayId, alipayName, fromCurrency } = transactionData;
+    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType }>, alipayQrCode: Express.Multer.File, user: string,) =>  {
+        const { amount, platform, alipayId, alipayName, fromCurrency, paymentMethod } = transactionData;
         const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
         if(!bankAccountDetails) {
             throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
@@ -64,19 +64,19 @@ class TransactionService extends DBService<ITransaction> {
             amount,
             fromCurrency,
             currency: "RMB",
-            detailType: DETAIL_TYPE.ALIPAY,
+            detailType: paymentMethod || DETAIL_TYPE.ALIPAY,
             status: TRANSACTION_STATUS.PENDING_INPUT,
             initiatedAt: Date.now(),
         })
 
         const transactionDetails = await this.transactionDetailsService.create({
             transactionId: transaction._id,
-            type: DETAIL_TYPE.ALIPAY,
-            platform,
+            type: paymentMethod || DETAIL_TYPE.ALIPAY,
             alipayId,
             alipayName,
             qrCodeUrl: uploadResult.file?.url!,
             bankAccountDetails: bankAccountDetails.toObject(),
+            ...(paymentMethod === 'alipay' ? { platform: platform } : {}),
         })
         return { ...transaction.toObject(), details: { ...transactionDetails.toObject() } } 
     }
