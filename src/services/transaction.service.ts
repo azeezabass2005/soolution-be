@@ -55,6 +55,7 @@ class TransactionService extends DBService<ITransaction> {
             makePublic: true,
         });
         if(!uploadResult.success) {
+            console.log(uploadResult, "This is the result from the alipay QRCode upload")
             throw errorResponseMessage.unableToComplete("Alipay Qrcode upload failed");
         }
 
@@ -88,6 +89,7 @@ class TransactionService extends DBService<ITransaction> {
             makePublic: true,
         });
         if(!uploadResult.success) {
+            console.log(uploadResult, "This is the result from the payment receipt upload")
             throw errorResponseMessage.unableToComplete("Payment receipt upload failed");
         }
         const transaction = await this.findById(transactionId);
@@ -167,7 +169,7 @@ class TransactionService extends DBService<ITransaction> {
             makePublic: true,
         });
         if(!uploadResult.success) {
-            console.log(uploadResult, "This is the admin payment receipt upload result")
+            console.log(uploadResult, "This is the result from admin payment receipt upload")
             throw errorResponseMessage.unableToComplete("Payment receipt upload failed");
         }
         const transaction = await this.findById(transactionId);
