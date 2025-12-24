@@ -32,8 +32,8 @@ const ZRegister = z.object({
 const ZPostRegister = z.object({
     countryOfOrigin: z.string().min(2, "Country of origin is required"),
     countryOfResidence: z.string().min(2, "Country of residence is required"),
-    purpose: z.enum(['business', 'spending'], {
-        errorMap: () => ({message: "Purpose must either be 'Business' or 'Spending'"})
+    purpose: z.enum(['business', 'personal', 'travel', 'investment', 'savings', 'others' ], {
+        errorMap: () => ({message: "Please select a valid purpose'"})
     }),
     typeOfBusiness: z.enum(['retail', 'industry']).optional(),
     monthlyVolume: z.string().optional(),
