@@ -83,7 +83,7 @@ class EmailService {
         };
 
         this.theme = {
-            primaryColor: '#FF8282',
+            primaryColor: '#9D4DFE',
             darkBackground: '#0A0A0A',
             lightBackground: '#FFFFFF',
             textDark: '#0A0A0A',
