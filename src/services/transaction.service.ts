@@ -11,6 +11,7 @@ import BankAccountDetailsService from "./bank-account-details.service";
 import NotificationService from "../utils/notification.utils";
 import config from "../config/env.config";
 import { StorageService } from "./storage.service";
+import crypto from "crypto"
 
 class TransactionService extends DBService<ITransaction> {
 
