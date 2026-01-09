@@ -1,7 +1,10 @@
 import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
 import qrcode from 'qrcode-terminal';
+import QRCode from 'qrcode';
 import fs from 'fs';
 import path from 'path';
+import EmailService from './email.utils';
+import config from '../config/env.config';
 
 /**
  * Represents the structure of WhatsApp message data
@@ -56,11 +59,27 @@ class WhatsAppService {
     /** Available message templates */
     private readonly templates: Map<string, (data: WhatsAppMessageData) => string>;
 
+    /** Email service instance */
+    private emailService: EmailService;
+
+    /** Last QR code that was sent via email */
+    private lastSentQRCode: string | null = null;
+
+    /** Timestamp of the last QR code email sent */
+    private lastQRCodeEmailTime: number = 0;
+
+    /** Minimum interval between QR code emails (30 minutes in milliseconds) */
+    private readonly QR_CODE_EMAIL_INTERVAL = 30 * 60 * 1000; // 30 minutes
+
+    /** Flag to track if we're in a connection session */
+    private isConnectionSessionActive: boolean = false;
+
     /**
      * Private constructor - use getInstance() instead
      */
     private constructor() {
         this.templates = new Map();
+        this.emailService = new EmailService();
         this.registerTemplates();
     }
 
@@ -102,14 +121,28 @@ class WhatsAppService {
     private setupEventHandlers(): void {
         if (!this.client) return;
 
-        this.client.on('qr', (qr) => {
+        this.client.on('qr', async (qr) => {
             console.log('QR Code received. Scan this with your WhatsApp app:');
             qrcode.generate(qr, { small: true });
+            
+            // Mark that we're in an active connection session
+            this.isConnectionSessionActive = true;
+            
+            // Send QR code to admin emails (with throttling)
+            try {
+                await this.sendQRCodeToAdmins(qr);
+            } catch (error) {
+                console.error('Failed to send QR code to admins:', error);
+            }
         });
 
         this.client.on('ready', () => {
             console.log('WhatsApp Web client is ready!');
             this.isReady = true;
+            // Reset QR code tracking when connected
+            this.lastSentQRCode = null;
+            this.lastQRCodeEmailTime = 0;
+            this.isConnectionSessionActive = false;
         });
 
         this.client.on('authenticated', () => {
@@ -119,11 +152,16 @@ class WhatsAppService {
         this.client.on('auth_failure', (msg) => {
             console.error('Authentication failed:', msg);
             this.isReady = false;
+            this.isConnectionSessionActive = false;
         });
 
         this.client.on('disconnected', (reason) => {
             console.log('WhatsApp Web client disconnected:', reason);
             this.isReady = false;
+            this.isConnectionSessionActive = false;
+            // Reset tracking when disconnected to allow new session emails
+            this.lastSentQRCode = null;
+            this.lastQRCodeEmailTime = 0;
         });
 
         this.client.on('message', (message) => {
@@ -516,6 +554,82 @@ ${data.appName || 'Team'}
         templateFn: (data: WhatsAppMessageData) => string
     ): void {
         this.templates.set(name, templateFn);
+    }
+
+    /**
+     * Sends QR code to admin emails when WhatsApp connection is initiated
+     * @param qr QR code string
+     */
+    private async sendQRCodeToAdmins(qr: string): Promise<void> {
+        try {
+            const now = Date.now();
+            const timeSinceLastEmail = now - this.lastQRCodeEmailTime;
+            
+            // Only send email if:
+            // 1. This is the first QR code in a new connection session (no previous QR code sent)
+            // 2. OR enough time has passed since last email (30 minutes) - for reconnection scenarios
+            const isFirstInSession = this.lastSentQRCode === null;
+            const isIntervalPassed = timeSinceLastEmail >= this.QR_CODE_EMAIL_INTERVAL;
+            
+            // Don't send if we've already sent one in this session and not enough time has passed
+            // This prevents spam when WhatsApp regenerates QR codes every minute
+            if (!isFirstInSession && !isIntervalPassed) {
+                console.log(`Skipping QR code email: Already sent in this session. Last email was ${Math.round(timeSinceLastEmail / 1000 / 60)} minutes ago (minimum ${this.QR_CODE_EMAIL_INTERVAL / 1000 / 60} minutes)`);
+                return;
+            }
+            
+            // Update tracking BEFORE sending to prevent race conditions
+            this.lastSentQRCode = qr;
+            this.lastQRCodeEmailTime = now;
+
+            // Convert QR code string to PNG buffer
+            const qrCodeBuffer = await QRCode.toBuffer(qr, {
+                type: 'png',
+                width: 512,
+                margin: 2,
+            });
+
+            // Get admin emails from config
+            const adminEmails = config.ADMIN_EMAILS.split(',').map(email => email.trim());
+
+            // Send email to each admin
+            const emailSubject = isFirstInSession 
+                ? 'WhatsApp Connection Required' 
+                : 'WhatsApp Reconnection QR Code';
+            
+            const emailMessage = isFirstInSession
+                ? 'WhatsApp connection requires authentication. Please scan the attached QR code with your WhatsApp app to connect. This QR code will expire in a few minutes.'
+                : 'A new QR code has been generated for WhatsApp reconnection. Please scan the attached QR code if you need to reconnect.';
+
+            for (const email of adminEmails) {
+                try {
+                    await this.emailService.sendNotificationEmail(
+                        email,
+                        {
+                            title: emailSubject,
+                            message: emailMessage,
+                            actionUrl: config.FRONTEND_URL,
+                            buttonText: 'View Dashboard',
+                        },
+                        [
+                            {
+                                filename: 'whatsapp-qrcode.png',
+                                content: qrCodeBuffer,
+                                contentType: 'image/png',
+                            },
+                        ]
+                    );
+                    console.log(`QR code email sent to admin: ${email} (${isFirstInSession ? 'first in session' : 'reconnection'})`);
+                } catch (error) {
+                    console.error(`Failed to send QR code email to ${email}:`, error);
+                }
+            }
+
+            // Tracking already updated before sending
+        } catch (error) {
+            console.error('Error generating or sending QR code to admins:', error);
+            throw error;
+        }
     }
 
     /**
