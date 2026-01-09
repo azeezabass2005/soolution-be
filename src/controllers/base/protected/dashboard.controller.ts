@@ -59,6 +59,11 @@ class DashboardController extends BaseController {
 
             const totalAmountCompleted = completedTotals?.[0]?.totalCompletedAmount || 0;
 
+            // count pending transactions (awaiting_confirmation only)
+            const pendingCount = await Transaction.countDocuments({
+                status: TRANSACTION_STATUS.AWAITING_CONFIRMATION
+            });
+
             // recent transactions (latest 10) with basic user info
             const recentTransactions = await Transaction.find({})
                 .sort({ createdAt: -1 })
@@ -71,6 +76,7 @@ class DashboardController extends BaseController {
                 totalTransactions,
                 totalAmountInitiated,
                 totalAmountCompleted,
+                pendingPayments: pendingCount,
                 recentTransactions,
             });
         } catch (error: any) {

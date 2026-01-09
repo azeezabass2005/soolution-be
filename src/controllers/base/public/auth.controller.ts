@@ -10,6 +10,7 @@ import authMiddleware from "../../../middlewares/auth.middleware";
 import {loginValidate, postRegisterValidate, registerValidate} from "../../../validators";
 import {IUser} from "../../../models/interface";
 import config from "../../../config/env.config";
+import NotificationService from "../../../utils/notification.utils";
 
 /**
  * Controller handling authentication-related operations
@@ -19,6 +20,7 @@ import config from "../../../config/env.config";
 class AuthController extends BaseController {
     private tokenBuilder: TokenBuilder;
     private refreshTokenService: RefreshTokenService;
+    private notificationService: NotificationService;
 
     /**
      * Creates an instance of AuthController
@@ -27,6 +29,7 @@ class AuthController extends BaseController {
         super();
         this.tokenBuilder = new TokenBuilder();
         this.refreshTokenService = new RefreshTokenService;
+        this.notificationService = new NotificationService();
         this.setupRoutes();
     }
 
@@ -107,8 +110,21 @@ class AuthController extends BaseController {
             //     username: user.username
             // });
 
-            // TODO: Send verification email
-            // await emailService.sendVerificationEmail(email, verificationToken);
+            // Send welcome email
+            try {
+                await this.notificationService.emailService.sendWelcomeEmail(
+                    user.email,
+                    {
+                        name: `${user.firstName} ${user.lastName}`,
+                        appName: 'Solution Pay',
+                        actionUrl: `${config.FRONTEND_URL}/dashboard/user`,
+                        buttonText: 'Get Started'
+                    }
+                );
+            } catch (error) {
+                console.error('Failed to send welcome email:', error);
+                // Don't fail registration if email fails
+            }
 
             this.sendSuccess(res, {
                 message: "Registration successful. Please verify your email.",
@@ -215,6 +231,28 @@ class AuthController extends BaseController {
                 type: TokenType.REFRESH,
                 expiresIn: '7d'
             });
+
+            // Update last login timestamp
+            await this.userService.updateById(user._id as string, {
+                lastLogin: new Date()
+            });
+
+            // Send login notification email
+            try {
+                await this.notificationService.emailService.sendNotificationEmail(
+                    user.email,
+                    {
+                        title: '🔐 Login Successful',
+                        message: `Hello ${user.firstName}, you have successfully logged into your Solution Pay account. If this wasn't you, please contact support immediately.`,
+                        appName: 'Solution Pay',
+                        actionUrl: `${config.FRONTEND_URL}/dashboard/user`,
+                        buttonText: 'Go to Dashboard'
+                    }
+                );
+            } catch (error) {
+                console.error('Failed to send login notification email:', error);
+                // Don't fail login if email fails
+            }
 
             console.log(accessToken, "This is the access token");
             console.log(refreshToken, "This is the refresh token")

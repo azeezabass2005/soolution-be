@@ -4,7 +4,7 @@ import {Request, Response, NextFunction} from "express";
 import {DetailType, ITransaction, ITransactionDetail} from "../../../models/interface";
 import errorResponseMessage from "../../../common/messages/error-response-message";
 import {validateCreateAlipayTransaction} from "../../../validators/z-transaction";
-import {ROLE_MAP} from "../../../common/constant";
+import {ROLE_MAP, TRANSACTION_STATUS} from "../../../common/constant";
 import RoleMiddleware from "../../../middlewares/role.middleware";
 import {MulterMiddleware} from "../../../middlewares/multer.middleware";
 
@@ -95,11 +95,16 @@ class TransactionController extends BaseController {
 
     private async getAlipayTransactions(req: Request, res: Response, next: NextFunction, isAdmin: boolean) {
         try {
-            const { page, limit, searchTerm, ...otherQueries } = req.query;
+            const { page, limit, searchTerm, status, ...otherQueries } = req.query;
             const user = res.locals.user;
 
             if (!isAdmin) {
                 otherQueries.user = user?.id;
+            }
+
+            // Handle status filter
+            if (status && status !== 'all') {
+                otherQueries.status = status;
             }
 
             let transactions;

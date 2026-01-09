@@ -80,6 +80,27 @@ class TransactionService extends DBService<ITransaction> {
             bankAccountDetails: bankAccountDetails.toObject(),
             ...(paymentMethod === 'alipay' ? { platform: platform } : {}),
         })
+
+        // Send transaction initiated email to user
+        try {
+            const populatedTransaction = await this.findById(transaction._id.toString());
+            const user = populatedTransaction?.user as IUser;
+            if (user) {
+                await this.notificationService.sendTransactionNotification(
+                    user,
+                    'payment_initiated',
+                    {
+                        amount: `${transaction.amount} ${transaction.currency}`,
+                        reference: transaction.reference,
+                        actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
+                    }
+                );
+            }
+        } catch (error) {
+            console.error('Failed to send transaction initiated email:', error);
+            // Don't fail transaction creation if email fails
+        }
+
         return { ...transaction.toObject(), details: { ...transactionDetails.toObject() } } 
     }
 

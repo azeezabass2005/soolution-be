@@ -4,16 +4,20 @@ import VerificationService from "../../../services/verification.service";
 import errorResponseMessage from "../../../common/messages/error-response-message";
 import TransactionService from "../../../services/transaction.service";
 import { TRANSACTION_STATUS } from "../../../common/constant";
+import NotificationService from "../../../utils/notification.utils";
+import config from "../../../config/env.config";
 
 class WebhookController extends BaseController {
 
     verificationService: VerificationService;
     transactionService: TransactionService;
+    notificationService: NotificationService;
 
     constructor () {
         super();
         this.verificationService = new VerificationService();
         this.transactionService = new TransactionService();
+        this.notificationService = new NotificationService();
         this.setupRoutes();
     }
 
@@ -97,6 +101,7 @@ class WebhookController extends BaseController {
             if(isVerified) {
                 await this.userService.updateById(userID, {
                     isVerified: true,
+                    isKYCDone: true
                 })
                 await this.transactionService.updateMany({
                     user: userID,
@@ -104,6 +109,46 @@ class WebhookController extends BaseController {
                 }, {
                     $set: { status: TRANSACTION_STATUS.AWAITING_CONFIRMATION }
                 })
+
+                // Send KYC verification completed email
+                try {
+                    const user = await this.userService.findById(userID);
+                    if (user) {
+                        await this.notificationService.emailService.sendNotificationEmail(
+                            user.email,
+                            {
+                                title: '✅ KYC Verification Completed',
+                                message: `Congratulations ${user.firstName}! Your KYC verification has been successfully completed. You can now enjoy full access to all Solution Pay features.`,
+                                appName: 'Solution Pay',
+                                actionUrl: `${config.FRONTEND_URL}/dashboard/user`,
+                                buttonText: 'Go to Dashboard'
+                            }
+                        );
+                    }
+                } catch (error) {
+                    console.error('Failed to send KYC verification completed email:', error);
+                    // Don't fail webhook processing if email fails
+                }
+            } else {
+                // Send KYC verification failed email
+                try {
+                    const user = await this.userService.findById(userID);
+                    if (user) {
+                        await this.notificationService.emailService.sendNotificationEmail(
+                            user.email,
+                            {
+                                title: '❌ KYC Verification Failed',
+                                message: `Hello ${user.firstName}, your KYC verification was unsuccessful. Reason: ${failureReason}. Please try again or contact support for assistance.`,
+                                appName: 'Solution Pay',
+                                actionUrl: `${config.FRONTEND_URL}/dashboard/user/profile`,
+                                buttonText: 'Try Again'
+                            }
+                        );
+                    }
+                } catch (error) {
+                    console.error('Failed to send KYC verification failed email:', error);
+                    // Don't fail webhook processing if email fails
+                }
             }
 
             // Always respond with 200 to acknowledge receipt
