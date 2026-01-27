@@ -54,12 +54,17 @@ class VerificationController extends BaseController {
 
             const {
                 bvn,
+                ghanaCardNumber,
                 images,
             } = req.body;
 
             // TODO: I will move the two validations below to the zod and use it as middleware here
-            if(!bvn) {
+            if(user?.country === "NG" && !bvn) {
                 return next(errorResponseMessage.payloadIncorrect("bvn"))
+            }
+
+            if(user?.country === "GH" && !ghanaCardNumber) {
+                return next(errorResponseMessage.payloadIncorrect("ghanaCardNumber"))
             }
 
             if(!images || images.length < 1) {
@@ -74,7 +79,13 @@ class VerificationController extends BaseController {
                 user: user._id,
                 status: 'pending',
             })
-            let verificationSubmissionRes: any = await this.smileIdService.verifyBvnWithSelfie(user! as IUser, bvn, images);
+            let verificationSubmissionRes: any;
+            if(user?.country === 'GH') {
+                verificationSubmissionRes = await this.smileIdService.verifyGhanaCardWithSelfie(user! as IUser, ghanaCardNumber, images);
+            } else {
+                verificationSubmissionRes = await this.smileIdService.verifyBvnWithSelfie(user! as IUser, bvn, images);
+            }
+            // verificationSubmissionRes = await this.smileIdService.verifyBvnWithSelfie(user! as IUser, bvn, images);
 
             if(!verificationSubmissionRes?.success) {
                 return next(errorResponseMessage?.unableToComplete("Failed to submit verification data"));
