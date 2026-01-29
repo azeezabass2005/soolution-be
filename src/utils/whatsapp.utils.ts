@@ -65,12 +65,6 @@ class WhatsAppService {
     /** Last QR code that was sent via email */
     private lastSentQRCode: string | null = null;
 
-    /** Timestamp of the last QR code email sent */
-    private lastQRCodeEmailTime: number = 0;
-
-    /** Minimum interval between QR code emails (30 minutes in milliseconds) */
-    private readonly QR_CODE_EMAIL_INTERVAL = 30 * 60 * 1000; // 30 minutes
-
     /** Flag to track if we're in a connection session */
     private isConnectionSessionActive: boolean = false;
 
@@ -141,7 +135,6 @@ class WhatsAppService {
             this.isReady = true;
             // Reset QR code tracking when connected
             this.lastSentQRCode = null;
-            this.lastQRCodeEmailTime = 0;
             this.isConnectionSessionActive = false;
         });
 
@@ -161,7 +154,6 @@ class WhatsAppService {
             this.isConnectionSessionActive = false;
             // Reset tracking when disconnected to allow new session emails
             this.lastSentQRCode = null;
-            this.lastQRCodeEmailTime = 0;
         });
 
         this.client.on('message', (message) => {
@@ -558,29 +550,25 @@ ${data.appName || 'Team'}
 
     /**
      * Sends QR code to admin emails when WhatsApp connection is initiated
+     * Sends email every time a new QR code is generated (when QR code string changes)
+     * This ensures admins always have the latest valid QR code since generating a new one invalidates the previous one
      * @param qr QR code string
      */
     private async sendQRCodeToAdmins(qr: string): Promise<void> {
         try {
-            const now = Date.now();
-            const timeSinceLastEmail = now - this.lastQRCodeEmailTime;
-            
-            // Only send email if:
-            // 1. This is the first QR code in a new connection session (no previous QR code sent)
-            // 2. OR enough time has passed since last email (30 minutes) - for reconnection scenarios
-            const isFirstInSession = this.lastSentQRCode === null;
-            const isIntervalPassed = timeSinceLastEmail >= this.QR_CODE_EMAIL_INTERVAL;
-            
-            // Don't send if we've already sent one in this session and not enough time has passed
-            // This prevents spam when WhatsApp regenerates QR codes every minute
-            if (!isFirstInSession && !isIntervalPassed) {
-                console.log(`Skipping QR code email: Already sent in this session. Last email was ${Math.round(timeSinceLastEmail / 1000 / 60)} minutes ago (minimum ${this.QR_CODE_EMAIL_INTERVAL / 1000 / 60} minutes)`);
+            // Check if this is a new QR code (different from the last one sent)
+            // If it's the same QR code, skip sending to avoid duplicate emails
+            if (this.lastSentQRCode === qr) {
+                console.log('Skipping QR code email: Same QR code as previously sent');
                 return;
             }
             
+            // Determine if this is the first QR code in a new session (before updating)
+            const isFirstInSession = this.lastSentQRCode === null;
+            
+            // This is a new QR code - send it immediately
             // Update tracking BEFORE sending to prevent race conditions
             this.lastSentQRCode = qr;
-            this.lastQRCodeEmailTime = now;
 
             // Convert QR code string to PNG buffer
             const qrCodeBuffer = await QRCode.toBuffer(qr, {
@@ -595,11 +583,11 @@ ${data.appName || 'Team'}
             // Send email to each admin
             const emailSubject = isFirstInSession 
                 ? 'WhatsApp Connection Required' 
-                : 'WhatsApp Reconnection QR Code';
+                : 'New WhatsApp QR Code Generated';
             
             const emailMessage = isFirstInSession
                 ? 'WhatsApp connection requires authentication. Please scan the attached QR code with your WhatsApp app to connect. This QR code will expire in a few minutes.'
-                : 'A new QR code has been generated for WhatsApp reconnection. Please scan the attached QR code if you need to reconnect.';
+                : 'A new QR code has been generated. The previous QR code is now invalid. Please scan this new QR code with your WhatsApp app to connect.';
 
             for (const email of adminEmails) {
                 try {
@@ -619,7 +607,7 @@ ${data.appName || 'Team'}
                             },
                         ]
                     );
-                    console.log(`QR code email sent to admin: ${email} (${isFirstInSession ? 'first in session' : 'reconnection'})`);
+                    console.log(`QR code email sent to admin: ${email} (${isFirstInSession ? 'first in session' : 'new QR code generated'})`);
                 } catch (error) {
                     console.error(`Failed to send QR code email to ${email}:`, error);
                 }
