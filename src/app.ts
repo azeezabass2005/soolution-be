@@ -31,7 +31,8 @@ class App {
         this.notificationService = new NotificationService();
         this.setupMiddlewares();
         this.setupDatabase().then(() => {});
-        this.connectWhatsapp().then(() => {})
+        this.connectWhatsapp().then(() => {});
+        this.verifyEmailService().then(() => {});
         this.setupRoutes();
         this.setupErrorHandling();
 
@@ -105,6 +106,24 @@ class App {
     private async connectWhatsapp(): Promise<void> {
         // await this.notificationService.disconnectWhatsApp();
         await this.notificationService.initializeWhatsApp();
+    }
+
+    /**
+     * Verify email service connection
+     * @private
+     */
+    private async verifyEmailService(): Promise<void> {
+        try {
+            const isVerified = await this.notificationService.emailService.verifyConnection();
+            if (isVerified) {
+                logger.info('Email service verified and ready');
+            }
+        } catch (error) {
+            logger.warn('Email service verification failed', {
+                error: error instanceof Error ? error.message : String(error)
+            });
+            logger.warn('Email functionality may not work properly. Please check your email configuration.');
+        }
     }
 
     /**

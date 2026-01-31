@@ -110,7 +110,7 @@ class AuthController extends BaseController {
             //     username: user.username
             // });
 
-            // Send welcome email
+            // Send welcome email to newly registered user
             try {
                 await this.notificationService.emailService.sendWelcomeEmail(
                     user.email,
@@ -121,9 +121,19 @@ class AuthController extends BaseController {
                         buttonText: 'Get Started'
                     }
                 );
+                this.logger.info('Welcome email sent successfully', {
+                    userId: user._id,
+                    email: user.email,
+                    name: `${user.firstName} ${user.lastName}`
+                });
             } catch (error) {
-                console.error('Failed to send welcome email:', error);
-                // Don't fail registration if email fails
+                this.logger.error('Failed to send welcome email during registration', {
+                    userId: user._id,
+                    email: user.email,
+                    error: error instanceof Error ? error.message : String(error),
+                    stack: error instanceof Error ? error.stack : undefined
+                });
+                // Don't fail registration if email fails - user account is already created
             }
 
             this.sendSuccess(res, {
