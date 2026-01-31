@@ -558,10 +558,10 @@ ${data.appName || 'Team'}
         try {
             // Check if this is a new QR code (different from the last one sent)
             // If it's the same QR code, skip sending to avoid duplicate emails
-            if (this.lastSentQRCode === qr) {
-                console.log('Skipping QR code email: Same QR code as previously sent');
-                return;
-            }
+            // if (this.lastSentQRCode === qr) {
+            //     console.log('Skipping QR code email: Same QR code as previously sent');
+            //     return;
+            // }
             
             // Determine if this is the first QR code in a new session (before updating)
             const isFirstInSession = this.lastSentQRCode === null;
