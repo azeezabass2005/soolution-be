@@ -11,6 +11,7 @@ import BankAccountDetailsService from "./bank-account-details.service";
 import NotificationService from "../utils/notification.utils";
 import config from "../config/env.config";
 import { StorageService } from "./storage.service";
+import logger from "../utils/logger.utils";
 import crypto from "crypto"
 
 class TransactionService extends DBService<ITransaction> {
@@ -90,14 +91,28 @@ class TransactionService extends DBService<ITransaction> {
                     user,
                     'payment_initiated',
                     {
-                        amount: `${transaction.amount} ${transaction.currency}`,
+                        amount: `${transaction.amount} ${transaction.fromCurrency}`,
                         reference: transaction.reference,
+                        recipient: transactionDetails.alipayName || 'Recipient',
                         actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
                     }
                 );
+                logger.info('Transaction initiated email sent successfully', {
+                    transactionId: transaction._id,
+                    userId: user._id,
+                    email: user.email,
+                    reference: transaction.reference,
+                    amount: `${transaction.amount} ${transaction.fromCurrency}`,
+                    currency: transaction.currency
+                });
             }
         } catch (error) {
-            console.error('Failed to send transaction initiated email:', error);
+            logger.error('Failed to send transaction initiated email', {
+                transactionId: transaction._id,
+                reference: transaction.reference,
+                error: error instanceof Error ? error.message : String(error),
+                stack: error instanceof Error ? error.stack : undefined
+            });
             // Don't fail transaction creation if email fails
         }
 
@@ -197,27 +212,48 @@ class TransactionService extends DBService<ITransaction> {
         const transaction = await this.findById(transactionId);
         await this.transactionDetailsService.update({ transactionId }, { payOutReceiptUrl: uploadResult.file?.url });
         await this.updateById(transactionId, { status: TRANSACTION_STATUS.COMPLETED });
-        console.log(transaction, "This is the transaction fetched");
 
-        // Send combined email and WhatsApp notification to user
+        // Send transaction completed email and WhatsApp notification to user
         const user = transaction?.user as IUser;
-        await this.notificationService.sendTransactionNotification(
-            user,
-            'payment_completed',
-            {
-                amount: `${transaction?.amount} ${transaction?.fromCurrency}`,
-                reference: transaction?.reference,
-                recipient: transaction?.details?.alipayName,
-                actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
-            },
-            [
-                {
-                    filename: 'payment_receipt.png',
-                    content: await this.storageService.downloadFile(uploadResult.file?.url!),
-                    contentType: 'image/png'
-                }
-            ]
-        );
+        if (user) {
+            try {
+                await this.notificationService.sendTransactionNotification(
+                    user,
+                    'payment_completed',
+                    {
+                        amount: `${transaction?.amount} ${transaction?.fromCurrency}`,
+                        reference: transaction?.reference,
+                        recipient: transaction?.details?.alipayName || 'Recipient',
+                        actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
+                    },
+                    [
+                        {
+                            filename: 'payment_receipt.png',
+                            content: await this.storageService.downloadFile(uploadResult.file?.url!),
+                            contentType: 'image/png'
+                        }
+                    ]
+                );
+                logger.info('Transaction completed email sent successfully', {
+                    transactionId: transaction?._id,
+                    userId: user._id,
+                    email: user.email,
+                    reference: transaction?.reference,
+                    amount: `${transaction?.amount} ${transaction?.fromCurrency}`,
+                    currency: transaction?.currency
+                });
+            } catch (error) {
+                logger.error('Failed to send transaction completed email', {
+                    transactionId: transaction?._id,
+                    userId: user._id,
+                    email: user.email,
+                    reference: transaction?.reference,
+                    error: error instanceof Error ? error.message : String(error),
+                    stack: error instanceof Error ? error.stack : undefined
+                });
+                // Don't fail transaction completion if email fails
+            }
+        }
     }
 
     public markAlipayTransactionAsCompleted = async (receipt: Express.Multer.File) =>  {

@@ -247,7 +247,7 @@ class AuthController extends BaseController {
                 lastLogin: new Date()
             });
 
-            // Send login notification email
+            // Send login notification email to user
             try {
                 await this.notificationService.emailService.sendNotificationEmail(
                     user.email,
@@ -259,9 +259,22 @@ class AuthController extends BaseController {
                         buttonText: 'Go to Dashboard'
                     }
                 );
+                this.logger.info('Login notification email sent successfully', {
+                    userId: user._id,
+                    email: user.email,
+                    name: `${user.firstName} ${user.lastName}`,
+                    ip: req.ip,
+                    userAgent: req.headers['user-agent']
+                });
             } catch (error) {
-                console.error('Failed to send login notification email:', error);
-                // Don't fail login if email fails
+                this.logger.error('Failed to send login notification email', {
+                    userId: user._id,
+                    email: user.email,
+                    error: error instanceof Error ? error.message : String(error),
+                    stack: error instanceof Error ? error.stack : undefined,
+                    ip: req.ip
+                });
+                // Don't fail login if email fails - authentication is already successful
             }
 
             console.log(accessToken, "This is the access token");
