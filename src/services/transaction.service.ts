@@ -91,7 +91,7 @@ class TransactionService extends DBService<ITransaction> {
                     user,
                     'payment_initiated',
                     {
-                        amount: `${transaction.amount} ${transaction.fromCurrency}`,
+                        amount: `${transaction.amount} ${transaction.currency}`,
                         reference: transaction.reference,
                         recipient: transactionDetails.alipayName || 'Recipient',
                         actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
@@ -221,7 +221,7 @@ class TransactionService extends DBService<ITransaction> {
                     user,
                     'payment_completed',
                     {
-                        amount: `${transaction?.amount} ${transaction?.fromCurrency}`,
+                        amount: `${transaction?.amount} ${transaction?.currency}`,
                         reference: transaction?.reference,
                         recipient: transaction?.details?.alipayName || 'Recipient',
                         actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
