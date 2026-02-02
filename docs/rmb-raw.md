@@ -8,7 +8,7 @@
 - For now the option of the two currencies will be NGN and GHS
 - Once you enter the amount on the calculator and see how much you will receive, you can click proceed.
 - Then you will see a modal that will have a select option for the type of alipay whether it's Nigerian/Chinese Alipay,
-- The modal will also ask for the Alipay ID, the name of the alipay owner and then a field to upload the alipay qrcode to and the amount(in RMB) you want to send to the person, you will also select the currency you want to send from maybe NGN or GHS(under this field you will be seeing the approximate amount you will be sending to use based on whether you choose NGN or GHS),
+- The modal will also ask for the Alipay No, the name of the alipay owner and then a field to upload the alipay qrcode to and the amount(in RMB) you want to send to the person, you will also select the currency you want to send from maybe NGN or GHS(under this field you will be seeing the approximate amount you will be sending to use based on whether you choose NGN or GHS),
 - Inside the same modal screen there will also be a field for the account name, bank name and account number they are sending the money from,
 - Note that the selection from the calculator is just for you to check rate, it's not meant for the modal, that's why it looks like some field are repetitive above
 - Now when the user click Next, [BE: All the information the user entered will be stored in the database]

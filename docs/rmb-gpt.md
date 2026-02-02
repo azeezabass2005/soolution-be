@@ -21,7 +21,7 @@ When proceeding, a modal opens with the following fields:
 
 ### Alipay Details
 - Type of Alipay (Nigerian / Chinese)
-- Alipay ID
+- Alipay No
 - Alipay Owner Name
 - Upload Alipay QR Code
 - Amount (in RMB)

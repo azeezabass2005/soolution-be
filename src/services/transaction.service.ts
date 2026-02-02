@@ -46,7 +46,7 @@ class TransactionService extends DBService<ITransaction> {
     };
 
     public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType }>, alipayQrCode: Express.Multer.File, user: string,) =>  {
-        const { amount, platform, alipayId, alipayName, fromCurrency, paymentMethod } = transactionData;
+        const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod } = transactionData;
         const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
         if(!bankAccountDetails) {
             throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
@@ -75,7 +75,7 @@ class TransactionService extends DBService<ITransaction> {
         const transactionDetails = await this.transactionDetailsService.create({
             transactionId: transaction._id,
             type: paymentMethod || DETAIL_TYPE.ALIPAY,
-            alipayId,
+            alipayNo,
             alipayName,
             qrCodeUrl: uploadResult.file?.url!,
             bankAccountDetails: bankAccountDetails.toObject(),
@@ -139,7 +139,7 @@ class TransactionService extends DBService<ITransaction> {
             config.ADMIN_EMAILS,
             {
                 title: "📱 New RMB Payment",
-                message: `A customer has initiated a new RMB payment and has paid. Check the QR code and payment receipt attached.\n${transaction?.details?.alipayId ? `Alipay Id: ${transaction?.details?.alipayId}\n` : ''}Alipay Name: ${transaction?.details?.alipayName}`,
+                message: `A customer has initiated a new RMB payment and has paid. Check the QR code and payment receipt attached.\n${transaction?.details?.alipayNo ? `Alipay No: ${transaction?.details?.alipayNo}\n` : ''}Alipay Name: ${transaction?.details?.alipayName}`,
                 actionUrl: `${config.FRONTEND_URL}/dashboard/admin/payments`,
                 buttonText: "Go to Dashboard",
             },

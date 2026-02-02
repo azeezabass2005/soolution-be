@@ -164,7 +164,7 @@ export interface ITransactionDetail extends Document {
     type: DetailType;
     // Alipay specific fields
     platform?: AlipayPlatform;
-    alipayId?: string;
+    alipayNo?: string;
     alipayName?: string;
     qrCodeUrl?: string;
     // This is the receipt the admin uploads after the RMB is sent to the alipay the user filled

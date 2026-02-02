@@ -24,17 +24,17 @@ const ZCreateAlipayTransaction = z.object({
         errorMap: () => ({ message: "Invalid payment method" })
     }),
 
-    alipayId: z
+    alipayNo: z
         .string()
         .trim()
-        .max(50, "Alipay ID cannot exceed 50 characters")
+        .max(50, "Alipay No cannot exceed 50 characters")
         .optional(),
 
     alipayName: z
         .string()
         .trim()
-        .min(1, "Alipay Name is required")
-        .max(100, "Alipay Name cannot exceed 100 characters"),
+        .max(100, "Alipay Name cannot exceed 100 characters")
+        .optional(),
 
     // File validation - ensure it’s uploaded
     // alipayQrCode: z

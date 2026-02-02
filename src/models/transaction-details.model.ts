@@ -56,11 +56,11 @@ export const TransactionDetailSchema = new Schema<ITransactionDetail>(
         },
 
         /**
-         * Alipay account ID
+         * Alipay account number
          * @type {string}
          * @optional
          */
-        alipayId: {
+        alipayNo: {
             type: String,
             trim: true,
             maxlength: 50,
@@ -76,9 +76,7 @@ export const TransactionDetailSchema = new Schema<ITransactionDetail>(
             type: String,
             trim: true,
             maxlength: 100,
-            required: function() {
-                return this.type === DETAIL_TYPE.ALIPAY;
-            }
+            required: false
         },
 
         /**
@@ -169,8 +167,8 @@ TransactionDetailSchema.index({ transactionId: 1, type: 1 });
 TransactionDetailSchema.index({ type: 1 });
 
 // Alipay-specific indexes
-TransactionDetailSchema.index({ platform: 1, alipayId: 1 });
-TransactionDetailSchema.index({ alipayId: 1 }, { sparse: true });
+TransactionDetailSchema.index({ platform: 1, alipayNo: 1 });
+TransactionDetailSchema.index({ alipayNo: 1 }, { sparse: true });
 
 // Compound index for efficient type-specific queries
 TransactionDetailSchema.index({ type: 1, platform: 1 }, { sparse: true });
@@ -184,9 +182,10 @@ TransactionDetailSchema.methods.validateRequiredFields = function() {
     if (this.type === DETAIL_TYPE.ALIPAY) {
         const missing = [];
         if (!this.platform) missing.push('platform');
-        // alipayId is now optional
-        // if (!this.alipayId) missing.push('alipayId');
-        if (!this.alipayName) missing.push('alipayName');
+        // alipayNo is now optional
+        // if (!this.alipayNo) missing.push('alipayNo');
+        // alipayName is now optional
+        // if (!this.alipayName) missing.push('alipayName');
 
         if (missing.length > 0) {
             throw new Error(`Missing required Alipay fields: ${missing.join(', ')}`);
@@ -209,7 +208,7 @@ TransactionDetailSchema.methods.validateRequiredFields = function() {
 //         // Clean up fields that don't apply to current type
 //         if (this.type !== DETAIL_TYPE.ALIPAY) {
 //             this.platform = undefined;
-//             this.alipayId = undefined;
+//             this.alipayNo = undefined;
 //             this.alipayName = undefined;
 //             this.qrCodeUrl = undefined;
 //         }
