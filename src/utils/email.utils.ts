@@ -177,7 +177,7 @@ class EmailService {
                     <!-- Header -->
                     <tr>
                         <td style="background-color: ${this.theme.primaryColor}; padding: 16px 24px;">
-                            <h1 style="margin: 0; color: ${this.theme.lightBackground}; font-size: 20px; font-weight: 600; letter-spacing: -0.3px;">Soolution</h1>
+                            <h1 style="margin: 0; color: ${this.theme.lightBackground}; font-size: 20px; font-weight: 600; letter-spacing: -0.3px;">SolutionPay</h1>
                         </td>
                     </tr>
                     
@@ -193,7 +193,7 @@ class EmailService {
                     <tr>
                         <td style="background-color: #FAFAFA; padding: 20px 24px; border-top: 1px solid #E5E5E5;">
                             <p style="margin: 0 0 8px 0; font-size: 12px; color: #666; line-height: 1.5; text-align: center;">
-                                © ${new Date().getFullYear()} Soolution. All rights reserved.
+                                © ${new Date().getFullYear()} SolutionPay. All rights reserved.
                             </p>
                             <p style="margin: 0; font-size: 11px; color: #999; line-height: 1.4; text-align: center;">
                                 Empowering businesses to expand globally
@@ -217,7 +217,7 @@ class EmailService {
     private welcomeTemplate(data: EmailTemplateData): string {
         const content = `
             <h2 style="margin: 0 0 16px 0; font-size: 24px; font-weight: 600; color: ${this.theme.textDark}; letter-spacing: -0.3px;">
-                Welcome to Soolution
+                Welcome to SolutionPay
             </h2>
             <p style="margin: 0 0 16px 0; font-size: 15px; line-height: 1.6; color: #333;">
                 Hi <strong>${data.name || 'there'}</strong>,
@@ -243,7 +243,7 @@ class EmailService {
             </p>
             <p style="margin: 16px 0 0 0; font-size: 14px; line-height: 1.6; color: #333;">
                 Best regards,<br>
-                <strong>The Soolution Team</strong>
+                <strong>The SolutionPay Team</strong>
             </p>
         `;
         return content;
@@ -295,7 +295,7 @@ class EmailService {
             </p>
             <p style="margin: 0; font-size: 14px; line-height: 1.6; color: #333;">
                 Best regards,<br>
-                <strong>The Soolution Team</strong>
+                <strong>The SolutionPay Team</strong>
             </p>
         `;
         return content;
@@ -337,7 +337,7 @@ class EmailService {
             </p>
             <p style="margin: 0; font-size: 14px; line-height: 1.6; color: #333;">
                 Best regards,<br>
-                <strong>The Soolution Team</strong>
+                <strong>The SolutionPay Team</strong>
             </p>
         `;
         return content;
@@ -375,7 +375,7 @@ class EmailService {
             ` : ''}
             <p style="margin: 20px 0 0 0; font-size: 14px; line-height: 1.6; color: #333;">
                 Best regards,<br>
-                <strong>The Soolution Team</strong>
+                <strong>The SolutionPay Team</strong>
             </p>
         `;
         return content;
@@ -470,7 +470,7 @@ class EmailService {
     ): Promise<any> {
         return this.send({
             to,
-            subject: `Welcome to ${data.appName || 'Soolution'}!`,
+            subject: `Welcome to ${data.appName || 'SolutionPay'}!`,
             template: 'welcome',
             data,
             attachments,
