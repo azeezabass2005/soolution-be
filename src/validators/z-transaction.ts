@@ -27,8 +27,8 @@ const ZCreateAlipayTransaction = z.object({
     alipayId: z
         .string()
         .trim()
-        .min(1, "Alipay ID is required")
-        .max(50, "Alipay ID cannot exceed 50 characters"),
+        .max(50, "Alipay ID cannot exceed 50 characters")
+        .optional(),
 
     alipayName: z
         .string()

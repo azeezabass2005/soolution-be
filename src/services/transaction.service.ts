@@ -139,7 +139,7 @@ class TransactionService extends DBService<ITransaction> {
             config.ADMIN_EMAILS,
             {
                 title: "📱 New RMB Payment",
-                message: `A customer has initiated a new RMB payment and has paid. Check the QR code and payment receipt attached.\n Alipay Id: ${transaction?.details?.alipayId} \n Alipay Name: ${transaction?.details?.alipayName}`,
+                message: `A customer has initiated a new RMB payment and has paid. Check the QR code and payment receipt attached.\n${transaction?.details?.alipayId ? `Alipay Id: ${transaction?.details?.alipayId}\n` : ''}Alipay Name: ${transaction?.details?.alipayName}`,
                 actionUrl: `${config.FRONTEND_URL}/dashboard/admin/payments`,
                 buttonText: "Go to Dashboard",
             },

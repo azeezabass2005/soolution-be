@@ -64,9 +64,7 @@ export const TransactionDetailSchema = new Schema<ITransactionDetail>(
             type: String,
             trim: true,
             maxlength: 50,
-            required: function() {
-                return this.type === DETAIL_TYPE.ALIPAY;
-            }
+            required: false
         },
 
         /**
@@ -186,7 +184,8 @@ TransactionDetailSchema.methods.validateRequiredFields = function() {
     if (this.type === DETAIL_TYPE.ALIPAY) {
         const missing = [];
         if (!this.platform) missing.push('platform');
-        if (!this.alipayId) missing.push('alipayId');
+        // alipayId is now optional
+        // if (!this.alipayId) missing.push('alipayId');
         if (!this.alipayName) missing.push('alipayName');
 
         if (missing.length > 0) {
