@@ -41,7 +41,8 @@ class WebhookController extends BaseController {
             
             if (!signature || !timestamp) {
                 console.error("❌ [SECURITY] Missing signature or timestamp in webhook payload");
-                return res.status(400).json({ error: "Invalid webhook payload - missing signature or timestamp" });
+                res.status(400).json({ error: "Invalid webhook payload - missing signature or timestamp" });
+                return;
             }
             
             const isValidSignature = this.smileIdService.verifySignature(signature, timestamp);
@@ -49,7 +50,8 @@ class WebhookController extends BaseController {
                 console.error("❌ [SECURITY] Invalid webhook signature - potential security threat");
                 console.error("   Signature:", signature);
                 console.error("   Timestamp:", timestamp);
-                return res.status(401).json({ error: "Invalid webhook signature" });
+                res.status(401).json({ error: "Invalid webhook signature" });
+                return;
             }
             
             console.log("✅ [SECURITY] Webhook signature verified successfully");
@@ -88,7 +90,8 @@ class WebhookController extends BaseController {
             // For intermediate success codes (like 1012), just acknowledge and wait for final result
             if (isIntermediateSuccessCode) {
                 console.log("⚠️ [INFO] Intermediate result (1012) received, waiting for final result");
-                return res.status(200).json({ received: true, message: "Intermediate result, waiting for final result" });
+                res.status(200).json({ received: true, message: "Intermediate result, waiting for final result" });
+                return;
             }
             
             // Determine overall verification status
@@ -140,7 +143,8 @@ class WebhookController extends BaseController {
 
             if (!userID) {
                 console.error("❌ [ERROR] Missing user_id in webhook PartnerParams");
-                return res.status(400).json({ error: "Missing user_id in webhook payload" });
+                res.status(400).json({ error: "Missing user_id in webhook payload" });
+                return;
             }
 
             console.log({ user: userID, status: 'pending' }, "This is the query used for finding");
@@ -172,14 +176,16 @@ class WebhookController extends BaseController {
             if(!pendingVerification) {
                 console.error(`❌ [ERROR] No pending verification found for user: ${userID}`);
                 // Return 200 to prevent retries, but log the error
-                return res.status(200).json({ received: true, error: "No pending verification found" });
+                res.status(200).json({ received: true, error: "No pending verification found" });
+                return;
             }
             
             // Only process final results or actual failures
             // Intermediate results should have been handled earlier
             if (!isThisFinalResult && !isFailedCode) {
                 console.log("⚠️ [INFO] Skipping update - not a final result and not a failure");
-                return res.status(200).json({ received: true, message: "Intermediate result, waiting for final result" });
+                res.status(200).json({ received: true, message: "Intermediate result, waiting for final result" });
+                return;
             }
             
             const updatedVerification = await this.verificationService.updateById(pendingVerification?.id!.toString(), {
