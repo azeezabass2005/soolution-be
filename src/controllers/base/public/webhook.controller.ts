@@ -6,18 +6,24 @@ import TransactionService from "../../../services/transaction.service";
 import { TRANSACTION_STATUS } from "../../../common/constant";
 import NotificationService from "../../../utils/notification.utils";
 import config from "../../../config/env.config";
+import UserService from "../../../services/user.service";
+import SmileId from "../../../services/smile-id.service";
 
 class WebhookController extends BaseController {
 
     verificationService: VerificationService;
     transactionService: TransactionService;
     notificationService: NotificationService;
+    userService: UserService;
+    smileIdService: SmileId;
 
     constructor () {
         super();
         this.verificationService = new VerificationService();
         this.transactionService = new TransactionService();
         this.notificationService = new NotificationService();
+        this.userService = new UserService();
+        this.smileIdService = new SmileId();
         this.setupRoutes();
     }
 
@@ -29,30 +35,84 @@ class WebhookController extends BaseController {
         try {
             const webhookData = req.body;
             
-            // Extract key verification details
-            const resultCode = webhookData.ResultCode; // "0911"
-            const resultText = webhookData.ResultText; // "Failed Enroll - images unusable"
-            const confidenceValue = webhookData.ConfidenceValue; // "0"
-            const smileJobID = webhookData.SmileJobID; // "1000000018"
+            // SECURITY: Verify webhook signature to ensure it's from Smile ID
+            const signature = webhookData.signature;
+            const timestamp = webhookData.timestamp;
             
-            // Get detailed actions to understand what failed
-            const actions = webhookData.Actions;
-            const selfieCheckStatus = actions.Selfie_Check; // "Failed"
-            const registerSelfieStatus = actions.Register_Selfie; // "Rejected"
-            const idVerificationStatus = actions.Verify_ID_Number; // "Verified"
-            const personalInfoStatus = actions.Return_Personal_Info; // "Not Returned"
+            if (!signature || !timestamp) {
+                console.error("❌ [SECURITY] Missing signature or timestamp in webhook payload");
+                return res.status(400).json({ error: "Invalid webhook payload - missing signature or timestamp" });
+            }
+            
+            const isValidSignature = this.smileIdService.verifySignature(signature, timestamp);
+            if (!isValidSignature) {
+                console.error("❌ [SECURITY] Invalid webhook signature - potential security threat");
+                console.error("   Signature:", signature);
+                console.error("   Timestamp:", timestamp);
+                return res.status(401).json({ error: "Invalid webhook signature" });
+            }
+            
+            console.log("✅ [SECURITY] Webhook signature verified successfully");
+            
+            // Extract key verification details with safe access
+            const resultCode = webhookData.ResultCode;
+            const resultText = webhookData.ResultText;
+            const confidenceValue = webhookData.ConfidenceValue;
+            const smileJobID = webhookData.SmileJobID;
+            const isFinalResult = webhookData.IsFinalResult === true || webhookData.IsFinalResult === "true";
+            
+            // Get detailed actions to understand what failed (with safe access)
+            const actions = webhookData.Actions || {};
+            const selfieCheckStatus = actions.Selfie_Check || "Unknown";
+            const registerSelfieStatus = actions.Register_Selfie || "Unknown";
+            const idVerificationStatus = actions.Verify_ID_Number || "Unknown";
+            const personalInfoStatus = actions.Return_Personal_Info || "Unknown";
+            
+            // Smile ID result codes:
+            // 0000: Complete verification success (final)
+            // 0810: Enroll User (successful enrollment with all checks passed - final result)
+            // 1012: ID Number Validated (ID verification successful - intermediate result, wait for final)
+            const finalSuccessCodes = ["0000", "0810"];
+            const intermediateSuccessCodes = ["1012"];
+            const isFinalSuccessCode = finalSuccessCodes.includes(resultCode);
+            const isIntermediateSuccessCode = intermediateSuccessCodes.includes(resultCode);
+            const isFailedCode = resultCode.startsWith("09"); // Failure codes start with 09
+            
+            // Determine if this is a final result
+            // 0810 and 0000 are always final, 1012 is always intermediate (regardless of IsFinalResult flag)
+            // For other codes, use the IsFinalResult flag
+            const isThisFinalResult = isIntermediateSuccessCode 
+                ? false  // 1012 is always intermediate
+                : (isFinalResult || isFinalSuccessCode || isFailedCode);
+            
+            // For intermediate success codes (like 1012), just acknowledge and wait for final result
+            if (isIntermediateSuccessCode) {
+                console.log("⚠️ [INFO] Intermediate result (1012) received, waiting for final result");
+                return res.status(200).json({ received: true, message: "Intermediate result, waiting for final result" });
+            }
             
             // Determine overall verification status
-            const isVerified =
-                process.env.FORCE_VERIFY === "true"
-                    ? true
-                    : resultCode === "0000";
-            const isFailed = resultCode.startsWith("09"); // Failure codes start with 09
+            // Only mark as verified if:
+            // 1. FORCE_VERIFY is enabled, OR
+            // 2. It's a final success code AND critical actions passed
+            let isVerified = false;
+            if (process.env.FORCE_VERIFY === "true") {
+                isVerified = true;
+            } else if (isFinalSuccessCode && isThisFinalResult) {
+                // For final results, check that critical actions passed
+                const criticalActionsPassed = 
+                    (idVerificationStatus === "Verified" || idVerificationStatus === "Passed") &&
+                    (selfieCheckStatus === "Passed" || selfieCheckStatus === "Verified") &&
+                    (registerSelfieStatus === "Passed" || registerSelfieStatus === "Verified");
+                
+                isVerified = criticalActionsPassed;
+            }
             
             console.log("=== Smile ID Verification Result ===");
             console.log(`Status: ${isVerified ? 'VERIFIED' : 'FAILED'}`);
             console.log(`Result Code: ${resultCode}`);
             console.log(`Result Text: ${resultText}`);
+            console.log(`Is Final Result: ${isThisFinalResult}`);
             console.log(`Confidence: ${confidenceValue}`);
             console.log(`Job ID: ${smileJobID}`);
             console.log("\n=== Detailed Actions ===");
@@ -61,9 +121,11 @@ class WebhookController extends BaseController {
             console.log(`Register Selfie: ${registerSelfieStatus}`);
             console.log(`Personal Info: ${personalInfoStatus}`);
             
-            // Get the reason for failure
-            const failureReason = actions?.Selfie_Check?.ResultText || this.getFailureReason(resultCode, actions);
-;
+            // Get the reason for failure (with safe access)
+            const failureReason = (actions?.Selfie_Check && typeof actions.Selfie_Check === 'object' && actions.Selfie_Check.ResultText) 
+                ? actions.Selfie_Check.ResultText 
+                : this.getFailureReason(resultCode, actions);
+            
             console.log(`\nFailure Reason: ${failureReason}`);
             
             // Access image links if needed
@@ -76,15 +138,48 @@ class WebhookController extends BaseController {
             const userID = webhookData.PartnerParams?.user_id;
             const jobID = webhookData.PartnerParams?.job_id;
 
+            if (!userID) {
+                console.error("❌ [ERROR] Missing user_id in webhook PartnerParams");
+                return res.status(400).json({ error: "Missing user_id in webhook payload" });
+            }
+
             console.log({ user: userID, status: 'pending' }, "This is the query used for finding");
             
-            // TODO: Update your database with the verification result
-            const pendingVerification = await this.verificationService.findOne({ user: userID, status: 'pending' });
+            // Find the pending verification record (or recently failed if this is a retry with success)
+            let pendingVerification = await this.verificationService.findOne({ user: userID, status: 'pending' });
+            
+            // If no pending verification found and this is a successful final result,
+            // check for recently failed verification that might need to be updated
+            // This handles the case where an intermediate result (1012) was incorrectly marked as failed
+            if (!pendingVerification && isVerified && isThisFinalResult) {
+                console.log("⚠️ [INFO] No pending verification found, checking for failed verification to update");
+                // Look for failed verifications with reason containing these success codes
+                const failedVerification = await this.verificationService.findOne({ 
+                    user: userID, 
+                    status: 'failed'
+                });
+                
+                // Check if the failure reason contains success codes (indicating it was incorrectly marked as failed)
+                if (failedVerification && failedVerification.reason && 
+                    (failedVerification.reason.includes("1012") || failedVerification.reason.includes("0810"))) {
+                    console.log("✅ [INFO] Found failed verification that should be updated to passed");
+                    pendingVerification = failedVerification;
+                }
+            }
             
             console.log(pendingVerification, "This is the pendingVerification gotten after findOne called");
 
             if(!pendingVerification) {
-                throw errorResponseMessage.resourceNotFound('Pending verification');
+                console.error(`❌ [ERROR] No pending verification found for user: ${userID}`);
+                // Return 200 to prevent retries, but log the error
+                return res.status(200).json({ received: true, error: "No pending verification found" });
+            }
+            
+            // Only process final results or actual failures
+            // Intermediate results should have been handled earlier
+            if (!isThisFinalResult && !isFailedCode) {
+                console.log("⚠️ [INFO] Skipping update - not a final result and not a failure");
+                return res.status(200).json({ received: true, message: "Intermediate result, waiting for final result" });
             }
             
             const updatedVerification = await this.verificationService.updateById(pendingVerification?.id!.toString(), {
@@ -165,6 +260,8 @@ class WebhookController extends BaseController {
         // Map result codes to user-friendly reasons
         const reasonMap: Record<string, string> = {
             "0000": "Verification successful",
+            "0810": "Enroll User - Verification successful",
+            "1012": "ID Number Validated - Verification successful",
             "0911": "Images unusable - Anti-spoof check failed or poor image quality",
             "0812": "ID number not found in database",
             "0813": "ID information mismatch",
@@ -172,6 +269,11 @@ class WebhookController extends BaseController {
             "0815": "Multiple identities detected",
             "0816": "ID number validation failed",
         };
+        
+        // Safety check for actions
+        if (!actions || typeof actions !== 'object') {
+            return reasonMap[resultCode] || `Verification failed with code: ${resultCode}`;
+        }
         
         // Check specific action failures
         if (actions.Selfie_Check === "Failed") {

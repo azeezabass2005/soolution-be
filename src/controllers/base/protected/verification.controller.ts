@@ -34,7 +34,7 @@ class VerificationController extends BaseController {
     private async getVerificationToken(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const user = res.locals.user;
-            const result = this.smileIdService.getWebToken(user);
+            const result = await this.smileIdService.getWebToken(user);
             return this.sendSuccess(res,  {
                 message: "Verification token created successfully",
                 result
