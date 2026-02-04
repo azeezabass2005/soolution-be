@@ -230,6 +230,7 @@ class SmileId {
             // Extract error message safely
             let errorMessage = 'Failed to submit verification to Smile ID';
             let responseData: any = null;
+            let isAlreadyEnrolled = false;
             
             if (error?.response?.data) {
                 try {
@@ -237,6 +238,11 @@ class SmileId {
                     if (typeof data === 'string') {
                         errorMessage = data;
                         responseData = data;
+                        // Check if it's an "already enrolled" error
+                        if (data.toLowerCase().includes('already enrolled') || 
+                            data.toLowerCase().includes('wrong job type')) {
+                            isAlreadyEnrolled = true;
+                        }
                     } else if (data && typeof data === 'object') {
                         errorMessage = data.message || data.error || data.detail || data.code || errorMessage;
                         responseData = {
@@ -245,23 +251,42 @@ class SmileId {
                             code: data.code,
                             detail: data.detail
                         };
+                        // Check if it's an "already enrolled" error
+                        const errorStr = JSON.stringify(data).toLowerCase();
+                        if (errorStr.includes('already enrolled') || 
+                            errorStr.includes('wrong job type')) {
+                            isAlreadyEnrolled = true;
+                        }
                     }
                 } catch (e) {
                     // If we can't extract, use the error message
                     errorMessage = error?.message || errorMessage;
+                    if (errorMessage.toLowerCase().includes('already enrolled') || 
+                        errorMessage.toLowerCase().includes('wrong job type')) {
+                        isAlreadyEnrolled = true;
+                    }
                 }
             } else if (error?.message && !error.message.includes('circular')) {
                 errorMessage = error.message;
+                if (errorMessage.toLowerCase().includes('already enrolled') || 
+                    errorMessage.toLowerCase().includes('wrong job type')) {
+                    isAlreadyEnrolled = true;
+                }
             }
             
             // Add status code context
             if (error?.response?.status === 400) {
-                errorMessage = `Smile ID rejected the request (400): ${errorMessage}`;
+                if (isAlreadyEnrolled) {
+                    errorMessage = `This BVN has already been enrolled with Smile ID. For testing, please use a different BVN or contact Smile ID support to reset the enrollment. Original error: ${errorMessage}`;
+                } else {
+                    errorMessage = `Smile ID rejected the request (400): ${errorMessage}`;
+                }
             }
             
             const cleanError = new Error(errorMessage);
             (cleanError as any).statusCode = error?.response?.status;
             (cleanError as any).responseData = responseData;
+            (cleanError as any).isAlreadyEnrolled = isAlreadyEnrolled;
             
             // Re-throw error to be handled by caller
             throw cleanError;
@@ -504,6 +529,7 @@ class SmileId {
             // Extract error message safely
             let errorMessage = 'Failed to submit verification to Smile ID';
             let responseData: any = null;
+            let isAlreadyEnrolled = false;
             
             if (error?.response?.data) {
                 try {
@@ -511,6 +537,11 @@ class SmileId {
                     if (typeof data === 'string') {
                         errorMessage = data;
                         responseData = data;
+                        // Check if it's an "already enrolled" error
+                        if (data.toLowerCase().includes('already enrolled') || 
+                            data.toLowerCase().includes('wrong job type')) {
+                            isAlreadyEnrolled = true;
+                        }
                     } else if (data && typeof data === 'object') {
                         errorMessage = data.message || data.error || data.detail || data.code || errorMessage;
                         responseData = {
@@ -519,23 +550,42 @@ class SmileId {
                             code: data.code,
                             detail: data.detail
                         };
+                        // Check if it's an "already enrolled" error
+                        const errorStr = JSON.stringify(data).toLowerCase();
+                        if (errorStr.includes('already enrolled') || 
+                            errorStr.includes('wrong job type')) {
+                            isAlreadyEnrolled = true;
+                        }
                     }
                 } catch (e) {
                     // If we can't extract, use the error message
                     errorMessage = error?.message || errorMessage;
+                    if (errorMessage.toLowerCase().includes('already enrolled') || 
+                        errorMessage.toLowerCase().includes('wrong job type')) {
+                        isAlreadyEnrolled = true;
+                    }
                 }
             } else if (error?.message && !error.message.includes('circular')) {
                 errorMessage = error.message;
+                if (errorMessage.toLowerCase().includes('already enrolled') || 
+                    errorMessage.toLowerCase().includes('wrong job type')) {
+                    isAlreadyEnrolled = true;
+                }
             }
             
             // Add status code context
             if (error?.response?.status === 400) {
-                errorMessage = `Smile ID rejected the request (400): ${errorMessage}`;
+                if (isAlreadyEnrolled) {
+                    errorMessage = `This BVN has already been enrolled with Smile ID. For testing, please use a different BVN or contact Smile ID support to reset the enrollment. Original error: ${errorMessage}`;
+                } else {
+                    errorMessage = `Smile ID rejected the request (400): ${errorMessage}`;
+                }
             }
             
             const cleanError = new Error(errorMessage);
             (cleanError as any).statusCode = error?.response?.status;
             (cleanError as any).responseData = responseData;
+            (cleanError as any).isAlreadyEnrolled = isAlreadyEnrolled;
             
             // Re-throw error to be handled by caller
             throw cleanError;

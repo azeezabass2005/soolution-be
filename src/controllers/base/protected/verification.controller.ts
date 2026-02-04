@@ -175,6 +175,7 @@ class VerificationController extends BaseController {
 
                 // Extract a user-friendly error message
                 let errorMessage = 'Failed to submit verification data to Smile ID';
+                const isAlreadyEnrolled = error?.isAlreadyEnrolled || false;
                 
                 if (error?.responseData) {
                     // Try to extract message from response data
@@ -190,10 +191,16 @@ class VerificationController extends BaseController {
                     errorMessage = error.message;
                 }
                 
+                // Check if error message indicates already enrolled
+                const errorStr = errorMessage.toLowerCase();
+                if (errorStr.includes('already enrolled') || errorStr.includes('wrong job type')) {
+                    errorMessage = 'This BVN has already been verified with Smile ID. For testing purposes, please use a different BVN or contact support for assistance.';
+                }
+                
                 // Add status code context if available
                 if (error?.statusCode || error?.response?.status) {
                     const statusCode = error?.statusCode || error?.response?.status;
-                    if (statusCode === 400) {
+                    if (statusCode === 400 && !isAlreadyEnrolled) {
                         errorMessage = `Invalid request to Smile ID: ${errorMessage}`;
                     } else if (statusCode === 401) {
                         errorMessage = `Authentication failed with Smile ID: ${errorMessage}`;
