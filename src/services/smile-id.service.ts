@@ -3,6 +3,26 @@ import config from "../config/env.config";
 import { IUser } from "../models/interface";
 import { randomUUID } from "crypto"
 
+/**
+ * Safely stringify an object, handling circular references
+ */
+const safeStringify = (obj: any, space?: number): string => {
+    const seen = new WeakSet();
+    return JSON.stringify(obj, (key, value) => {
+        if (typeof value === 'object' && value !== null) {
+            if (seen.has(value)) {
+                return '[Circular]';
+            }
+            seen.add(value);
+        }
+        // Exclude functions and undefined
+        if (typeof value === 'function' || value === undefined) {
+            return '[Function]';
+        }
+        return value;
+    }, space);
+};
+
 class SmileId {
     connection;
     signatureConnection;
@@ -153,22 +173,98 @@ class SmileId {
             console.error("❌ [ERROR] Error Message:", error?.message || 'No error message');
             console.error("❌ [ERROR] Error Stack:", error?.stack || 'No stack trace');
 
+            // Safely log error response without circular references
             if (error?.response) {
-                console.error("❌ [ERROR] API Error Response:");
-                console.error(JSON.stringify(error.response, null, 2));
+                console.error("❌ [ERROR] API Error Response Status:", error.response.status);
+                console.error("❌ [ERROR] API Error Response Status Text:", error.response.statusText);
+                if (error.response.data) {
+                    try {
+                        const dataStr = safeStringify(error.response.data, 2);
+                        console.error("❌ [ERROR] API Error Response Data:", dataStr);
+                    } catch (e) {
+                        // If even safe stringify fails, try to extract just the message
+                        const data = error.response.data;
+                        if (typeof data === 'string') {
+                            console.error("❌ [ERROR] API Error Response Data (string):", data);
+                        } else if (data && typeof data === 'object') {
+                            console.error("❌ [ERROR] API Error Response Data (object):", {
+                                message: data.message,
+                                error: data.error,
+                                code: data.code,
+                                detail: data.detail
+                            });
+                        } else {
+                            console.error("❌ [ERROR] API Error Response Data (raw):", String(data));
+                        }
+                    }
+                }
+                if (error.response.headers) {
+                    try {
+                        const headersStr = safeStringify(error.response.headers, 2);
+                        console.error("❌ [ERROR] API Error Response Headers:", headersStr);
+                    } catch (e) {
+                        console.error("❌ [ERROR] API Error Response Headers (could not stringify)");
+                    }
+                }
             }
 
+            // Log request details safely
             if (error?.request) {
-                console.error("❌ [ERROR] Request Details:");
-                console.error(JSON.stringify(error.request, null, 2));
+                console.error("❌ [ERROR] Request made but no response received");
+                console.error("❌ [ERROR] Request Path:", error.request.path || 'N/A');
+                console.error("❌ [ERROR] Request Method:", error.request.method || 'N/A');
+            }
+
+            // Extract and log config if available
+            if (error?.config) {
+                console.error("❌ [ERROR] Request Config:");
+                console.error("  - URL:", error.config.url || 'N/A');
+                console.error("  - Method:", error.config.method || 'N/A');
+                console.error("  - Base URL:", error.config.baseURL || 'N/A');
             }
 
             console.error("\n==========================================");
             console.error("❌ VERIFY BVN WITH SELFIE - FAILED");
             console.error("==========================================\n");
 
+            // Extract error message safely
+            let errorMessage = 'Failed to submit verification to Smile ID';
+            let responseData: any = null;
+            
+            if (error?.response?.data) {
+                try {
+                    const data = error.response.data;
+                    if (typeof data === 'string') {
+                        errorMessage = data;
+                        responseData = data;
+                    } else if (data && typeof data === 'object') {
+                        errorMessage = data.message || data.error || data.detail || data.code || errorMessage;
+                        responseData = {
+                            message: data.message,
+                            error: data.error,
+                            code: data.code,
+                            detail: data.detail
+                        };
+                    }
+                } catch (e) {
+                    // If we can't extract, use the error message
+                    errorMessage = error?.message || errorMessage;
+                }
+            } else if (error?.message && !error.message.includes('circular')) {
+                errorMessage = error.message;
+            }
+            
+            // Add status code context
+            if (error?.response?.status === 400) {
+                errorMessage = `Smile ID rejected the request (400): ${errorMessage}`;
+            }
+            
+            const cleanError = new Error(errorMessage);
+            (cleanError as any).statusCode = error?.response?.status;
+            (cleanError as any).responseData = responseData;
+            
             // Re-throw error to be handled by caller
-            throw error;
+            throw cleanError;
         }
     }
 
@@ -351,22 +447,98 @@ class SmileId {
             console.error("❌ [ERROR] Error Message:", error?.message || 'No error message');
             console.error("❌ [ERROR] Error Stack:", error?.stack || 'No stack trace');
 
+            // Safely log error response without circular references
             if (error?.response) {
-                console.error("❌ [ERROR] API Error Response:");
-                console.error(JSON.stringify(error.response, null, 2));
+                console.error("❌ [ERROR] API Error Response Status:", error.response.status);
+                console.error("❌ [ERROR] API Error Response Status Text:", error.response.statusText);
+                if (error.response.data) {
+                    try {
+                        const dataStr = safeStringify(error.response.data, 2);
+                        console.error("❌ [ERROR] API Error Response Data:", dataStr);
+                    } catch (e) {
+                        // If even safe stringify fails, try to extract just the message
+                        const data = error.response.data;
+                        if (typeof data === 'string') {
+                            console.error("❌ [ERROR] API Error Response Data (string):", data);
+                        } else if (data && typeof data === 'object') {
+                            console.error("❌ [ERROR] API Error Response Data (object):", {
+                                message: data.message,
+                                error: data.error,
+                                code: data.code,
+                                detail: data.detail
+                            });
+                        } else {
+                            console.error("❌ [ERROR] API Error Response Data (raw):", String(data));
+                        }
+                    }
+                }
+                if (error.response.headers) {
+                    try {
+                        const headersStr = safeStringify(error.response.headers, 2);
+                        console.error("❌ [ERROR] API Error Response Headers:", headersStr);
+                    } catch (e) {
+                        console.error("❌ [ERROR] API Error Response Headers (could not stringify)");
+                    }
+                }
             }
 
+            // Log request details safely
             if (error?.request) {
-                console.error("❌ [ERROR] Request Details:");
-                console.error(JSON.stringify(error.request, null, 2));
+                console.error("❌ [ERROR] Request made but no response received");
+                console.error("❌ [ERROR] Request Path:", error.request.path || 'N/A');
+                console.error("❌ [ERROR] Request Method:", error.request.method || 'N/A');
+            }
+
+            // Extract and log config if available
+            if (error?.config) {
+                console.error("❌ [ERROR] Request Config:");
+                console.error("  - URL:", error.config.url || 'N/A');
+                console.error("  - Method:", error.config.method || 'N/A');
+                console.error("  - Base URL:", error.config.baseURL || 'N/A');
             }
 
             console.error("\n==========================================");
             console.error("❌ VERIFY GHANA CARD WITH SELFIE - FAILED");
             console.error("==========================================\n");
 
+            // Extract error message safely
+            let errorMessage = 'Failed to submit verification to Smile ID';
+            let responseData: any = null;
+            
+            if (error?.response?.data) {
+                try {
+                    const data = error.response.data;
+                    if (typeof data === 'string') {
+                        errorMessage = data;
+                        responseData = data;
+                    } else if (data && typeof data === 'object') {
+                        errorMessage = data.message || data.error || data.detail || data.code || errorMessage;
+                        responseData = {
+                            message: data.message,
+                            error: data.error,
+                            code: data.code,
+                            detail: data.detail
+                        };
+                    }
+                } catch (e) {
+                    // If we can't extract, use the error message
+                    errorMessage = error?.message || errorMessage;
+                }
+            } else if (error?.message && !error.message.includes('circular')) {
+                errorMessage = error.message;
+            }
+            
+            // Add status code context
+            if (error?.response?.status === 400) {
+                errorMessage = `Smile ID rejected the request (400): ${errorMessage}`;
+            }
+            
+            const cleanError = new Error(errorMessage);
+            (cleanError as any).statusCode = error?.response?.status;
+            (cleanError as any).responseData = responseData;
+            
             // Re-throw error to be handled by caller
-            throw error;
+            throw cleanError;
         }
     }
 

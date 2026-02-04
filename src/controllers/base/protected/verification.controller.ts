@@ -139,13 +139,33 @@ class VerificationController extends BaseController {
                     verificationSubmissionRes = await this.smileIdService.verifyBvnWithSelfie(user! as IUser, bvn, images);
                 }
             } catch (error: any) {
-                console.error('❌ [ERROR] Smile ID API call failed:', error);
-                console.error('❌ [ERROR] Error details:', {
-                    message: error?.message,
-                    response: error?.response?.data,
-                    status: error?.response?.status,
-                    statusText: error?.response?.statusText
-                });
+                console.error('❌ [ERROR] Smile ID API call failed');
+                console.error('❌ [ERROR] Error Message:', error?.message || 'Unknown error');
+                console.error('❌ [ERROR] Error Status Code:', error?.statusCode || error?.response?.status || 'N/A');
+                
+                // Safely extract error response data
+                let errorResponseData = null;
+                if (error?.responseData) {
+                    try {
+                        errorResponseData = typeof error.responseData === 'string' 
+                            ? error.responseData 
+                            : JSON.stringify(error.responseData);
+                    } catch (e) {
+                        errorResponseData = String(error.responseData);
+                    }
+                } else if (error?.response?.data) {
+                    try {
+                        errorResponseData = typeof error.response.data === 'string' 
+                            ? error.response.data 
+                            : JSON.stringify(error.response.data);
+                    } catch (e) {
+                        errorResponseData = String(error.response.data);
+                    }
+                }
+                
+                if (errorResponseData) {
+                    console.error('❌ [ERROR] Smile ID API Error Response:', errorResponseData);
+                }
                 
                 // Clean up the pending verification since submission failed
                 await this.verificationService.updateById(verification.id, {
@@ -153,8 +173,37 @@ class VerificationController extends BaseController {
                     reason: error?.message || 'Failed to submit verification to Smile ID'
                 });
 
-                // Return a more descriptive error
-                const errorMessage = error?.response?.data?.message || error?.message || 'Failed to submit verification data to Smile ID';
+                // Extract a user-friendly error message
+                let errorMessage = 'Failed to submit verification data to Smile ID';
+                
+                if (error?.responseData) {
+                    // Try to extract message from response data
+                    if (typeof error.responseData === 'object') {
+                        errorMessage = error.responseData.message 
+                            || error.responseData.error 
+                            || error.responseData.detail 
+                            || errorMessage;
+                    } else if (typeof error.responseData === 'string') {
+                        errorMessage = error.responseData;
+                    }
+                } else if (error?.message && !error.message.includes('circular')) {
+                    errorMessage = error.message;
+                }
+                
+                // Add status code context if available
+                if (error?.statusCode || error?.response?.status) {
+                    const statusCode = error?.statusCode || error?.response?.status;
+                    if (statusCode === 400) {
+                        errorMessage = `Invalid request to Smile ID: ${errorMessage}`;
+                    } else if (statusCode === 401) {
+                        errorMessage = `Authentication failed with Smile ID: ${errorMessage}`;
+                    } else if (statusCode === 403) {
+                        errorMessage = `Access denied by Smile ID: ${errorMessage}`;
+                    } else if (statusCode >= 500) {
+                        errorMessage = `Smile ID service error: ${errorMessage}`;
+                    }
+                }
+                
                 return next(errorResponseMessage.unableToComplete(errorMessage));
             }
 

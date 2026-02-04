@@ -52,13 +52,41 @@ class ResponseErrorHandler {
         }
 
         // Log the error with request context
+        // Extract error details safely to avoid circular references
+        const errorDetails: any = {
+            name: err.name || "UnknownError",
+            message: err.message || String(err),
+            stack: err.stack || "UnknownStack"
+        };
+
+        // If it's an AxiosError, extract response details safely
+        if ((err as any).response) {
+            const axiosError = err as any;
+            errorDetails.statusCode = axiosError.response?.status;
+            errorDetails.statusText = axiosError.response?.statusText;
+            if (axiosError.response?.data) {
+                try {
+                    // Try to extract just the important parts
+                    const data = axiosError.response.data;
+                    if (typeof data === 'string') {
+                        errorDetails.responseData = data;
+                    } else if (data && typeof data === 'object') {
+                        errorDetails.responseData = {
+                            message: data.message,
+                            error: data.error,
+                            code: data.code,
+                            detail: data.detail
+                        };
+                    }
+                } catch (e) {
+                    errorDetails.responseData = '[Could not extract response data]';
+                }
+            }
+        }
+
         this.logger.error(`Error in request [${correlationId}]: ${err.message}`, {
             correlationId,
-            error: {
-                name: err.name || "UnknownError",
-                message: err.message,
-                stack: err.stack || "UnknownStack"
-            },
+            error: errorDetails,
             request: {
                 path: req.path,
                 method: req.method,
