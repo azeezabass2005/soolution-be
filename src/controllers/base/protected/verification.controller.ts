@@ -97,20 +97,75 @@ class VerificationController extends BaseController {
                     return next(errorResponseMessage.resourceAlreadyExist('Ongoing verification Already Exists'))
                 }
             }
+            // Validate image format and size before processing
+            if (!Array.isArray(images)) {
+                return next(errorResponseMessage.payloadIncorrect("Images must be an array"));
+            }
+
+            // Validate each image
+            for (let i = 0; i < images.length; i++) {
+                const img = images[i];
+                if (!img || typeof img !== 'object') {
+                    return next(errorResponseMessage.payloadIncorrect(`Image at index ${i} is invalid`));
+                }
+                if (!img.image || typeof img.image !== 'string') {
+                    return next(errorResponseMessage.payloadIncorrect(`Image at index ${i} is missing image data`));
+                }
+                if (!img.image_type_id || typeof img.image_type_id !== 'number') {
+                    return next(errorResponseMessage.payloadIncorrect(`Image at index ${i} is missing image_type_id`));
+                }
+                
+                // Check if image is base64 and validate size (max 5MB per image when base64 encoded)
+                // Base64 encoding increases size by ~33%, so 5MB raw ≈ 6.7MB base64
+                const base64Size = img.image.length;
+                const maxBase64Size = 7 * 1024 * 1024; // 7MB in characters
+                
+                if (base64Size > maxBase64Size) {
+                    console.error(`❌ [ERROR] Image at index ${i} is too large: ${(base64Size / 1024 / 1024).toFixed(2)}MB (max: 7MB)`);
+                    return next(errorResponseMessage.payloadIncorrect(`Image at index ${i} is too large. Maximum size is 5MB per image.`));
+                }
+            }
+
             const verification = await this.verificationService.create({
                 user: user._id,
                 status: 'pending',
             })
+            
             let verificationSubmissionRes: any;
-            if(user?.country === 'GH') {
-                verificationSubmissionRes = await this.smileIdService.verifyGhanaCardWithSelfie(user! as IUser, ghanaCardNumber, images);
-            } else {
-                verificationSubmissionRes = await this.smileIdService.verifyBvnWithSelfie(user! as IUser, bvn, images);
+            try {
+                if(user?.country === 'GH') {
+                    verificationSubmissionRes = await this.smileIdService.verifyGhanaCardWithSelfie(user! as IUser, ghanaCardNumber, images);
+                } else {
+                    verificationSubmissionRes = await this.smileIdService.verifyBvnWithSelfie(user! as IUser, bvn, images);
+                }
+            } catch (error: any) {
+                console.error('❌ [ERROR] Smile ID API call failed:', error);
+                console.error('❌ [ERROR] Error details:', {
+                    message: error?.message,
+                    response: error?.response?.data,
+                    status: error?.response?.status,
+                    statusText: error?.response?.statusText
+                });
+                
+                // Clean up the pending verification since submission failed
+                await this.verificationService.updateById(verification.id, {
+                    status: 'failed',
+                    reason: error?.message || 'Failed to submit verification to Smile ID'
+                });
+
+                // Return a more descriptive error
+                const errorMessage = error?.response?.data?.message || error?.message || 'Failed to submit verification data to Smile ID';
+                return next(errorResponseMessage.unableToComplete(errorMessage));
             }
-            // verificationSubmissionRes = await this.smileIdService.verifyBvnWithSelfie(user! as IUser, bvn, images);
 
             if(!verificationSubmissionRes?.success) {
-                return next(errorResponseMessage?.unableToComplete("Failed to submit verification data"));
+                // Clean up the pending verification since submission failed
+                await this.verificationService.updateById(verification.id, {
+                    status: 'failed',
+                    reason: 'Smile ID API returned unsuccessful response'
+                });
+                
+                return next(errorResponseMessage.unableToComplete("Failed to submit verification data to Smile ID"));
             }
             const updatedVerification = await this.verificationService.updateById(verification.id, {
                 jobId: verificationSubmissionRes?.smile_job_id! as string,
