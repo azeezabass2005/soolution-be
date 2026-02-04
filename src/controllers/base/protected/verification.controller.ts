@@ -29,6 +29,8 @@ class VerificationController extends BaseController {
         // Endpoint to get web token for web integrations (biometric/enhanced KYC)
         this.router.get("/web-token", this.getVerificationToken.bind(this));
         
+        // Endpoint to cancel pending verification (useful for testing)
+        this.router.delete("/cancel", this.cancelPendingVerification.bind(this));
     }
 
     private async getVerificationToken(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -70,10 +72,30 @@ class VerificationController extends BaseController {
             if(!images || images.length < 1) {
                 return next(errorResponseMessage.payloadIncorrect("images"));
             }
+            
+            // Check for existing pending verification
             const existingPendingVerification = await this.verificationService.findOne({ user: user._id, status: 'pending' });
             
             if (existingPendingVerification) {
-                return next(errorResponseMessage.resourceAlreadyExist('Ongoing verification'))
+                // Check if the pending verification is stale (older than 24 hours)
+                // This allows users to retry if a verification got stuck or they want to test again
+                const createdAt = (existingPendingVerification as any).createdAt;
+                const verificationAge = createdAt 
+                    ? Date.now() - new Date(createdAt).getTime()
+                    : Infinity; // If no createdAt, treat as very old to allow retry
+                const STALE_VERIFICATION_THRESHOLD = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+                
+                if (verificationAge > STALE_VERIFICATION_THRESHOLD) {
+                    // Mark the old verification as failed/expired
+                    console.log(`⚠️ [INFO] Expiring stale pending verification for user ${user._id} (age: ${Math.round(verificationAge / (60 * 60 * 1000))} hours)`);
+                    await this.verificationService.updateById(existingPendingVerification.id!.toString(), {
+                        status: 'failed',
+                        reason: 'Verification expired - please try again'
+                    });
+                } else {
+                    // Verification is still fresh, don't allow a new one
+                    return next(errorResponseMessage.resourceAlreadyExist('Ongoing verification Already Exists'))
+                }
             }
             const verification = await this.verificationService.create({
                 user: user._id,
@@ -115,6 +137,37 @@ class VerificationController extends BaseController {
                     message: "Verification data submitted successfully, check profile page to confirm completion",
                     verification: { ...updatedVerification }
                 })
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    /**
+     * Cancels a pending verification for the current user
+     * Useful for testing when a verification gets stuck in pending state
+     */
+    private async cancelPendingVerification(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const user = res.locals.user;
+
+            const pendingVerification = await this.verificationService.findOne({ 
+                user: user._id, 
+                status: 'pending' 
+            });
+
+            if (!pendingVerification) {
+                return next(errorResponseMessage.resourceNotFound('No pending verification found'));
+            }
+
+            // Mark the verification as failed with cancellation reason
+            await this.verificationService.updateById(pendingVerification.id!.toString(), {
+                status: 'failed',
+                reason: 'Verification cancelled by user'
+            });
+
+            return this.sendSuccess(res, {
+                message: "Pending verification cancelled successfully. You can now submit a new verification.",
+            });
         } catch (error) {
             next(error);
         }
