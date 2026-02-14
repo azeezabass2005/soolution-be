@@ -40,9 +40,9 @@ class SmileId {
         return this.signatureConnection.confirm_signature(signature, timestamp);
     }
 
-    public verifyBvnWithSelfie = async (user: IUser, bvn: string, images: { image: string; image_type_id: number; }[]) => {
+    public verifyBvnWithSelfie = async (user: IUser, bvn: string, images: { image: string; image_type_id: number; }[], isRetry: boolean = false): Promise<{ success: boolean; smile_job_id: string }> => {
         console.log("\n==========================================");
-        console.log("🚀 VERIFY BVN WITH SELFIE - START");
+        console.log(`🚀 VERIFY BVN WITH SELFIE - START${isRetry ? ' (RETRY WITH AUTHENTICATION)' : ''}`);
         console.log("==========================================\n");
 
         // Log function entry with parameters
@@ -53,6 +53,7 @@ class SmileId {
         console.log("📋 [LOG] User Name:", `${user.firstName} ${user.lastName}`);
         console.log("📋 [LOG] BVN:", bvn);
         console.log("📋 [LOG] Number of images provided:", images?.length || 0);
+        console.log("📋 [LOG] Is Retry:", isRetry);
 
         // Validate inputs
         if (!user) {
@@ -85,11 +86,15 @@ class SmileId {
         console.log("\n🆔 [LOG] Generated Job ID:", job_id);
 
         // Prepare partner parameters
+        // Job type 1 = Basic KYC (Enrollment) for new users
+        // Job type 2 = SmartSelfie Authentication for already enrolled users
         let partner_params = {
             job_id: job_id,
             user_id: user._id as string,
-            job_type: 1 // Job type 1 = Basic KYC
+            job_type: isRetry ? 2 : 1 // Use job_type 2 (Authentication) for retry, 1 (Enrollment) for new users
         };
+        
+        console.log(`\n📋 [LOG] Using Job Type: ${partner_params.job_type} (${isRetry ? 'Authentication - User Already Enrolled' : 'Enrollment - New User'})`);
 
         console.log("\n📦 [LOG] Partner Parameters:");
         console.log(JSON.stringify(partner_params, null, 2));
@@ -274,9 +279,24 @@ class SmileId {
                 }
             }
             
+            // If user is already enrolled and we haven't retried yet, automatically retry with job_type 2
+            if (isAlreadyEnrolled && !isRetry) {
+                console.log("\n🔄 [INFO] User already enrolled detected. Automatically retrying with job_type 2 (Authentication)...");
+                console.log("🔄 [INFO] This will use SmartSelfie Authentication instead of Basic KYC Enrollment");
+                try {
+                    return await this.verifyBvnWithSelfie(user, bvn, images, true);
+                } catch (retryError: any) {
+                    // If retry also fails, throw the retry error
+                    console.error("❌ [ERROR] Retry with job_type 2 also failed");
+                    throw retryError;
+                }
+            }
+            
             // Add status code context
             if (error?.response?.status === 400) {
-                if (isAlreadyEnrolled) {
+                if (isAlreadyEnrolled && isRetry) {
+                    errorMessage = `Smile ID rejected the authentication request (400): ${errorMessage}. The user may need to re-enroll or contact Smile ID support.`;
+                } else if (isAlreadyEnrolled) {
                     errorMessage = `This BVN has already been enrolled with Smile ID. For testing, please use a different BVN or contact Smile ID support to reset the enrollment. Original error: ${errorMessage}`;
                 } else {
                     errorMessage = `Smile ID rejected the request (400): ${errorMessage}`;
@@ -293,9 +313,9 @@ class SmileId {
         }
     }
 
-    public verifyGhanaCardWithSelfie = async (user: IUser, ghanaCardNumber: string, images: { image: string, image_type_id: number; }[]) => {
+    public verifyGhanaCardWithSelfie = async (user: IUser, ghanaCardNumber: string, images: { image: string, image_type_id: number; }[], isRetry: boolean = false): Promise<{ success: boolean; smile_job_id: string }> => {
         console.log("\n==========================================");
-        console.log("🚀 VERIFY GHANA CARD WITH SELFIE - START");
+        console.log(`🚀 VERIFY GHANA CARD WITH SELFIE - START${isRetry ? ' (RETRY WITH AUTHENTICATION)' : ''}`);
         console.log("==========================================\n");
 
         // Log function entry with parameters
@@ -307,6 +327,7 @@ class SmileId {
         console.log("📋 [LOG] User Country:", user.countryOfOrigin || user.countryOfResidence || 'Not specified');
         console.log("📋 [LOG] Ghana Card Number:", ghanaCardNumber);
         console.log("📋 [LOG] Number of images provided:", images?.length || 0);
+        console.log("📋 [LOG] Is Retry:", isRetry);
 
         // Validate inputs
         if (!user) {
@@ -338,11 +359,15 @@ class SmileId {
         console.log("\n🆔 [LOG] Generated Job ID:", job_id);
 
         // Prepare partner parameters
+        // Job type 1 = Basic KYC (Enrollment) for new users
+        // Job type 2 = SmartSelfie Authentication for already enrolled users
         let partner_params = {
             job_id: job_id,
             user_id: user._id as string,
-            job_type: 1 // Job type 1 = Basic KYC
+            job_type: isRetry ? 2 : 1 // Use job_type 2 (Authentication) for retry, 1 (Enrollment) for new users
         };
+        
+        console.log(`\n📋 [LOG] Using Job Type: ${partner_params.job_type} (${isRetry ? 'Authentication - User Already Enrolled' : 'Enrollment - New User'})`);
 
         console.log("\n📦 [LOG] Partner Parameters:");
         console.log(JSON.stringify(partner_params, null, 2));
@@ -573,10 +598,25 @@ class SmileId {
                 }
             }
             
+            // If user is already enrolled and we haven't retried yet, automatically retry with job_type 2
+            if (isAlreadyEnrolled && !isRetry) {
+                console.log("\n🔄 [INFO] User already enrolled detected. Automatically retrying with job_type 2 (Authentication)...");
+                console.log("🔄 [INFO] This will use SmartSelfie Authentication instead of Basic KYC Enrollment");
+                try {
+                    return await this.verifyGhanaCardWithSelfie(user, ghanaCardNumber, images, true);
+                } catch (retryError: any) {
+                    // If retry also fails, throw the retry error
+                    console.error("❌ [ERROR] Retry with job_type 2 also failed");
+                    throw retryError;
+                }
+            }
+            
             // Add status code context
             if (error?.response?.status === 400) {
-                if (isAlreadyEnrolled) {
-                    errorMessage = `This BVN has already been enrolled with Smile ID. For testing, please use a different BVN or contact Smile ID support to reset the enrollment. Original error: ${errorMessage}`;
+                if (isAlreadyEnrolled && isRetry) {
+                    errorMessage = `Smile ID rejected the authentication request (400): ${errorMessage}. The user may need to re-enroll or contact Smile ID support.`;
+                } else if (isAlreadyEnrolled) {
+                    errorMessage = `This Ghana Card has already been enrolled with Smile ID. For testing, please use a different card or contact Smile ID support to reset the enrollment. Original error: ${errorMessage}`;
                 } else {
                     errorMessage = `Smile ID rejected the request (400): ${errorMessage}`;
                 }
