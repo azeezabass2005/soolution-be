@@ -36,8 +36,36 @@ class SmileId {
         return this.signatureConnection.generate_signature(Date.now());
     }
 
-    public verifySignature = (signature: string, timestamp: string): boolean => {
-        return this.signatureConnection.confirm_signature(signature, timestamp);
+    public verifySignature = (signature: string, timestamp: string | number): boolean => {
+        try {
+            // Convert ISO timestamp string to numeric timestamp if needed
+            let numericTimestamp: number;
+            
+            if (typeof timestamp === 'string') {
+                // Check if it's an ISO string (contains 'T' or 'Z')
+                if (timestamp.includes('T') || timestamp.includes('Z')) {
+                    numericTimestamp = new Date(timestamp).getTime();
+                } else {
+                    // Assume it's already a numeric string
+                    numericTimestamp = parseInt(timestamp, 10);
+                }
+            } else {
+                numericTimestamp = timestamp;
+            }
+            
+            // Validate timestamp is a valid number
+            if (isNaN(numericTimestamp) || numericTimestamp <= 0) {
+                console.error("❌ [ERROR] Invalid timestamp format:", timestamp);
+                return false;
+            }
+            
+            return this.signatureConnection.confirm_signature(signature, numericTimestamp.toString());
+        } catch (error: any) {
+            console.error("❌ [ERROR] Signature verification failed:", error?.message || error);
+            console.error("   Signature:", signature);
+            console.error("   Timestamp:", timestamp);
+            return false;
+        }
     }
 
     public verifyBvnWithSelfie = async (user: IUser, bvn: string, images: { image: string; image_type_id: number; }[], isRetry: boolean = false): Promise<{ success: boolean; smile_job_id: string }> => {
