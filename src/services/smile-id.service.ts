@@ -44,10 +44,20 @@ class SmileId {
             if (typeof timestamp === 'string') {
                 // Check if it's an ISO string (contains 'T' or 'Z')
                 if (timestamp.includes('T') || timestamp.includes('Z')) {
-                    numericTimestamp = new Date(timestamp).getTime();
+                    const dateObj = new Date(timestamp);
+                    // Check if date is valid
+                    if (isNaN(dateObj.getTime())) {
+                        console.error("❌ [ERROR] Invalid ISO timestamp format:", timestamp);
+                        return false;
+                    }
+                    numericTimestamp = dateObj.getTime();
                 } else {
                     // Assume it's already a numeric string
                     numericTimestamp = parseInt(timestamp, 10);
+                    if (isNaN(numericTimestamp)) {
+                        console.error("❌ [ERROR] Invalid numeric timestamp format:", timestamp);
+                        return false;
+                    }
                 }
             } else {
                 numericTimestamp = timestamp;
@@ -55,15 +65,17 @@ class SmileId {
             
             // Validate timestamp is a valid number
             if (isNaN(numericTimestamp) || numericTimestamp <= 0) {
-                console.error("❌ [ERROR] Invalid timestamp format:", timestamp);
+                console.error("❌ [ERROR] Invalid timestamp value:", timestamp, "->", numericTimestamp);
                 return false;
             }
             
+            // The SDK expects the timestamp as a string representation of milliseconds
             return this.signatureConnection.confirm_signature(signature, numericTimestamp.toString());
         } catch (error: any) {
             console.error("❌ [ERROR] Signature verification failed:", error?.message || error);
             console.error("   Signature:", signature);
             console.error("   Timestamp:", timestamp);
+            console.error("   Error stack:", error?.stack);
             return false;
         }
     }

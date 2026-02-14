@@ -84,11 +84,12 @@ class WebhookController extends BaseController {
             const personalInfoStatus = actions.Return_Personal_Info || "Unknown";
             
             // Smile ID result codes:
-            // 0000: Complete verification success (final)
-            // 0810: Enroll User (successful enrollment with all checks passed - final result)
+            // 0000: Complete verification success (final) - job_type 1
+            // 0810: Enroll User (successful enrollment with all checks passed - final result) - job_type 1
+            // 0820: Authenticated (successful authentication - final result) - job_type 2
             // 0821: Failed Authentication - Possible Spoof Detected (failure for job_type 2)
             // 1012: ID Number Validated (ID verification successful - intermediate result, wait for final)
-            const finalSuccessCodes = ["0000", "0810"];
+            const finalSuccessCodes = ["0000", "0810", "0820"]; // Added 0820 for job_type 2 authentication success
             const intermediateSuccessCodes = ["1012"];
             const authenticationFailureCodes = ["0821"]; // Authentication failures (job_type 2)
             const isFinalSuccessCode = finalSuccessCodes.includes(resultCode);
@@ -97,7 +98,7 @@ class WebhookController extends BaseController {
             const isFailedCode = resultCode.startsWith("09") || isAuthenticationFailure; // Failure codes start with 09 or are authentication failures
             
             // Determine if this is a final result
-            // 0810 and 0000 are always final, 1012 is always intermediate (regardless of IsFinalResult flag)
+            // 0810, 0820, and 0000 are always final, 1012 is always intermediate (regardless of IsFinalResult flag)
             // For other codes, use the IsFinalResult flag
             const isThisFinalResult = isIntermediateSuccessCode 
                 ? false  // 1012 is always intermediate
@@ -118,26 +119,41 @@ class WebhookController extends BaseController {
             if (process.env.FORCE_VERIFY === "true") {
                 isVerified = true;
             } else if (isFinalSuccessCode && isThisFinalResult) {
-                // For final results, check that critical actions passed
-                const criticalActionsPassed = 
-                    (idVerificationStatus === "Verified" || idVerificationStatus === "Passed") &&
-                    (selfieCheckStatus === "Passed" || selfieCheckStatus === "Verified") &&
-                    (registerSelfieStatus === "Passed" || registerSelfieStatus === "Verified");
-                
-                isVerified = criticalActionsPassed;
+                // For job_type 2 (Authentication), result code 0820 means authenticated successfully
+                // For job_type 1 (Enrollment), check critical actions
+                if (resultCode === "0820") {
+                    // For authentication (job_type 2), check selfie comparison passed
+                    const selfieToRegisteredSelfieStatus = actions.Selfie_To_Registered_Selfie_Compare || "Unknown";
+                    const livenessCheckStatus = actions.Liveness_Check || "Unknown";
+                    isVerified = (selfieToRegisteredSelfieStatus === "Passed" || selfieToRegisteredSelfieStatus === "Completed") &&
+                                 (livenessCheckStatus === "Passed" || selfieCheckStatus === "Passed");
+                } else {
+                    // For enrollment (job_type 1), check that critical actions passed
+                    const criticalActionsPassed = 
+                        (idVerificationStatus === "Verified" || idVerificationStatus === "Passed") &&
+                        (selfieCheckStatus === "Passed" || selfieCheckStatus === "Verified") &&
+                        (registerSelfieStatus === "Passed" || registerSelfieStatus === "Verified");
+                    
+                    isVerified = criticalActionsPassed;
+                }
             }
             
             console.log("=== Smile ID Verification Result ===");
-            console.log(`Status: ${isVerified ? 'VERIFIED' : 'FAILED'}`);
             console.log(`Result Code: ${resultCode}`);
             console.log(`Result Text: ${resultText}`);
-            console.log(`Is Final Result: ${isThisFinalResult}`);
+            console.log(`Is Final Result (from webhook): ${isFinalResult}`);
+            console.log(`Is Final Result (calculated): ${isThisFinalResult}`);
+            console.log(`Is Final Success Code: ${isFinalSuccessCode}`);
+            console.log(`Is Failed Code: ${isFailedCode}`);
+            console.log(`Status: ${isVerified ? 'VERIFIED' : 'FAILED'}`);
             console.log(`Confidence: ${confidenceValue}`);
             console.log(`Job ID: ${smileJobID}`);
             console.log("\n=== Detailed Actions ===");
             console.log(`ID Number Verification: ${idVerificationStatus}`);
             console.log(`Selfie Check: ${selfieCheckStatus}`);
             console.log(`Register Selfie: ${registerSelfieStatus}`);
+            console.log(`Selfie To Registered Selfie Compare: ${actions.Selfie_To_Registered_Selfie_Compare || "Unknown"}`);
+            console.log(`Liveness Check: ${actions.Liveness_Check || "Unknown"}`);
             console.log(`Personal Info: ${personalInfoStatus}`);
             
             // Get the reason for failure (with safe access)
@@ -283,6 +299,7 @@ class WebhookController extends BaseController {
         const reasonMap: Record<string, string> = {
             "0000": "Verification successful",
             "0810": "Enroll User - Verification successful",
+            "0820": "Authenticated - Verification successful",
             "0821": "Failed Authentication - Possible Spoof Detected. Please ensure you're using a clear, well-lit selfie and try again.",
             "1012": "ID Number Validated - Verification successful",
             "0911": "Images unusable - Anti-spoof check failed or poor image quality",
