@@ -56,6 +56,21 @@ class NotificationService {
             caption?: string;
         }>
     ): Promise<{ email: boolean; whatsapp: boolean }> {
+        // Skip notifications on localhost/development
+        if (process.env.NODE_ENV === 'development' || 
+            process.env.FRONTEND_URL?.includes('localhost') || 
+            process.env.FRONTEND_URL?.includes('127.0.0.1')) {
+            console.log('Skipping notification on localhost:', {
+                user: user.email,
+                title: config.title,
+                message: config.message,
+            });
+            return {
+                email: false,
+                whatsapp: false,
+            };
+        }
+
         const results = {
             email: false,
             whatsapp: false,
@@ -126,6 +141,17 @@ class NotificationService {
             caption?: string;
         }>
     ): Promise<void> {
+        // Skip notifications on localhost/development
+        if (process.env.NODE_ENV === 'development' || 
+            process.env.FRONTEND_URL?.includes('localhost') || 
+            process.env.FRONTEND_URL?.includes('127.0.0.1')) {
+            console.log('Skipping admin notifications on localhost:', {
+                title: config.title,
+                message: config.message,
+            });
+            return;
+        }
+
         const emails = adminEmails.split(',').map(e => e.trim());
         const phones = adminPhoneNumbers?.split(',').map(p => p.trim()) || [];
 

@@ -157,6 +157,7 @@ class SmileId {
             return_job_status: true,
             return_history: true,
             return_image_links: true,
+            return_personal_info: true, // Enable personal info return for name validation
             signature: true
         };
 
@@ -431,6 +432,7 @@ class SmileId {
             return_job_status: true, // Get job result synchronously
             return_history: true, // Return results of all previous jobs for this user
             return_image_links: true, // Receive selfie and liveness images
+            return_personal_info: true, // Enable personal info return for name validation
             signature: true // Include signature in response
         };
 

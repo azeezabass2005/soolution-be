@@ -74,10 +74,17 @@ export const TRANSACTION_TYPE = {
 export const DETAIL_TYPE = {
     ALIPAY: 'alipay',
     WECHAT: 'wechat',
-    // TODO: I will add other detail types here e.g all the GHS transaction and the likes.
+    BANK_TRANSFER: 'bank_transfer',
+    MOBILE_MONEY: 'mobile_money',
 }
 
 export const ALIPAY_PLATFORM = {
     NIGERIAN: 'nigerian',
     CHINESE: 'chinese',
+}
+
+export const INSTITUTION_TYPE = {
+    BANK: 'bank',
+    MOMO: 'momo', // For GHS and XAF
+    MPESA: 'mpesa', // For KES
 }

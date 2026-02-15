@@ -157,7 +157,7 @@ class WebhookController extends BaseController {
             console.log(`Personal Info: ${personalInfoStatus}`);
             
             // Get the reason for failure (with safe access)
-            const failureReason = (actions?.Selfie_Check && typeof actions.Selfie_Check === 'object' && actions.Selfie_Check.ResultText) 
+            let failureReason = (actions?.Selfie_Check && typeof actions.Selfie_Check === 'object' && actions.Selfie_Check.ResultText) 
                 ? actions.Selfie_Check.ResultText 
                 : this.getFailureReason(resultCode, actions);
             
@@ -218,6 +218,83 @@ class WebhookController extends BaseController {
                 console.log("⚠️ [INFO] Skipping update - not a final result and not a failure");
                 res.status(200).json({ received: true, message: "Intermediate result, waiting for final result" });
                 return;
+            }
+            
+            // NAME VALIDATION: Verify that the name on the account matches the name on the BVN
+            // This is an additional security check to ensure the BVN belongs to the account holder
+            let nameValidationResult: { match: boolean; reason?: string } | null = null;
+            if (isVerified && isThisFinalResult) {
+                try {
+                    // Get user from database
+                    const user = await this.userService.findById(userID);
+                    if (!user) {
+                        console.error(`❌ [ERROR] User not found for name validation: ${userID}`);
+                        isVerified = false;
+                        failureReason = "User account not found";
+                    } else {
+                        // Extract PersonalInfo from webhook response
+                        // Smile ID returns personal info in different possible structures
+                        const personalInfo = webhookData.PersonalInfo || webhookData.personalInfo || webhookData.personal_info;
+                        
+                        console.log("\n🔍 [NAME VALIDATION] Starting name comparison...");
+                        console.log(`  User Account Name: ${user.firstName} ${user.lastName}`);
+                        
+                        if (personalInfo) {
+                            console.log("  📋 PersonalInfo found in webhook response");
+                            console.log("  📋 PersonalInfo structure:", JSON.stringify(personalInfo, null, 2));
+                            
+                            // Extract name fields (Smile ID may return different field names)
+                            const bvnFirstName = personalInfo.firstName || personalInfo.first_name || personalInfo.FirstName || personalInfo.First_Name;
+                            const bvnLastName = personalInfo.lastName || personalInfo.last_name || personalInfo.LastName || personalInfo.Last_Name;
+                            const bvnFullName = personalInfo.fullName || personalInfo.full_name || personalInfo.FullName || personalInfo.Full_Name || 
+                                               personalInfo.name || personalInfo.Name || personalInfo.nameOnCard || personalInfo.name_on_card;
+                            
+                            console.log(`  BVN First Name: ${bvnFirstName || 'N/A'}`);
+                            console.log(`  BVN Last Name: ${bvnLastName || 'N/A'}`);
+                            console.log(`  BVN Full Name: ${bvnFullName || 'N/A'}`);
+                            
+                            // Compare names
+                            nameValidationResult = this.compareNames(
+                                user.firstName,
+                                user.lastName,
+                                bvnFirstName,
+                                bvnLastName,
+                                bvnFullName
+                            );
+                            
+                            if (!nameValidationResult.match) {
+                                console.error(`❌ [NAME VALIDATION] Name mismatch detected: ${nameValidationResult.reason}`);
+                                isVerified = false;
+                                failureReason = nameValidationResult.reason || "Name on BVN does not match account name";
+                            } else {
+                                console.log("✅ [NAME VALIDATION] Names match successfully");
+                            }
+                        } else {
+                            // Check if Return_Personal_Info action indicates personal info should be available
+                            if (personalInfoStatus === "Passed" || personalInfoStatus === "Verified" || personalInfoStatus === "Completed") {
+                                console.warn("⚠️ [NAME VALIDATION] PersonalInfo action passed but no PersonalInfo data in webhook response");
+                                console.warn("⚠️ [NAME VALIDATION] This may indicate a webhook format change or missing data");
+                                // Don't fail verification if personal info action passed but data is missing
+                                // This is a graceful degradation - we'll log but not block verification
+                            } else {
+                                console.log("ℹ️  [NAME VALIDATION] PersonalInfo not available in webhook response (this is normal for some verification types)");
+                                // For job_type 2 (Authentication), personal info might not be returned
+                                // We'll allow verification to proceed but log the absence
+                            }
+                        }
+                    }
+                } catch (error: any) {
+                    console.error("❌ [NAME VALIDATION] Error during name validation:", error?.message || error);
+                    console.error("   Error stack:", error?.stack);
+                    // If name validation fails due to an error, we should fail the verification for security
+                    // However, we'll log it as a warning and allow verification if FORCE_VERIFY is enabled
+                    if (process.env.FORCE_VERIFY !== "true") {
+                        isVerified = false;
+                        failureReason = "Name validation error: " + (error?.message || "Unknown error");
+                    } else {
+                        console.warn("⚠️ [NAME VALIDATION] Name validation error but FORCE_VERIFY is enabled, allowing verification");
+                    }
+                }
             }
             
             const updatedVerification = await this.verificationService.updateById(pendingVerification?.id!.toString(), {
@@ -294,6 +371,98 @@ class WebhookController extends BaseController {
         }
     }
     
+    /**
+     * Normalize a name string for comparison
+     * - Converts to lowercase
+     * - Removes extra whitespace
+     * - Removes special characters (keeping only letters, spaces, and hyphens)
+     */
+    private normalizeName(name: string): string {
+        if (!name) return '';
+        return name
+            .toLowerCase()
+            .trim()
+            .replace(/[^\w\s-]/g, '') // Remove special characters except hyphens
+            .replace(/\s+/g, ' '); // Replace multiple spaces with single space
+    }
+
+    /**
+     * Compare names from BVN with user's name on platform
+     * Uses fuzzy matching to handle variations in name formatting
+     */
+    private compareNames(
+        userFirstName: string,
+        userLastName: string,
+        bvnFirstName?: string,
+        bvnLastName?: string,
+        bvnFullName?: string
+    ): { match: boolean; reason?: string } {
+        // Normalize user names
+        const normalizedUserFirst = this.normalizeName(userFirstName || '');
+        const normalizedUserLast = this.normalizeName(userLastName || '');
+        const normalizedUserFull = `${normalizedUserFirst} ${normalizedUserLast}`.trim();
+
+        // If we have full name from BVN, try that first
+        if (bvnFullName) {
+            const normalizedBvnFull = this.normalizeName(bvnFullName);
+            // Check if full names match (exact or contains)
+            if (normalizedBvnFull === normalizedUserFull || 
+                normalizedBvnFull.includes(normalizedUserFirst) && normalizedBvnFull.includes(normalizedUserLast) ||
+                normalizedUserFull.includes(normalizedBvnFull.split(' ')[0]) && normalizedUserFull.includes(normalizedBvnFull.split(' ').slice(-1)[0])) {
+                return { match: true };
+            }
+        }
+
+        // Try individual first and last name comparison
+        if (bvnFirstName && bvnLastName) {
+            const normalizedBvnFirst = this.normalizeName(bvnFirstName);
+            const normalizedBvnLast = this.normalizeName(bvnLastName);
+
+            // Check if first and last names match (with some flexibility)
+            const firstNameMatch = normalizedBvnFirst === normalizedUserFirst || 
+                                  normalizedBvnFirst.includes(normalizedUserFirst) || 
+                                  normalizedUserFirst.includes(normalizedBvnFirst);
+            
+            const lastNameMatch = normalizedBvnLast === normalizedUserLast || 
+                                 normalizedBvnLast.includes(normalizedUserLast) || 
+                                 normalizedUserLast.includes(normalizedBvnLast);
+
+            if (firstNameMatch && lastNameMatch) {
+                return { match: true };
+            }
+
+            // If only one matches, provide specific reason
+            if (!firstNameMatch && !lastNameMatch) {
+                return { 
+                    match: false, 
+                    reason: `Name mismatch: BVN name (${bvnFirstName} ${bvnLastName}) does not match account name (${userFirstName} ${userLastName})` 
+                };
+            } else if (!firstNameMatch) {
+                return { 
+                    match: false, 
+                    reason: `First name mismatch: BVN first name (${bvnFirstName}) does not match account first name (${userFirstName})` 
+                };
+            } else {
+                return { 
+                    match: false, 
+                    reason: `Last name mismatch: BVN last name (${bvnLastName}) does not match account last name (${userLastName})` 
+                };
+            }
+        }
+
+        // If we only have full name and it didn't match, or no name data at all
+        if (bvnFullName) {
+            return { 
+                match: false, 
+                reason: `Name mismatch: BVN name (${bvnFullName}) does not match account name (${userFirstName} ${userLastName})` 
+            };
+        }
+
+        // If no BVN name data available, we can't validate (log warning but don't fail)
+        console.warn("⚠️ [WARNING] No name data available from BVN for comparison");
+        return { match: true }; // Don't fail if name data is missing (graceful degradation)
+    }
+
     private getFailureReason(resultCode: string, actions: any): string {
         // Map result codes to user-friendly reasons
         const reasonMap: Record<string, string> = {

@@ -176,6 +176,17 @@ export interface ITransactionDetail extends Document {
     bankAccountDetails: IBankAccountDetails;
     fromAmount: number;
 
+    // Bank Transfer specific fields
+    institutionType?: 'bank' | 'momo' | 'mpesa';
+    bankName?: string;
+    accountNumber?: string;
+    accountName?: string;
+
+    // Mobile Money specific fields
+    momoNetwork?: string;
+    momoNumber?: string;
+    momoName?: string;
+
     // TODO: Other types of transaction details will be here
 }
 

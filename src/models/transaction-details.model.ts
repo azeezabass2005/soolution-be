@@ -136,6 +136,93 @@ export const TransactionDetailSchema = new Schema<ITransactionDetail>(
         bankAccountDetails: {
             type: Schema.Types.Mixed,
             default: {}
+        },
+
+        // ============= BANK TRANSFER SPECIFIC FIELDS =============
+
+        /**
+         * Institution type (bank or mobile money)
+         * @type {string}
+         * @optional
+         */
+        institutionType: {
+            type: String,
+            enum: ['bank', 'momo', 'mpesa'],
+            required: false
+        },
+
+        /**
+         * Bank name (for bank transfers)
+         * @type {string}
+         * @optional
+         */
+        bankName: {
+            type: String,
+            trim: true,
+            maxlength: 100,
+            required: false
+        },
+
+        /**
+         * Account number (for bank transfers)
+         * @type {string}
+         * @optional
+         */
+        accountNumber: {
+            type: String,
+            trim: true,
+            maxlength: 50,
+            required: false
+        },
+
+        /**
+         * Account name (for bank transfers)
+         * @type {string}
+         * @optional
+         */
+        accountName: {
+            type: String,
+            trim: true,
+            maxlength: 100,
+            required: false
+        },
+
+        // ============= MOBILE MONEY SPECIFIC FIELDS =============
+
+        /**
+         * Mobile money network (for mobile money transfers)
+         * @type {string}
+         * @optional
+         */
+        momoNetwork: {
+            type: String,
+            trim: true,
+            maxlength: 50,
+            required: false
+        },
+
+        /**
+         * Mobile money number (for mobile money transfers)
+         * @type {string}
+         * @optional
+         */
+        momoNumber: {
+            type: String,
+            trim: true,
+            maxlength: 50,
+            required: false
+        },
+
+        /**
+         * Mobile money name (for mobile money transfers)
+         * @type {string}
+         * @optional
+         */
+        momoName: {
+            type: String,
+            trim: true,
+            maxlength: 100,
+            required: false
         }
 
         // TODO: Add other transaction detail types here as needed

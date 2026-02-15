@@ -45,6 +45,90 @@ class TransactionService extends DBService<ITransaction> {
         return `ALIPAY_TX_${randomPart}`;
     };
 
+    private generateBankTransferTransactionReference = (currency: string) => {
+        const randomPart = crypto.randomUUID().replace(/-/g, "").slice(0, 22).toUpperCase();
+        return `${currency}_TX_${randomPart}`;
+    };
+
+    public createBankTransferTransaction = async (
+        transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string }>,
+        user: string,
+    ) => {
+        const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName } = transactionData;
+        
+        if (!toCurrency) {
+            throw errorResponseMessage.payloadIncorrect("Target currency (toCurrency) is required");
+        }
+
+        const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
+        if(!bankAccountDetails) {
+            throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
+        }
+
+        const transaction = await this.create({
+            user,
+            reference: this.generateBankTransferTransactionReference(toCurrency),
+            amount,
+            fromCurrency,
+            currency: toCurrency,
+            detailType: paymentMethod || DETAIL_TYPE.BANK_TRANSFER,
+            status: TRANSACTION_STATUS.PENDING_INPUT,
+            initiatedAt: Date.now(),
+        })
+
+        const transactionDetails = await this.transactionDetailsService.create({
+            transactionId: transaction._id,
+            type: paymentMethod || DETAIL_TYPE.BANK_TRANSFER,
+            institutionType,
+            bankAccountDetails: bankAccountDetails.toObject(),
+            ...(institutionType === 'bank' ? {
+                bankName,
+                accountNumber,
+                accountName,
+            } : {
+                momoNetwork,
+                momoNumber,
+                momoName,
+            }),
+        })
+
+        // Send transaction initiated email to user
+        try {
+            const populatedTransaction = await this.findById(transaction._id.toString());
+            const userObj = populatedTransaction?.user as IUser;
+            if (userObj) {
+                await this.notificationService.sendTransactionNotification(
+                    userObj,
+                    'payment_initiated',
+                    {
+                        amount: `${transaction.amount} ${transaction.currency}`,
+                        reference: transaction.reference,
+                        recipient: institutionType === 'bank' ? accountName : momoName || 'Recipient',
+                        actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
+                    }
+                );
+                logger.info('Transaction initiated email sent successfully', {
+                    transactionId: transaction._id,
+                    userId: userObj._id,
+                    email: userObj.email,
+                    reference: transaction.reference,
+                    amount: `${transaction.amount} ${transaction.fromCurrency}`,
+                    currency: transaction.currency
+                });
+            }
+        } catch (error) {
+            logger.error('Failed to send transaction initiated email', {
+                transactionId: transaction._id,
+                reference: transaction.reference,
+                error: error instanceof Error ? error.message : String(error),
+                stack: error instanceof Error ? error.stack : undefined
+            });
+            // Don't fail transaction creation if email fails
+        }
+
+        return { ...transaction.toObject(), details: { ...transactionDetails.toObject() } } 
+    }
+
     public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType }>, alipayQrCode: Express.Multer.File, user: string,) =>  {
         const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod } = transactionData;
         const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
@@ -126,47 +210,103 @@ class TransactionService extends DBService<ITransaction> {
             makePublic: true,
         });
         if(!uploadResult.success) {
-            console.log(uploadResult, "This is the result from the payment receipt upload")
+            logger.error('Payment receipt upload failed', { 
+                error: uploadResult.error,
+                transactionId,
+                fileName: receipt.originalname,
+                fileSize: receipt.size
+            });
             throw errorResponseMessage.unableToComplete("Payment receipt upload failed");
         }
+        
+        if (!uploadResult.file?.url) {
+            logger.error('Upload succeeded but no URL returned', {
+                transactionId,
+                fileKey: uploadResult.file?.key
+            });
+            throw errorResponseMessage.unableToComplete("Payment receipt upload failed - no URL returned");
+        }
+
+        logger.info('Payment receipt uploaded successfully', {
+            transactionId,
+            fileKey: uploadResult.file.key,
+            fileUrl: uploadResult.file.url,
+            fileSize: uploadResult.file.size
+        });
+
         const transaction = await this.findById(transactionId);
-        let fromAmount = await new RateUtils(transaction?.fromCurrency!, "RMB").convertAmount(transaction?.amount!);
-        await this.transactionDetailsService.update({ transactionId }, {payInReceiptUrl: uploadResult.file?.url, fromAmount: fromAmount});
-        await this.updateById(transactionId, { status: isKycDone ? TRANSACTION_STATUS.AWAITING_CONFIRMATION : TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION });
+        // Use the transaction's currency (which could be RMB, GHS, XAF, or KES) instead of hardcoding RMB
+        let fromAmount = await new RateUtils(transaction?.fromCurrency!, transaction?.currency!).convertAmount(transaction?.amount!);
+        
+        // Update transaction details with receipt URL first
+        await this.transactionDetailsService.update({ transactionId }, {payInReceiptUrl: uploadResult.file.url, fromAmount: fromAmount});
 
         // Notify admins via both email and WhatsApp
-        await this.notificationService.notifyAdmins(
-            config.ADMIN_EMAILS,
-            {
-                title: "📱 New RMB Payment",
-                message: `A customer has initiated a new RMB payment and has paid. Check the QR code and payment receipt attached.\n${transaction?.details?.alipayNo ? `Alipay No: ${transaction?.details?.alipayNo}\n` : ''}${transaction?.details?.alipayName ? `Alipay Name: ${transaction?.details?.alipayName}` : ''}`,
-                actionUrl: `${config.FRONTEND_URL}/dashboard/admin/payments`,
-                buttonText: "Go to Dashboard",
-            },
-            config.ADMIN_PHONE_NUMBERS,
-            [
-                {
+        const isAlipayTransaction = transaction?.currency === 'RMB';
+        const transactionType = isAlipayTransaction ? 'RMB Payment' : `${transaction?.currency} Payment`;
+        const recipientInfo = isAlipayTransaction 
+            ? `${transaction?.details?.alipayNo ? `Alipay No: ${transaction?.details?.alipayNo}\n` : ''}${transaction?.details?.alipayName ? `Alipay Name: ${transaction?.details?.alipayName}` : ''}`
+            : transaction?.details?.institutionType === 'bank'
+                ? `Bank: ${transaction?.details?.bankName}\nAccount Number: ${transaction?.details?.accountNumber}\nAccount Name: ${transaction?.details?.accountName}`
+                : `Network: ${transaction?.details?.momoNetwork}\nNumber: ${transaction?.details?.momoNumber}\nName: ${transaction?.details?.momoName}`;
+
+        const attachments = [];
+        const whatsappAttachments = [];
+
+        if (isAlipayTransaction && transaction?.details?.qrCodeUrl) {
+            try {
+                attachments.push({
                     filename: 'alipay_qrcode.png',
                     content: await this.storageService.downloadFile(transaction?.details?.qrCodeUrl!),
                     contentType: 'image/png'
-                },
-                {
-                    filename: 'user_payment_receipt.png',
-                    content: await this.storageService.downloadFile(uploadResult.file?.url!),
-                    contentType: 'image/png'
-                }
-            ],
-            [
-                {
+                });
+                whatsappAttachments.push({
                     caption: 'Alipay QRCode',
                     url: transaction?.details?.qrCodeUrl!,
-                },
+                });
+            } catch (error) {
+                logger.warn('Failed to download Alipay QR code for notification', { error, transactionId });
+                // Continue without QR code attachment
+            }
+        }
+
+        try {
+            attachments.push({
+                filename: 'user_payment_receipt.png',
+                content: await this.storageService.downloadFile(uploadResult.file?.url!),
+                contentType: 'image/png'
+            });
+            whatsappAttachments.push({
+                caption: 'User Payment Receipt',
+                url: uploadResult.file?.url!,
+            });
+        } catch (error) {
+            logger.warn('Failed to download receipt for notification, but receipt is uploaded', { error, transactionId, receiptUrl: uploadResult.file?.url });
+            // Continue without receipt attachment in notification, but receipt is already saved
+        }
+
+        // Send notifications (don't fail if this fails, receipt is already uploaded)
+        try {
+            await this.notificationService.notifyAdmins(
+                config.ADMIN_EMAILS,
                 {
-                    caption: 'User Payment Receipt',
-                    url: uploadResult.file?.url!,
-                }
-            ],
-        );
+                    title: `📱 New ${transactionType}`,
+                    message: `A customer has initiated a new ${transaction?.currency} payment and has paid. Check the payment receipt attached.\n${recipientInfo}`,
+                    actionUrl: `${config.FRONTEND_URL}/dashboard/admin/payments`,
+                    buttonText: "Go to Dashboard",
+                },
+                config.ADMIN_PHONE_NUMBERS,
+                attachments,
+                whatsappAttachments,
+            );
+        } catch (error) {
+            logger.error('Failed to send admin notifications, but receipt is uploaded', { error, transactionId });
+            // Don't fail the whole operation if notifications fail
+        }
+
+        // Only update status AFTER everything succeeds (or at least after receipt is uploaded and saved)
+        // This ensures status only changes if receipt upload was successful
+        await this.updateById(transactionId, { status: isKycDone ? TRANSACTION_STATUS.AWAITING_CONFIRMATION : TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION });
 
         // Attach files for email notification
         // const adminEmails = config.ADMIN_EMAILS.split(",");

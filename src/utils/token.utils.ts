@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import {
     ITokenPayload,
     IVerifyTokenPayload,
+    IRefreshTokenPayload,
     TokenType,
     ITokenOptions
 } from './interface';
@@ -84,6 +85,25 @@ class Token {
             role: user?.role,
             username: user?.username,
         };
+
+        // Add tokenId to refresh token payload
+        if (type === TokenType.REFRESH) {
+            const refreshPayload: IRefreshTokenPayload = {
+                ...payload,
+                tokenId: TokenUtils.generateRefreshTokenId()
+            };
+            return Jwt.sign(
+                {
+                    data: refreshPayload,
+                    type
+                },
+                this.getSecretKey(),
+                {
+                    expiresIn,
+                    algorithm: 'HS256'
+                }
+            );
+        }
 
         return Jwt.sign(
             {

@@ -288,10 +288,11 @@ class AuthController extends BaseController {
 
             console.log(decodedRefresh, "This is the decoded refresh token");
 
-            if(decodedRefresh) {
+            if(decodedRefresh && decodedRefresh.type === TokenType.REFRESH) {
+                const refreshPayload = decodedRefresh.data as IRefreshTokenPayload;
                 await this.refreshTokenService.saveRefreshToken(
                     user._id as string,
-                    refreshToken,
+                    refreshPayload.tokenId,
                     req.headers['user-agent'],
                     req.ip
                 );
@@ -473,9 +474,13 @@ class AuthController extends BaseController {
 
             let refreshToken = undefined;
             for (const cookie of cookies) {
-                const [name, value] = cookie.split('=');
+                const equalIndex = cookie.indexOf('=');
+                if (equalIndex === -1) continue;
+                const name = cookie.substring(0, equalIndex).trim();
+                const value = cookie.substring(equalIndex + 1).trim();
                 if (name === 'refreshToken') {
                     refreshToken = value;
+                    break;
                 }
             }
 
@@ -496,10 +501,10 @@ class AuthController extends BaseController {
             const refreshPayload = decoded.data as IRefreshTokenPayload;
 
             // Verify token exists in database and is valid
-            // const tokenDoc = await this.refreshTokenService.findValidToken(refreshPayload.tokenId);
-            // if (!tokenDoc) {
-            //     return next(errorResponseMessage.unauthorized("Invalid refresh token"));
-            // }
+            const tokenDoc = await this.refreshTokenService.findValidToken(refreshPayload.tokenId);
+            if (!tokenDoc) {
+                return next(errorResponseMessage.unauthorized("Invalid refresh token"));
+            }
 
             // Find user
             const user = await this.userService.findById(refreshPayload.userId);
@@ -542,15 +547,17 @@ class AuthController extends BaseController {
                 secure: config.NODE_ENV === 'production',
                 // secure: true,
                 sameSite: 'lax',
+                path: "/",
                 maxAge: 60 * 60 * 1000,  // 1 hour
                 domain: config.COOKIE_DOMAIN,
             });
 
-            res.cookie('refreshToken', refreshToken, {
+            res.cookie('refreshToken', newRefreshToken, {
                 httpOnly: true,
                 secure: config.NODE_ENV === 'production',
                 // secure: true,
                 sameSite: 'lax',
+                path: "/",
                 maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
                 domain: config.COOKIE_DOMAIN,
             });

@@ -50,6 +50,17 @@ export class FileValidator {
                 .replace(/[^a-zA-Z0-9.-]/g, '_')
                 .replace(/_{2,}/g, '_')
                 .toLowerCase();
+            
+            // Check if customName already ends with a timestamp (10+ digits)
+            // Timestamps can be directly appended or after an underscore
+            // Pattern matches: _1234567890 or 1234567890 (10+ digits at the end)
+            const timestampPattern = /(_?\d{10,})$/; // Matches optional underscore followed by 10+ digits at the end
+            if (timestampPattern.test(sanitized)) {
+                // Already has a timestamp, just add extension
+                return `${sanitized}${ext}`;
+            }
+            
+            // Otherwise, add timestamp
             return `${sanitized}_${Date.now()}${ext}`;
         }
 
