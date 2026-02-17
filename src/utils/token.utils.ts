@@ -1,5 +1,6 @@
 import Jwt, { JwtPayload } from 'jsonwebtoken';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 import {
     ITokenPayload,
     IVerifyTokenPayload,
@@ -32,9 +33,7 @@ export class TokenUtils {
      * @returns Randomly generated token string
      */
     static generateRandomToken(length: number = 32): string {
-        return Array.from(crypto.getRandomValues(new Uint8Array(length)))
-            .map(b => b.toString(16).padStart(2, '0'))
-            .join('');
+        return crypto.randomBytes(length).toString('hex');
     }
 
     /**
