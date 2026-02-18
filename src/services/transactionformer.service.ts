@@ -111,8 +111,8 @@ class TransactionService extends DBService<ITransaction> {
                 {
                     title: "New RMB Payment",
                     message: "A customer has initiated a new RMB payment and has paid, you can find the QRCode and the Payment Receipt attached to this email",
-                    actionUrl: `${config.FRONTEND_URL}/dashboard/admin/payments`,
-                    buttonText: "Go to dashboard"
+                    actionUrl: `${config.FRONTEND_URL}/dashboard/admin/transactions`,
+                    buttonText: "Go to Transaction History"
                 },
                 [
                     {

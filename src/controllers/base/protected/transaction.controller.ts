@@ -130,7 +130,7 @@ class TransactionController extends BaseController {
 
     private async getAlipayTransactions(req: Request, res: Response, next: NextFunction, isAdmin: boolean) {
         try {
-            const { page, limit, searchTerm, status, ...otherQueries } = req.query;
+            const { page, limit, searchTerm, status, startDate, endDate, ...otherQueries } = req.query;
             const user = res.locals.user;
 
             if (!isAdmin) {
@@ -143,6 +143,38 @@ class TransactionController extends BaseController {
             // Handle status filter
             if (status && status !== 'all') {
                 otherQueries.status = status;
+            }
+
+            // Handle date range filter
+            if (startDate || endDate) {
+                const dateFilter: any = {};
+                if (startDate) {
+                    // Parse date string (YYYY-MM-DD) and create start of day in UTC
+                    const dateParts = (startDate as string).split('-');
+                    if (dateParts.length === 3) {
+                        const year = parseInt(dateParts[0], 10);
+                        const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
+                        const day = parseInt(dateParts[2], 10);
+                        // Create date in UTC to avoid timezone issues
+                        const start = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+                        dateFilter.$gte = start;
+                    }
+                }
+                if (endDate) {
+                    // Parse date string (YYYY-MM-DD) and create end of day in UTC
+                    const dateParts = (endDate as string).split('-');
+                    if (dateParts.length === 3) {
+                        const year = parseInt(dateParts[0], 10);
+                        const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
+                        const day = parseInt(dateParts[2], 10);
+                        // Create date in UTC to avoid timezone issues
+                        const end = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+                        dateFilter.$lte = end;
+                    }
+                }
+                if (Object.keys(dateFilter).length > 0) {
+                    otherQueries.createdAt = dateFilter;
+                }
             }
 
             let transactions;
@@ -173,7 +205,7 @@ class TransactionController extends BaseController {
 
     private async getBankTransferTransactions(req: Request, res: Response, next: NextFunction, isAdmin: boolean) {
         try {
-            const { page, limit, searchTerm, status, ...otherQueries } = req.query;
+            const { page, limit, searchTerm, status, startDate, endDate, ...otherQueries } = req.query;
             const user = res.locals.user;
 
             if (!isAdmin) {
@@ -186,6 +218,38 @@ class TransactionController extends BaseController {
             // Handle status filter
             if (status && status !== 'all') {
                 otherQueries.status = status;
+            }
+
+            // Handle date range filter
+            if (startDate || endDate) {
+                const dateFilter: any = {};
+                if (startDate) {
+                    // Parse date string (YYYY-MM-DD) and create start of day in UTC
+                    const dateParts = (startDate as string).split('-');
+                    if (dateParts.length === 3) {
+                        const year = parseInt(dateParts[0], 10);
+                        const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
+                        const day = parseInt(dateParts[2], 10);
+                        // Create date in UTC to avoid timezone issues
+                        const start = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+                        dateFilter.$gte = start;
+                    }
+                }
+                if (endDate) {
+                    // Parse date string (YYYY-MM-DD) and create end of day in UTC
+                    const dateParts = (endDate as string).split('-');
+                    if (dateParts.length === 3) {
+                        const year = parseInt(dateParts[0], 10);
+                        const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
+                        const day = parseInt(dateParts[2], 10);
+                        // Create date in UTC to avoid timezone issues
+                        const end = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+                        dateFilter.$lte = end;
+                    }
+                }
+                if (Object.keys(dateFilter).length > 0) {
+                    otherQueries.createdAt = dateFilter;
+                }
             }
 
             let transactions;

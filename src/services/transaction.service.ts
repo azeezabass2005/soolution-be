@@ -292,8 +292,8 @@ class TransactionService extends DBService<ITransaction> {
                 {
                     title: `📱 New ${transactionType}`,
                     message: `A customer has initiated a new ${transaction?.currency} payment and has paid. Check the payment receipt attached.\n${recipientInfo}`,
-                    actionUrl: `${config.FRONTEND_URL}/dashboard/admin/payments`,
-                    buttonText: "Go to Dashboard",
+                    actionUrl: `${config.FRONTEND_URL}/dashboard/admin/transactions`,
+                    buttonText: "Go to Transaction History",
                 },
                 config.ADMIN_PHONE_NUMBERS,
                 attachments,
