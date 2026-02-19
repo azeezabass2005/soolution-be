@@ -302,10 +302,10 @@ class NotificationService {
                 buttonText: 'View Details',
             },
             payment_initiated: {
-                title: '⏳ Payment Initiated',
-                message: `Your payment of ${details.amount} has been initiated (Ref: ${details.reference}). We're processing your request.`,
+                title: '📋 Payment Request Created',
+                message: `Your payment request of ${details.amount} to ${details.recipient} has been created (Ref: ${details.reference}). Please upload your payment receipt to confirm your request and allow us to process it.`,
                 actionUrl: details.actionUrl,
-                buttonText: 'Track Payment',
+                buttonText: 'Upload Receipt',
             },
             payment_failed: {
                 title: '❌ Payment Failed',

@@ -35,10 +35,10 @@ const ZPostRegister = z.object({
     purpose: z.enum(['business', 'personal', 'travel', 'investment', 'savings', 'others' ], {
         errorMap: () => ({message: "Please select a valid purpose'"})
     }),
-    typeOfBusiness: z.enum(['retail', 'industry']).optional(),
+    typeOfBusiness: z.enum(['creators', 'retail-sales', 'software', 'services', 'entertainment', 'media', 'payments', 'others']).optional(),
     monthlyVolume: z.string().optional(),
-    hearAboutUs: z.enum(['friends', 'ads', 'search-engines', 'social-media', 'referrals', 'events', 'others'], {
-        errorMap: () => ({message: "How you hear about us can either be 'Friends', 'Ads' or 'Others'"})
+    hearAboutUs: z.enum(['friends', 'ads', 'search-engines', 'social-media', 'referrals', 'events', 'youtube', 'instagram', 'x-twitter', 'facebook', 'tiktok', 'google', 'others'], {
+        errorMap: () => ({message: "Please select a valid option for how you heard about us"})
     })
 })
     .superRefine((data, ctx) => {

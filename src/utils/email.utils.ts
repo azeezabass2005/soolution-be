@@ -452,6 +452,33 @@ class EmailService {
                 attachments,
             };
 
+            // In development, log the email instead of sending it
+            if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'dev') {
+                console.log('\n========== EMAIL (DEV MODE - NOT SENT) ==========');
+                console.log('To:', mailOptions.to);
+                console.log('From:', mailOptions.from);
+                console.log('Subject:', mailOptions.subject);
+                if (mailOptions.cc) console.log('CC:', mailOptions.cc);
+                if (mailOptions.bcc) console.log('BCC:', mailOptions.bcc);
+                if (mailOptions.text) console.log('Text:', mailOptions.text);
+                if (attachments && attachments.length > 0) {
+                    console.log('Attachments:', attachments.map(att => att.filename).join(', '));
+                }
+                if (emailHtml && typeof emailHtml === 'string') {
+                    const preview = emailHtml.length > 500 ? emailHtml.substring(0, 500) + '...' : emailHtml;
+                    console.log('HTML Preview (first 500 chars):', preview);
+                }
+                console.log('===============================================\n');
+                
+                // Return a mock success response
+                return {
+                    messageId: `dev-${Date.now()}@solutionpay.local`,
+                    accepted: Array.isArray(to) ? to : [to],
+                    rejected: [],
+                    response: '250 Email logged in development mode (not sent)',
+                };
+            }
+
             return await this.transporter.sendMail(mailOptions);
         }, 'Failed to send email');
     }

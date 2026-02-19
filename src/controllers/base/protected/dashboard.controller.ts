@@ -58,6 +58,12 @@ class DashboardController extends BaseController {
             ]);
 
             const totalAmountCompleted = completedTotals?.[0]?.totalCompletedAmount || 0;
+            const totalTransactionsCompleted = completedTotals?.[0]?.completedCount || 0;
+
+            // count KYC verified users
+            const totalKYCVerified = await User.countDocuments({
+                isKYCDone: true
+            });
 
             // count pending transactions (awaiting_confirmation only)
             const pendingCount = await Transaction.countDocuments({
@@ -76,6 +82,8 @@ class DashboardController extends BaseController {
                 totalTransactions,
                 totalAmountInitiated,
                 totalAmountCompleted,
+                totalTransactionsCompleted,
+                totalKYCVerified,
                 pendingPayments: pendingCount,
                 recentTransactions,
             });

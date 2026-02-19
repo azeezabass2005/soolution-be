@@ -120,10 +120,10 @@ export const UserSchema = new Schema<IUser>(
         /**
          * Type of business if purpose is business
          * @type {string}
-         * @enum ['retail', 'industry']
+         * @enum ['creators', 'retail-sales', 'software', 'services', 'entertainment', 'media', 'payments', 'others']
          * @optional
          */
-        typeOfBusiness: { type: String, enum: ['retail', 'industry'] },
+        typeOfBusiness: { type: String, enum: ['creators', 'retail-sales', 'software', 'services', 'entertainment', 'media', 'payments', 'others'] },
 
         /**
          * Expected monthly transaction volume

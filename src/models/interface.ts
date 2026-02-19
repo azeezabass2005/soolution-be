@@ -32,7 +32,7 @@ export interface IUser extends Document {
     countryOfOrigin?: string;
     countryOfResidence?: string;
     purpose?: 'business' | 'spending';
-    typeOfBusiness?: 'retail' | 'industry';
+    typeOfBusiness?: 'creators' | 'retail-sales' | 'software' | 'services' | 'entertainment' | 'media' | 'payments' | 'others';
     monthlyVolume?: string;
     hearAboutUs?: 'friends' | 'ads' | 'others';
 
