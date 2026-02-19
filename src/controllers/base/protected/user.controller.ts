@@ -83,7 +83,7 @@ class UserController extends BaseController {
     private async getAllUsers(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const users = await this.userService.find({}, {
-                select: ['email', 'firstName', 'lastName', 'isVerified', 'isCompleted', 'role', 'status', 'phoneNumber', 'whatsappNumber', 'countryOfOrigin', 'countryOfResidence', 'purpose', 'typeOfBusiness', 'monthlyVolume', 'hearAboutUs']
+                select: ['email', 'firstName', 'lastName', 'isVerified', 'isCompleted', 'isKYCDone', 'role', 'status', 'phoneNumber', 'whatsappNumber', 'countryOfOrigin', 'countryOfResidence', 'purpose', 'typeOfBusiness', 'monthlyVolume', 'hearAboutUs']
             });
             const cleanUsers: any = []
             users.forEach(user => {
