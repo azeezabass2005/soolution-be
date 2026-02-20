@@ -235,7 +235,7 @@ class TransactionService extends DBService<ITransaction> {
         });
 
         const transaction = await this.findById(transactionId);
-        // Use the transaction's currency (which could be RMB, GHS, XAF, or KES) instead of hardcoding RMB
+        // Use the transaction's currency (which could be RMB, GHS, XAF, KES, or NGN) instead of hardcoding RMB
         let fromAmount = await new RateUtils(transaction?.fromCurrency!, transaction?.currency!).convertAmount(transaction?.amount!);
         
         // Update transaction details with receipt URL first

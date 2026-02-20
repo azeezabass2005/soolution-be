@@ -212,8 +212,10 @@ class TransactionController extends BaseController {
                 otherQueries.user = user?.id;
             }
 
-            // Filter for GHS, XAF, or KES transactions only
-            otherQueries.currency = { $in: ['GHS', 'XAF', 'KES'] };
+            // Filter for bank transfer transactions (includes both send and receive)
+            // Send: fromCurrency = NGN/GHS, currency = GHS/XAF/KES
+            // Receive: fromCurrency = GHS/KES/XAF/NGN, currency = NGN/GHS
+            otherQueries.currency = { $in: ['GHS', 'XAF', 'KES', 'NGN'] };
 
             // Handle status filter
             if (status && status !== 'all') {
