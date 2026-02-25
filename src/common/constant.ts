@@ -9,6 +9,8 @@ export const MODEL_NAME = {
     TRANSACTION_DETAIL: "Transaction DetailModel",
     BANK_ACCOUNT_DETAIL: "BankAccountDetailModel",
     VERIFICATION: "VerificationModel",
+    IDEMPOTENCY_KEY: "IdempotencyKeyModel",
+    AUDIT_LOG: "AuditLogModel",
 }
 
 export const ROLE_MAP = {

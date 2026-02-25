@@ -3,16 +3,21 @@ import {DetailType, ITransaction, ITransactionDetail, IUser} from "../models/int
 import Transaction from "../models/transaction.model";
 import TransactionDetailsService from "./transaction-details.service";
 import {FileUploadFactory} from "./file-upload.factory";
-import errorResponseMessage from "../common/messages/error-response-message";
+import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import {DETAIL_TYPE, TRANSACTION_STATUS} from "../common/constant";
-import {ObjectId} from "mongoose";
+import {ObjectId, ClientSession} from "mongoose";
+import mongoose from "mongoose";
 import RateUtils from "../utils/rate.utils";
 import BankAccountDetailsService from "./bank-account-details.service";
 import NotificationService from "../utils/notification.utils";
 import config from "../config/env.config";
 import { StorageService } from "./storage.service";
 import logger from "../utils/logger.utils";
-import crypto from "crypto"
+import crypto from "crypto";
+import transactionStateMachine from "../utils/transaction-state-machine.utils";
+import IdempotencyService from "./idempotency.service";
+import AuditLogService from "./audit-log.service";
+import { validateTransactionAmount, getTransactionLimits } from "../config/transaction-limits.config";
 
 class TransactionService extends DBService<ITransaction> {
 
@@ -20,6 +25,8 @@ class TransactionService extends DBService<ITransaction> {
     bankAccountDetailsService: BankAccountDetailsService;
     notificationService: NotificationService;
     storageService: StorageService;
+    idempotencyService: IdempotencyService;
+    auditLogService: AuditLogService;
 
 
     /**
@@ -35,6 +42,8 @@ class TransactionService extends DBService<ITransaction> {
         this.bankAccountDetailsService = new BankAccountDetailsService();
         this.notificationService = new NotificationService();
         this.storageService = new StorageService();
+        this.idempotencyService = new IdempotencyService();
+        this.auditLogService = new AuditLogService();
     }
 
     private receiptUploadService = FileUploadFactory.getGeneralUploadService();
@@ -51,14 +60,54 @@ class TransactionService extends DBService<ITransaction> {
     };
 
     public createBankTransferTransaction = async (
-        transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string }>,
+        transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string; idempotencyKey?: string }>,
         user: string,
+        ipAddress?: string,
+        userAgent?: string
     ) => {
-        const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName } = transactionData;
+        const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName, idempotencyKey } = transactionData;
         
         if (!toCurrency) {
             throw errorResponseMessage.payloadIncorrect("Target currency (toCurrency) is required");
         }
+
+        if (!fromCurrency) {
+            throw errorResponseMessage.payloadIncorrect("Source currency (fromCurrency) is required");
+        }
+
+        if (!amount || amount <= 0) {
+            throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
+        }
+
+        // Validate amount against transaction limits
+        const amountValidation = validateTransactionAmount(amount, fromCurrency as any, toCurrency as any);
+        if (!amountValidation.isValid) {
+            throw errorResponseMessage.createError(
+                400,
+                amountValidation.error || "Transaction amount is outside allowed limits",
+                ErrorSeverity.HIGH
+            );
+        }
+
+        // Handle idempotency key if provided
+        if (idempotencyKey) {
+            const idempotencyResult = await this.idempotencyService.validateKey(idempotencyKey, user);
+            if (idempotencyResult.isDuplicate && idempotencyResult.transactionId) {
+                // Return existing transaction
+                const existingTransaction = await this.findById(idempotencyResult.transactionId);
+                if (existingTransaction) {
+                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existingTransaction._id });
+                    return { 
+                        ...existingTransaction.toObject(), 
+                        details: existingDetails ? existingDetails.toObject() : {} 
+                    };
+                }
+            }
+        }
+
+        // Validate exchange rate exists and is active before creating transaction
+        const rateUtils = new RateUtils(fromCurrency, toCurrency);
+        await rateUtils.validateExchangeRate();
 
         const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
         if(!bankAccountDetails) {
@@ -68,13 +117,18 @@ class TransactionService extends DBService<ITransaction> {
         const transaction = await this.create({
             user,
             reference: this.generateBankTransferTransactionReference(toCurrency),
-            amount,
+            amount: Math.round(amount * 100) / 100, // Round to 2 decimal places
             fromCurrency,
             currency: toCurrency,
             detailType: paymentMethod || DETAIL_TYPE.BANK_TRANSFER,
             status: TRANSACTION_STATUS.PENDING_INPUT,
             initiatedAt: Date.now(),
         })
+
+        // Update idempotency key with transaction ID if provided
+        if (idempotencyKey) {
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+        }
 
         const transactionDetails = await this.transactionDetailsService.create({
             transactionId: transaction._id,
@@ -129,8 +183,47 @@ class TransactionService extends DBService<ITransaction> {
         return { ...transaction.toObject(), details: { ...transactionDetails.toObject() } } 
     }
 
-    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType }>, alipayQrCode: Express.Multer.File, user: string,) =>  {
-        const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod } = transactionData;
+    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string }>, alipayQrCode: Express.Multer.File, user: string, ipAddress?: string, userAgent?: string) =>  {
+        const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod, idempotencyKey } = transactionData;
+        
+        if (!fromCurrency) {
+            throw errorResponseMessage.payloadIncorrect("Source currency (fromCurrency) is required");
+        }
+
+        if (!amount || amount <= 0) {
+            throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
+        }
+
+        // Validate amount against transaction limits
+        const amountValidation = validateTransactionAmount(amount, fromCurrency as any, "RMB");
+        if (!amountValidation.isValid) {
+            throw errorResponseMessage.createError(
+                400,
+                amountValidation.error || "Transaction amount is outside allowed limits",
+                ErrorSeverity.HIGH
+            );
+        }
+
+        // Handle idempotency key if provided
+        if (idempotencyKey) {
+            const idempotencyResult = await this.idempotencyService.validateKey(idempotencyKey, user);
+            if (idempotencyResult.isDuplicate && idempotencyResult.transactionId) {
+                // Return existing transaction
+                const existingTransaction = await this.findById(idempotencyResult.transactionId);
+                if (existingTransaction) {
+                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existingTransaction._id });
+                    return { 
+                        ...existingTransaction.toObject(), 
+                        details: existingDetails ? existingDetails.toObject() : {} 
+                    };
+                }
+            }
+        }
+        
+        // Validate exchange rate exists and is active before creating transaction
+        const rateUtils = new RateUtils(fromCurrency, "RMB");
+        await rateUtils.validateExchangeRate();
+
         const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
         if(!bankAccountDetails) {
             throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
@@ -148,13 +241,18 @@ class TransactionService extends DBService<ITransaction> {
         const transaction = await this.create({
             user,
             reference: this.generateTransactionReference(),
-            amount,
+            amount: Math.round(amount * 100) / 100, // Round to 2 decimal places
             fromCurrency,
             currency: "RMB",
             detailType: paymentMethod || DETAIL_TYPE.ALIPAY,
             status: TRANSACTION_STATUS.PENDING_INPUT,
             initiatedAt: Date.now(),
         })
+
+        // Update idempotency key with transaction ID if provided
+        if (idempotencyKey) {
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+        }
 
         const transactionDetails = await this.transactionDetailsService.create({
             transactionId: transaction._id,
@@ -203,110 +301,202 @@ class TransactionService extends DBService<ITransaction> {
         return { ...transaction.toObject(), details: { ...transactionDetails.toObject() } } 
     }
 
-    public uploadUserPaymentReceipt = async (transactionId: string, receipt: Express.Multer.File, isKycDone: boolean) => {
-        const uploadResult = await this.receiptUploadService.uploadFile(receipt as Express.Multer.File, {
-            folder: 'pay_in/',
-            customFilename: `pay_in_receipt${Date.now()}`,
-            makePublic: true,
-        });
-        if(!uploadResult.success) {
-            logger.error('Payment receipt upload failed', { 
-                error: uploadResult.error,
-                transactionId,
-                fileName: receipt.originalname,
-                fileSize: receipt.size
+    public uploadUserPaymentReceipt = async (transactionId: string, receipt: Express.Multer.File, isKycDone: boolean, userId?: string, ipAddress?: string, userAgent?: string) => {
+        // Use MongoDB transaction for atomic operations
+        const session = await mongoose.startSession();
+        session.startTransaction();
+
+        try {
+            const uploadResult = await this.receiptUploadService.uploadFile(receipt as Express.Multer.File, {
+                folder: 'pay_in/',
+                customFilename: `pay_in_receipt${Date.now()}`,
+                makePublic: true,
             });
-            throw errorResponseMessage.unableToComplete("Payment receipt upload failed");
-        }
-        
-        if (!uploadResult.file?.url) {
-            logger.error('Upload succeeded but no URL returned', {
+            if(!uploadResult.success) {
+                logger.error('Payment receipt upload failed', { 
+                    error: uploadResult.error,
+                    transactionId,
+                    fileName: receipt.originalname,
+                    fileSize: receipt.size
+                });
+                throw errorResponseMessage.unableToComplete("Payment receipt upload failed");
+            }
+            
+            if (!uploadResult.file?.url) {
+                logger.error('Upload succeeded but no URL returned', {
+                    transactionId,
+                    fileKey: uploadResult.file?.key
+                });
+                throw errorResponseMessage.unableToComplete("Payment receipt upload failed - no URL returned");
+            }
+
+            logger.info('Payment receipt uploaded successfully', {
                 transactionId,
-                fileKey: uploadResult.file?.key
+                fileKey: uploadResult.file.key,
+                fileUrl: uploadResult.file.url,
+                fileSize: uploadResult.file.size
             });
-            throw errorResponseMessage.unableToComplete("Payment receipt upload failed - no URL returned");
-        }
 
-        logger.info('Payment receipt uploaded successfully', {
-            transactionId,
-            fileKey: uploadResult.file.key,
-            fileUrl: uploadResult.file.url,
-            fileSize: uploadResult.file.size
-        });
+            // Fetch transaction with optimistic locking - use findOneAndUpdate to prevent race conditions
+            const transaction = await this.Model.findOneAndUpdate(
+                { 
+                    _id: transactionId,
+                    status: TRANSACTION_STATUS.PENDING_INPUT // Only update if still in PENDING_INPUT
+                },
+                { $set: {} }, // No update, just for locking
+                { 
+                    session,
+                    new: true 
+                }
+            ).populate('user');
 
-        const transaction = await this.findById(transactionId);
-        // Use the transaction's currency (which could be RMB, GHS, XAF, KES, or NGN) instead of hardcoding RMB
-        let fromAmount = await new RateUtils(transaction?.fromCurrency!, transaction?.currency!).convertAmount(transaction?.amount!);
-        
-        // Update transaction details with receipt URL first
-        await this.transactionDetailsService.update({ transactionId }, {payInReceiptUrl: uploadResult.file.url, fromAmount: fromAmount});
+            if (!transaction) {
+                await session.abortTransaction();
+                await session.endSession();
+                throw errorResponseMessage.resourceNotFound("Transaction or transaction is not in a valid state for receipt upload");
+            }
 
-        // Notify admins via both email and WhatsApp
-        const isAlipayTransaction = transaction?.currency === 'RMB';
-        const transactionType = isAlipayTransaction ? 'RMB Payment' : `${transaction?.currency} Payment`;
-        const recipientInfo = isAlipayTransaction 
-            ? `${transaction?.details?.alipayNo ? `Alipay No: ${transaction?.details?.alipayNo}\n` : ''}${transaction?.details?.alipayName ? `Alipay Name: ${transaction?.details?.alipayName}` : ''}`
-            : transaction?.details?.institutionType === 'bank'
-                ? `Bank: ${transaction?.details?.bankName}\nAccount Number: ${transaction?.details?.accountNumber}\nAccount Name: ${transaction?.details?.accountName}`
-                : `Network: ${transaction?.details?.momoNetwork}\nNumber: ${transaction?.details?.momoNumber}\nName: ${transaction?.details?.momoName}`;
+            // Validate exchange rate exists and is active before conversion
+            if (!transaction.fromCurrency || !transaction.currency) {
+                await session.abortTransaction();
+                await session.endSession();
+                throw errorResponseMessage.createError(
+                    400,
+                    "Transaction currency information is missing",
+                    ErrorSeverity.HIGH
+                );
+            }
 
-        const attachments = [];
-        const whatsappAttachments = [];
+            if (!transaction.amount || transaction.amount <= 0) {
+                await session.abortTransaction();
+                await session.endSession();
+                throw errorResponseMessage.createError(
+                    400,
+                    "Transaction amount is invalid",
+                    ErrorSeverity.HIGH
+                );
+            }
 
-        if (isAlipayTransaction && transaction?.details?.qrCodeUrl) {
+            // Use the transaction's currency (which could be RMB, GHS, XAF, KES, or NGN) instead of hardcoding RMB
+            const rateUtils = new RateUtils(transaction.fromCurrency, transaction.currency);
+            let fromAmount = await rateUtils.convertAmount(transaction.amount);
+            // Round fromAmount to 2 decimal places
+            fromAmount = Math.round(fromAmount * 100) / 100;
+            
+            // Update transaction details with receipt URL (within transaction)
+            await this.transactionDetailsService.updateOneWithSession(
+                { transactionId }, 
+                { $set: { payInReceiptUrl: uploadResult.file.url, fromAmount: fromAmount } },
+                session
+            );
+
+            // Validate status transition before updating
+            const oldStatus = transaction.status;
+            const newStatus = isKycDone ? TRANSACTION_STATUS.AWAITING_CONFIRMATION : TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION;
+            transactionStateMachine.validateTransition(oldStatus, newStatus);
+
+            // Update status within transaction
+            await this.updateById(transactionId, { status: newStatus }, session);
+
+            // Commit transaction
+            await session.commitTransaction();
+            await session.endSession();
+
+            // Log status change and receipt upload (outside transaction to avoid blocking)
+            if (userId) {
+                try {
+                    await Promise.all([
+                        this.auditLogService.logStatusChange(
+                            transactionId,
+                            userId,
+                            oldStatus,
+                            newStatus,
+                            ipAddress,
+                            userAgent
+                        ),
+                        this.auditLogService.logReceiptUpload(
+                            transactionId,
+                            userId,
+                            'pay_in',
+                            uploadResult.file.url,
+                            ipAddress,
+                            userAgent
+                        )
+                    ]);
+                } catch (error) {
+                    logger.warn('Failed to log audit events', { error, transactionId });
+                    // Don't fail if audit logging fails
+                }
+            }
+
+            // Notify admins via both email and WhatsApp (outside transaction - don't fail if this fails)
+            const isAlipayTransaction = transaction.currency === 'RMB';
+            const transactionType = isAlipayTransaction ? 'RMB Payment' : `${transaction.currency} Payment`;
+            const recipientInfo = isAlipayTransaction 
+                ? `${transaction.details?.alipayNo ? `Alipay No: ${transaction.details.alipayNo}\n` : ''}${transaction.details?.alipayName ? `Alipay Name: ${transaction.details.alipayName}` : ''}`
+                : transaction.details?.institutionType === 'bank'
+                    ? `Bank: ${transaction.details.bankName}\nAccount Number: ${transaction.details.accountNumber}\nAccount Name: ${transaction.details.accountName}`
+                    : `Network: ${transaction.details?.momoNetwork}\nNumber: ${transaction.details?.momoNumber}\nName: ${transaction.details?.momoName}`;
+
+            const attachments = [];
+            const whatsappAttachments = [];
+
+            if (isAlipayTransaction && transaction.details?.qrCodeUrl) {
+                try {
+                    attachments.push({
+                        filename: 'alipay_qrcode.png',
+                        content: await this.storageService.downloadFile(transaction.details.qrCodeUrl),
+                        contentType: 'image/png'
+                    });
+                    whatsappAttachments.push({
+                        caption: 'Alipay QRCode',
+                        url: transaction.details.qrCodeUrl,
+                    });
+                } catch (error) {
+                    logger.warn('Failed to download Alipay QR code for notification', { error, transactionId });
+                    // Continue without QR code attachment
+                }
+            }
+
             try {
                 attachments.push({
-                    filename: 'alipay_qrcode.png',
-                    content: await this.storageService.downloadFile(transaction?.details?.qrCodeUrl!),
+                    filename: 'user_payment_receipt.png',
+                    content: await this.storageService.downloadFile(uploadResult.file.url),
                     contentType: 'image/png'
                 });
                 whatsappAttachments.push({
-                    caption: 'Alipay QRCode',
-                    url: transaction?.details?.qrCodeUrl!,
+                    caption: 'User Payment Receipt',
+                    url: uploadResult.file.url,
                 });
             } catch (error) {
-                logger.warn('Failed to download Alipay QR code for notification', { error, transactionId });
-                // Continue without QR code attachment
+                logger.warn('Failed to download receipt for notification, but receipt is uploaded', { error, transactionId, receiptUrl: uploadResult.file.url });
+                // Continue without receipt attachment in notification, but receipt is already saved
             }
-        }
 
-        try {
-            attachments.push({
-                filename: 'user_payment_receipt.png',
-                content: await this.storageService.downloadFile(uploadResult.file?.url!),
-                contentType: 'image/png'
-            });
-            whatsappAttachments.push({
-                caption: 'User Payment Receipt',
-                url: uploadResult.file?.url!,
-            });
+            // Send notifications (don't fail if this fails, receipt is already uploaded)
+            try {
+                await this.notificationService.notifyAdmins(
+                    config.ADMIN_EMAILS,
+                    {
+                        title: `📱 New ${transactionType}`,
+                        message: `A customer has initiated a new ${transaction.currency} payment and has paid. Check the payment receipt attached.\n${recipientInfo}`,
+                        actionUrl: `${config.FRONTEND_URL}/dashboard/admin/transactions`,
+                        buttonText: "Go to Transaction History",
+                    },
+                    config.ADMIN_PHONE_NUMBERS,
+                    attachments,
+                    whatsappAttachments,
+                );
+            } catch (error) {
+                logger.error('Failed to send admin notifications, but receipt is uploaded', { error, transactionId });
+                // Don't fail the whole operation if notifications fail
+            }
         } catch (error) {
-            logger.warn('Failed to download receipt for notification, but receipt is uploaded', { error, transactionId, receiptUrl: uploadResult.file?.url });
-            // Continue without receipt attachment in notification, but receipt is already saved
+            // Abort transaction on error
+            await session.abortTransaction();
+            await session.endSession();
+            throw error;
         }
-
-        // Send notifications (don't fail if this fails, receipt is already uploaded)
-        try {
-            await this.notificationService.notifyAdmins(
-                config.ADMIN_EMAILS,
-                {
-                    title: `📱 New ${transactionType}`,
-                    message: `A customer has initiated a new ${transaction?.currency} payment and has paid. Check the payment receipt attached.\n${recipientInfo}`,
-                    actionUrl: `${config.FRONTEND_URL}/dashboard/admin/transactions`,
-                    buttonText: "Go to Transaction History",
-                },
-                config.ADMIN_PHONE_NUMBERS,
-                attachments,
-                whatsappAttachments,
-            );
-        } catch (error) {
-            logger.error('Failed to send admin notifications, but receipt is uploaded', { error, transactionId });
-            // Don't fail the whole operation if notifications fail
-        }
-
-        // Only update status AFTER everything succeeds (or at least after receipt is uploaded and saved)
-        // This ensures status only changes if receipt upload was successful
-        await this.updateById(transactionId, { status: isKycDone ? TRANSACTION_STATUS.AWAITING_CONFIRMATION : TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION });
 
         // Attach files for email notification
         // const adminEmails = config.ADMIN_EMAILS.split(",");
@@ -339,7 +529,7 @@ class TransactionService extends DBService<ITransaction> {
         // }
     }
 
-    public uploadAdminPaymentReceipt = async (transactionId: string, receipt: Express.Multer.File) => {
+    public uploadAdminPaymentReceipt = async (transactionId: string, receipt: Express.Multer.File, userId?: string, ipAddress?: string, userAgent?: string) => {
         const uploadResult = await this.receiptUploadService.uploadFile(receipt as Express.Multer.File, {
             folder: 'pay_out/',
             customFilename: `pay_out_receipt${Date.now()}`,
@@ -349,9 +539,56 @@ class TransactionService extends DBService<ITransaction> {
             console.log(uploadResult, "This is the result from admin payment receipt upload")
             throw errorResponseMessage.unableToComplete("Payment receipt upload failed");
         }
+
+        // Fetch transaction and validate it exists
         const transaction = await this.findById(transactionId);
+        if (!transaction) {
+            throw errorResponseMessage.resourceNotFound("Transaction");
+        }
+
+        // Validate transaction status - must be AWAITING_CONFIRMATION to complete
+        if (transaction.status !== TRANSACTION_STATUS.AWAITING_CONFIRMATION) {
+            throw errorResponseMessage.createError(
+                400,
+                `Cannot complete transaction. Transaction must be in ${TRANSACTION_STATUS.AWAITING_CONFIRMATION} status. Current status: ${transaction.status}`,
+                ErrorSeverity.HIGH
+            );
+        }
+
+        // Validate status transition before updating
+        transactionStateMachine.validateTransition(transaction.status, TRANSACTION_STATUS.COMPLETED);
+
+        const oldStatus = transaction.status;
+
         await this.transactionDetailsService.update({ transactionId }, { payOutReceiptUrl: uploadResult.file?.url });
         await this.updateById(transactionId, { status: TRANSACTION_STATUS.COMPLETED });
+
+        // Log status change and receipt upload
+        if (userId) {
+            try {
+                await Promise.all([
+                    this.auditLogService.logStatusChange(
+                        transactionId,
+                        userId,
+                        oldStatus,
+                        TRANSACTION_STATUS.COMPLETED,
+                        ipAddress,
+                        userAgent
+                    ),
+                    this.auditLogService.logReceiptUpload(
+                        transactionId,
+                        userId,
+                        'pay_out',
+                        uploadResult.file?.url || '',
+                        ipAddress,
+                        userAgent
+                    )
+                ]);
+            } catch (error) {
+                logger.warn('Failed to log audit events', { error, transactionId });
+                // Don't fail if audit logging fails
+            }
+        }
 
         // Send transaction completed email and WhatsApp notification to user
         const user = transaction?.user as IUser;

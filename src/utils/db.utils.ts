@@ -28,7 +28,7 @@ interface PaginationResult<T> {
  */
 class DBService<T> {
     /** The Mongoose model associated with this service */
-    private readonly Model: Model<T>;
+    protected readonly Model: Model<T>;
 
     /** Default paths to populate when retrieving documents */
     private readonly defaultPopulatedPaths: string[];

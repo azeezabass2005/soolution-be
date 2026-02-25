@@ -2,6 +2,7 @@ import multer from 'multer';
 import { Request, Response, NextFunction } from 'express';
 
 export class MulterMiddleware {
+    // General upload configuration (50MB for general files)
     private static upload = multer({
         storage: multer.memoryStorage(),
         limits: {
@@ -9,8 +10,26 @@ export class MulterMiddleware {
         },
     });
 
+    // Receipt upload configuration (10MB limit for receipts)
+    private static receiptUpload = multer({
+        storage: multer.memoryStorage(),
+        limits: {
+            fileSize: 10 * 1024 * 1024, // 10MB for receipts
+        },
+    });
+
     public static single(fieldName: string = 'file') {
         return this.upload.single(fieldName);
+    }
+
+    /**
+     * Creates a multer middleware specifically for receipt uploads
+     * Uses a 10MB file size limit
+     * @param fieldName Field name for the file input
+     * @returns Multer middleware instance
+     */
+    public static receipt(fieldName: string = 'receipt') {
+        return this.receiptUpload.single(fieldName);
     }
 
     public static multiple(fieldName: string = 'files', maxCount: number = 10) {

@@ -6,6 +6,9 @@ import errorResponseMessage from "../../../common/messages/error-response-messag
 import {validateCreateAlipayTransaction, validateCreateBankTransferTransaction} from "../../../validators/z-transaction";
 import {ROLE_MAP, TRANSACTION_STATUS} from "../../../common/constant";
 import RoleMiddleware from "../../../middlewares/role.middleware";
+import TransactionMiddleware from "../../../middlewares/transaction.middleware";
+import TransactionRateLimitMiddleware from "../../../middlewares/transaction-rate-limit.middleware";
+import ReceiptFileValidationMiddleware from "../../../middlewares/receipt-file-validation.middleware";
 import {MulterMiddleware} from "../../../middlewares/multer.middleware";
 
 class TransactionController extends BaseController {
@@ -20,10 +23,10 @@ class TransactionController extends BaseController {
 
     protected setupRoutes() {
         // Route to create alipay transaction
-        this.router.post("/alipay", MulterMiddleware.single('alipayQrCode'), MulterMiddleware.handleError, validateCreateAlipayTransaction, this.createAlipayTransaction.bind(this));
+        this.router.post("/alipay", MulterMiddleware.single('alipayQrCode'), MulterMiddleware.handleError, TransactionRateLimitMiddleware.checkTransactionRateLimit, validateCreateAlipayTransaction, this.createAlipayTransaction.bind(this));
 
         // Route to create bank transfer / mobile money transaction (GHS, XAF, KES)
-        this.router.post("/bank-transfer", validateCreateBankTransferTransaction, this.createBankTransferTransaction.bind(this));
+        this.router.post("/bank-transfer", TransactionRateLimitMiddleware.checkTransactionRateLimit, validateCreateBankTransferTransaction, this.createBankTransferTransaction.bind(this));
 
         // Route for user to get alipay transactions
         this.router.get("/alipay", (req: Request, res: Response, next: NextFunction) => this.getAlipayTransactions(req, res, next, false));
@@ -38,21 +41,24 @@ class TransactionController extends BaseController {
         this.router.get("/bank-transfer-admin", RoleMiddleware.isAdmin, (req: Request, res: Response, next: NextFunction) => this.getBankTransferTransactions(req, res, next, true));
 
         // Route for user to upload payment receipt
-        this.router.patch("/alipay/user-receipt/:id", MulterMiddleware.single('receipt'), MulterMiddleware.handleError, this.uploadUserPaymentReceipt.bind(this));
+        this.router.patch("/alipay/user-receipt/:id", MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, TransactionMiddleware.verifyOwnership, this.uploadUserPaymentReceipt.bind(this));
 
         // Route for user to upload payment receipt for bank transfer
-        this.router.patch("/bank-transfer/user-receipt/:id", MulterMiddleware.single('receipt'), MulterMiddleware.handleError, this.uploadUserPaymentReceipt.bind(this));
+        this.router.patch("/bank-transfer/user-receipt/:id", MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, TransactionMiddleware.verifyOwnership, this.uploadUserPaymentReceipt.bind(this));
 
         // Route for admin to upload payment receipt
-        this.router.patch("/alipay/admin-receipt/:id", RoleMiddleware.isAdmin, MulterMiddleware.single('receipt'), MulterMiddleware.handleError, this.uploadAdminPaymentReceipt.bind(this));
+        this.router.patch("/alipay/admin-receipt/:id", RoleMiddleware.isAdmin, MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, this.uploadAdminPaymentReceipt.bind(this));
 
         // Route for admin to upload payment receipt for bank transfer
-        this.router.patch("/bank-transfer/admin-receipt/:id", RoleMiddleware.isAdmin, MulterMiddleware.single('receipt'), MulterMiddleware.handleError, this.uploadAdminPaymentReceipt.bind(this));
+        this.router.patch("/bank-transfer/admin-receipt/:id", RoleMiddleware.isAdmin, MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, this.uploadAdminPaymentReceipt.bind(this));
     }
 
     private async createAlipayTransaction(req: Request, res: Response, next: NextFunction) {
         try {
-            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType }> = req.body;
+            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string }> = req.body;
+            
+            // Extract idempotency key from header if not in body
+            const idempotencyKey = transactionData.idempotencyKey || req.headers['idempotency-key'] as string;
 
             const user = res.locals.user;
 
@@ -62,9 +68,11 @@ class TransactionController extends BaseController {
             }
 
             const transaction = await this.transactionService.createAlipayTransaction(
-                transactionData,
+                { ...transactionData, idempotencyKey },
                 req.file as Express.Multer.File,
                 user._id!,
+                req.ip,
+                req.headers['user-agent']
             )
 
             return this.sendSuccess(res, {
@@ -78,13 +86,18 @@ class TransactionController extends BaseController {
 
     private async createBankTransferTransaction(req: Request, res: Response, next: NextFunction) {
         try {
-            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string }> = req.body;
+            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string; idempotencyKey?: string }> = req.body;
+            
+            // Extract idempotency key from header if not in body
+            const idempotencyKey = transactionData.idempotencyKey || req.headers['idempotency-key'] as string;
 
             const user = res.locals.user;
 
             const transaction = await this.transactionService.createBankTransferTransaction(
-                transactionData,
+                { ...transactionData, idempotencyKey },
                 user._id!,
+                req.ip,
+                req.headers['user-agent']
             )
 
             return this.sendSuccess(res, {
@@ -102,7 +115,14 @@ class TransactionController extends BaseController {
                 next(errorResponseMessage.payloadIncorrect("Your payment receipt is required"));
                 return;
             }
-            await this.transactionService.uploadUserPaymentReceipt(req.params.id!, req.file as Express.Multer.File, res.locals?.user?.isVerified);
+            await this.transactionService.uploadUserPaymentReceipt(
+                req.params.id!, 
+                req.file as Express.Multer.File, 
+                res.locals?.user?.isVerified,
+                res.locals?.user?._id?.toString(),
+                req.ip,
+                req.headers['user-agent']
+            );
 
             return this.sendSuccess(res, {
                 message: "Payment receipt uploaded successfully"
@@ -119,7 +139,13 @@ class TransactionController extends BaseController {
                 next(errorResponseMessage.payloadIncorrect("Alipay payment receipt is required"));
                 return;
             }
-            await this.transactionService.uploadAdminPaymentReceipt(req.params.id!, req.file)
+            await this.transactionService.uploadAdminPaymentReceipt(
+                req.params.id!, 
+                req.file,
+                res.locals?.user?._id?.toString(),
+                req.ip,
+                req.headers['user-agent']
+            )
             return this.sendSuccess(res,  {
                 message: "Alipay receipt uploaded successfully"
             })

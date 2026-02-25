@@ -2,6 +2,7 @@ import z from "zod";
 import { ALIPAY_PLATFORM, DETAIL_TYPE, INSTITUTION_TYPE } from "../common/constant";
 import {Request, Response, NextFunction} from "express";
 import zodErrorHandler from "./zod.error";
+import { validateTransactionAmount } from "../config/transaction-limits.config";
 
 // Schema for Alipay transaction creation
 const ZCreateAlipayTransaction = z.object({
@@ -47,7 +48,24 @@ const ZCreateAlipayTransaction = z.object({
 
 export const validateCreateAlipayTransaction = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        ZCreateAlipayTransaction.parse(req.body);
+        const parsedData = ZCreateAlipayTransaction.parse(req.body);
+        
+        // Validate amount against transaction limits
+        const amountValidation = validateTransactionAmount(
+            parsedData.amount,
+            parsedData.fromCurrency,
+            "RMB"
+        );
+        
+        if (!amountValidation.isValid) {
+            return next({
+                response_code: 400,
+                message: amountValidation.error || "Transaction amount is outside allowed limits",
+                severity: "HIGH" as any,
+                timestamp: new Date()
+            });
+        }
+        
         next();
     } catch (error) {
         zodErrorHandler(error, next);
@@ -138,7 +156,24 @@ const ZCreateBankTransferTransaction = z.object({
 
 export const validateCreateBankTransferTransaction = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        ZCreateBankTransferTransaction.parse(req.body);
+        const parsedData = ZCreateBankTransferTransaction.parse(req.body);
+        
+        // Validate amount against transaction limits
+        const amountValidation = validateTransactionAmount(
+            parsedData.amount,
+            parsedData.fromCurrency,
+            parsedData.toCurrency
+        );
+        
+        if (!amountValidation.isValid) {
+            return next({
+                response_code: 400,
+                message: amountValidation.error || "Transaction amount is outside allowed limits",
+                severity: "HIGH" as any,
+                timestamp: new Date()
+            });
+        }
+        
         next();
     } catch (error) {
         zodErrorHandler(error, next);

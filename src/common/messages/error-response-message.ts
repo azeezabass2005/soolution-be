@@ -34,6 +34,8 @@ export enum ErrorResponseCode {
     NOT_FOUND = 404,
     /** Request could not be completed */
     UNABLE_TO_COMPLETE = 422,
+    /** Too many requests */
+    TOO_MANY_REQUESTS = 429,
 
     // Payload Errors (400-499)
     /** Payload data is incorrect or invalid */
