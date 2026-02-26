@@ -73,7 +73,7 @@ class AuthController extends BaseController {
      */
     private async register (req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const { email, password, firstName, lastName, phoneNumber } = req.body;
+            const { email, password, firstName, lastName } = req.body;
 
             // Check if user already exists
             const existingUser = await this.userService.findOne({
@@ -98,7 +98,6 @@ class AuthController extends BaseController {
                 email,
                 firstName,
                 lastName,
-                phoneNumber,
                 password: hashedPassword.password,
                 isVerified: false
             });
@@ -178,9 +177,75 @@ class AuthController extends BaseController {
                 throw new Error("Failed to complete user registration");
             }
 
+            // Generate tokens for automatic login
+            const accessToken = this.tokenBuilder.build().createToken(completeUser, {
+                type: TokenType.ACCESS,
+                expiresIn: '1h'
+            });
+
+            const refreshToken = this.tokenBuilder.build().createToken(completeUser, {
+                type: TokenType.REFRESH,
+                expiresIn: '7d'
+            });
+
+            // Update last login timestamp
+            await this.userService.updateById(completeUser._id as string, {
+                lastLogin: new Date()
+            });
+
+            // Save refresh token to database
+            const decodedRefresh = await this.tokenBuilder
+                .setToken(refreshToken)
+                .build()
+                .verifyToken();
+
+            if(decodedRefresh && decodedRefresh.type === TokenType.REFRESH) {
+                const refreshPayload = decodedRefresh.data as IRefreshTokenPayload;
+                await this.refreshTokenService.saveRefreshToken(
+                    completeUser._id as string,
+                    refreshPayload.tokenId,
+                    req.headers['user-agent'],
+                    req.ip
+                );
+            }
+
+            // Set tokens as httpOnly cookies
+            res.cookie('accessToken', accessToken, {
+                httpOnly: true,  // Secure, not accessible via JS
+                secure: config.NODE_ENV === 'production',
+                sameSite: 'lax',
+                path: "/",
+                maxAge: 60 * 60 * 1000,  // 1 hour
+                domain: config.COOKIE_DOMAIN,
+            });
+
+            res.cookie('refreshToken', refreshToken, {
+                httpOnly: true,
+                secure: config.NODE_ENV === 'production',
+                sameSite: 'lax',
+                path: "/",
+                maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+                domain: config.COOKIE_DOMAIN,
+            });
+
+            res.cookie('role', Object.entries(ROLE_MAP).find(([_, v]) => v === completeUser.role)?.[0], {
+                httpOnly: false, // Allow client-side access (if needed)
+                secure: config.NODE_ENV === 'production',
+                sameSite: 'lax',
+                path: "/",
+                maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+                domain: config.COOKIE_DOMAIN,
+            });
+
             this.sendSuccess(res, {
-                message: "Registration completed successfully",
-                user: completeUser
+                accessToken,
+                refreshToken,
+                message: "Registration completed successfully. You are now logged in.",
+                user: {
+                    id: completeUser._id,
+                    email: completeUser.email,
+                    role: Object.entries(ROLE_MAP).find(([_, v]) => v === completeUser.role)?.[0]
+                }
             })
         } catch(error) {
             return next(error)

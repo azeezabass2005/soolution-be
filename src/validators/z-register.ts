@@ -25,11 +25,13 @@ const ZRegister = z.object({
             return emailRegex.test(email);
         }, "Invalid email format"),
     password: z.string().min(8, "Password must be at least 8 characters."),
-    phoneNumber: z.string().min(11, "Phone Number must be at least 11 digits"),
-    whatsappNumber: z.string().min(11, "Whatsapp Number must be at least 11 digits"),
+    // WhatsApp Number - Temporarily disabled for registration
+    // TODO: Can be restored by uncommenting the line below if needed in the future
+    // whatsappNumber: z.string().min(11, "Whatsapp Number must be at least 11 digits"),
 })
 
 const ZPostRegister = z.object({
+    phoneNumber: z.string().min(11, "Phone Number must be at least 11 digits"),
     countryOfOrigin: z.string().min(2, "Country of origin is required"),
     countryOfResidence: z.string().min(2, "Country of residence is required"),
     purpose: z.enum(['business', 'personal', 'travel', 'investment', 'savings', 'others' ], {
