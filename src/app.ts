@@ -48,8 +48,8 @@ class App {
         this.app.use(cors({
             origin: [
                 'http://localhost:3000',
-                'https://soolution.co',
-                'https://www.soolution.co',
+                'https://solutionpay.co',
+                'https://www.solutionpay.co',
                 'https://trycloudflared.com'
             ],
             credentials: true,
