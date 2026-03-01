@@ -65,7 +65,7 @@ class TransactionService extends DBService<ITransaction> {
         ipAddress?: string,
         userAgent?: string
     ) => {
-        const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName, idempotencyKey } = transactionData;
+        const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName, idempotencyKey, fromAmount } = transactionData;
         
         if (!toCurrency) {
             throw errorResponseMessage.payloadIncorrect("Target currency (toCurrency) is required");
@@ -79,8 +79,24 @@ class TransactionService extends DBService<ITransaction> {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
         }
 
-        // Validate amount against transaction limits
-        const amountValidation = validateTransactionAmount(amount, fromCurrency as any, toCurrency as any);
+        // Validate exchange rate exists and is active before creating transaction
+        const rateUtils = new RateUtils(fromCurrency, toCurrency);
+        await rateUtils.validateExchangeRate();
+
+        // Calculate fromAmount if not provided (convert amount from target currency to source currency)
+        // For bank transfers: amount is in toCurrency, fromAmount is in fromCurrency (NGN)
+        let calculatedFromAmount = fromAmount;
+        if (!calculatedFromAmount) {
+            // Convert target currency amount to source currency (NGN)
+            // We need reverse conversion: if rate is NGN->KES, we need KES->NGN
+            // So we use RateUtils with reversed currencies
+            const reverseRateUtils = new RateUtils(toCurrency, fromCurrency);
+            calculatedFromAmount = await reverseRateUtils.convertAmount(amount);
+        }
+        calculatedFromAmount = Math.round(calculatedFromAmount * 100) / 100; // Round to 2 decimal places
+
+        // Validate amount against transaction limits (using NGN equivalent for minimum)
+        const amountValidation = validateTransactionAmount(amount, fromCurrency as any, toCurrency as any, calculatedFromAmount);
         if (!amountValidation.isValid) {
             throw errorResponseMessage.createError(
                 400,
@@ -104,10 +120,6 @@ class TransactionService extends DBService<ITransaction> {
                 }
             }
         }
-
-        // Validate exchange rate exists and is active before creating transaction
-        const rateUtils = new RateUtils(fromCurrency, toCurrency);
-        await rateUtils.validateExchangeRate();
 
         const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
         if(!bankAccountDetails) {
@@ -135,6 +147,7 @@ class TransactionService extends DBService<ITransaction> {
             type: paymentMethod || DETAIL_TYPE.BANK_TRANSFER,
             institutionType,
             bankAccountDetails: bankAccountDetails.toObject(),
+            fromAmount: calculatedFromAmount, // Amount in source currency (what user sends)
             ...(institutionType === 'bank' ? {
                 bankName,
                 accountNumber,
@@ -194,8 +207,16 @@ class TransactionService extends DBService<ITransaction> {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
         }
 
-        // Validate amount against transaction limits
-        const amountValidation = validateTransactionAmount(amount, fromCurrency as any, "RMB");
+        // Validate exchange rate exists and is active before creating transaction
+        const rateUtils = new RateUtils(fromCurrency, "RMB");
+        await rateUtils.validateExchangeRate();
+
+        // Calculate NGN equivalent for minimum amount validation
+        // For RMB transactions, amount is in RMB, we need to convert to NGN
+        const ngnEquivalent = await rateUtils.convertAmount(amount);
+
+        // Validate amount against transaction limits (using NGN equivalent for minimum)
+        const amountValidation = validateTransactionAmount(amount, fromCurrency as any, "RMB", ngnEquivalent);
         if (!amountValidation.isValid) {
             throw errorResponseMessage.createError(
                 400,
@@ -219,10 +240,6 @@ class TransactionService extends DBService<ITransaction> {
                 }
             }
         }
-        
-        // Validate exchange rate exists and is active before creating transaction
-        const rateUtils = new RateUtils(fromCurrency, "RMB");
-        await rateUtils.validateExchangeRate();
 
         const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
         if(!bankAccountDetails) {
