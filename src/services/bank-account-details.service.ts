@@ -9,18 +9,32 @@ class BankAccountDetailsService extends DBService<IBankAccountDetails> {
         super(BankAccount, []);
     }
 
-    public getAccountDetails = async (): Promise<{ NGN: IBankAccountDetails[], GHS: IBankAccountDetails[] }> => {
+    public getAccountDetails = async (): Promise<{ NGN: IBankAccountDetails[], GHS: IBankAccountDetails[], KES: IBankAccountDetails[], XAF: IBankAccountDetails[] }> => {
         const accountDetails = await this.find();
         const ngnAccounts: IBankAccountDetails[] = [];
         const ghsAccounts: IBankAccountDetails[] = [];
-        accountDetails?.map((account) => {
+        const kesAccounts: IBankAccountDetails[] = [];
+        const xafAccounts: IBankAccountDetails[] = [];
+        
+        accountDetails?.forEach((account) => {
+            const accountObj = account.toObject();
             if (account.currency === 'NGN') {
-                ngnAccounts.push(account.toObject())
+                ngnAccounts.push(accountObj);
             } else if (account.currency === 'GHS') {
-                ghsAccounts.push(account.toObject())
+                ghsAccounts.push(accountObj);
+            } else if (account.currency === 'KES') {
+                kesAccounts.push(accountObj);
+            } else if (account.currency === 'XAF') {
+                xafAccounts.push(accountObj);
             }
-        })
-        return { NGN: ngnAccounts, GHS: ghsAccounts }
+        });
+        
+        return { 
+            NGN: ngnAccounts, 
+            GHS: ghsAccounts, 
+            KES: kesAccounts, 
+            XAF: xafAccounts 
+        };
     }
 
     public createAccountDetails = async (data: Partial<IBankAccountDetails>) => {

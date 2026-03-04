@@ -29,12 +29,49 @@ class DashboardController extends BaseController {
             // total users
             const totalUsers = await User.countDocuments({});
 
+            // Base pipeline for aggregating Nigerian Naira (NGN) equivalents
+            const baseAggregatePipeline = [
+                {
+                    $lookup: {
+                        from: "transactiondetails",
+                        localField: "_id",
+                        foreignField: "transactionId",
+                        as: "details"
+                    }
+                },
+                {
+                    $unwind: { path: "$details", preserveNullAndEmptyArrays: true }
+                },
+                {
+                    $project: {
+                        status: 1,
+                        // If sending out (from NGN/GHS to foreign currency), the local equivalent is stored in fromAmount.
+                        // If receiving (from foreign currency to NGN), the local equivalent is stored in amount.
+                        // We fallback to `amount * rate` or `0` if it's a foreign currency that's missing fromAmount, but for safety, if fromAmount is missing, we shouldn't blindly sum `amount` unless it's the base currency.
+                        normalizedAmount: {
+                            $cond: {
+                                if: { $in: ["$fromCurrency", ["NGN", "GHS"]] },
+                                then: { $ifNull: ["$details.fromAmount", "$amount"] },
+                                else: { 
+                                    $cond: {
+                                        if: { $in: ["$currency", ["NGN", "GHS"]] },
+                                        then: "$amount",
+                                        else: 0 // Cannot determine without rate
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            ];
+
             // aggregate totals for transactions
             const totals = await Transaction.aggregate([
+                ...baseAggregatePipeline,
                 {
                     $group: {
                         _id: null,
-                        totalAmount: { $sum: "$amount" },
+                        totalAmount: { $sum: "$normalizedAmount" },
                         count: { $sum: 1 }
                     }
                 }
@@ -48,10 +85,11 @@ class DashboardController extends BaseController {
                 {
                     $match: { status: { $in: [TRANSACTION_STATUS.COMPLETED, TRANSACTION_STATUS.SUCCESSFUL] } }
                 },
+                ...baseAggregatePipeline,
                 {
                     $group: {
                         _id: null,
-                        totalCompletedAmount: { $sum: "$amount" },
+                        totalCompletedAmount: { $sum: "$normalizedAmount" },
                         completedCount: { $sum: 1 }
                     }
                 }

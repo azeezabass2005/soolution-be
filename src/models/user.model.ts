@@ -54,6 +54,20 @@ export const UserSchema = new Schema<IUser>(
          */
         isKYCDone: { type: Boolean, default: false },
 
+        /**
+         * KYC rejection status
+         * @type {boolean}
+         * @default false
+         */
+        isKYCRejected: { type: Boolean, default: false },
+
+        /**
+         * Reason for KYC rejection
+         * @type {string}
+         * @optional
+         */
+        kycRejectionReason: { type: String },
+
 
         /**
          * Account registration progress
@@ -138,7 +152,14 @@ export const UserSchema = new Schema<IUser>(
          * @enum ['friends', 'ads', 'others']
          * @optional
          */
-        hearAboutUs: { type: String, enum: ['friends', 'ads', 'others'] },
+        hearAboutUs: { type: String, enum: ['friends', 'ads', 'referrals', 'events', 'youtube', 'instagram', 'x-twitter', 'facebook', 'tiktok', 'google', 'others'] },
+
+        /**
+         * Free-text specification when hearAboutUs is 'others'
+         * @type {string}
+         * @optional
+         */
+        hearAboutUsOther: { type: String },
     },
     {
         /** Enable virtual properties when converting to plain object */

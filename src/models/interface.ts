@@ -34,10 +34,13 @@ export interface IUser extends Document {
     purpose?: 'business' | 'spending';
     typeOfBusiness?: 'creators' | 'retail-sales' | 'software' | 'services' | 'entertainment' | 'media' | 'payments' | 'others';
     monthlyVolume?: string;
-    hearAboutUs?: 'friends' | 'ads' | 'others';
+    hearAboutUs?: 'friends' | 'ads' | 'referrals' | 'events' | 'youtube' | 'instagram' | 'x-twitter' | 'facebook' | 'tiktok' | 'google' | 'others';
+    hearAboutUsOther?: string;
 
     // KYC related fields
     isKYCDone?: boolean;
+    isKYCRejected?: boolean;
+    kycRejectionReason?: string;
 }
 
 export interface IRefreshToken extends Document {

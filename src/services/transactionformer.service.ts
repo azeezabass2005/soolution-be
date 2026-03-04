@@ -99,7 +99,9 @@ class TransactionService extends DBService<ITransaction> {
             throw errorResponseMessage.unableToComplete("Payment receipt upload failed");
         }
         const transaction = await this.findById(transactionId);
-        let fromAmount = await new RateUtils(transaction?.fromCurrency!, "RMB").convertAmount(transaction?.amount!);
+        // transaction.amount is in RMB, we need to convert to fromCurrency (reverse conversion)
+        const rateUtils = new RateUtils(transaction?.fromCurrency!, "RMB");
+        let fromAmount = await rateUtils.convertAmountReverse(transaction?.amount!);
         await this.transactionDetailsService.update({ transactionId }, {payInReceiptUrl: uploadResult.file?.url, fromAmount: fromAmount});
         // TODO: I'm gonna handle the status below later when I'm implementing KYC for now the status should just be awaiting confirmation
         // await this.updateById(transactionId, { status: isKycDone ? TRANSACTION_STATUS.AWAITING_CONFIRMATION : TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION })

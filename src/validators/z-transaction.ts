@@ -94,6 +94,11 @@ const ZCreateBankTransferTransaction = z.object({
         errorMap: () => ({message: "Currency To Not Supported"})
     }),
 
+    fromAmount: z
+        .coerce.number()
+        .positive("From amount must be a positive number")
+        .optional(),
+
     paymentMethod: z.enum([DETAIL_TYPE.BANK_TRANSFER, DETAIL_TYPE.MOBILE_MONEY] as [string, ...string[]], {
         errorMap: () => ({ message: "Invalid payment method" })
     }),
@@ -159,10 +164,12 @@ export const validateCreateBankTransferTransaction = async (req: Request, res: R
         const parsedData = ZCreateBankTransferTransaction.parse(req.body);
         
         // Validate amount against transaction limits
+        // Use fromAmount (NGN equivalent) if provided, otherwise let service calculate it
         const amountValidation = validateTransactionAmount(
             parsedData.amount,
             parsedData.fromCurrency,
-            parsedData.toCurrency
+            parsedData.toCurrency,
+            parsedData.fromAmount // Pass fromAmount as ngnEquivalent if provided
         );
         
         if (!amountValidation.isValid) {

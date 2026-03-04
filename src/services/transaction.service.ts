@@ -89,14 +89,21 @@ class TransactionService extends DBService<ITransaction> {
         if (!calculatedFromAmount) {
             // Convert target currency amount to source currency (NGN)
             // We need reverse conversion: if rate is NGN->KES, we need KES->NGN
-            // So we use RateUtils with reversed currencies
-            const reverseRateUtils = new RateUtils(toCurrency, fromCurrency);
-            calculatedFromAmount = await reverseRateUtils.convertAmount(amount);
+            // Use convertAmountReverse to properly handle reverse conversion
+            const rateUtils = new RateUtils(fromCurrency, toCurrency);
+            calculatedFromAmount = await rateUtils.convertAmountReverse(amount);
         }
         calculatedFromAmount = Math.round(calculatedFromAmount * 100) / 100; // Round to 2 decimal places
 
+        // Determine NGN equivalent for validation
+        // If fromAmount is provided, use it (it's the NGN equivalent sent from frontend)
+        // For send transactions: fromCurrency is base (NGN), so calculatedFromAmount is NGN equivalent
+        // For receive transactions: toCurrency is base (NGN), so amount is already NGN equivalent
+        const isReceiveTransaction = toCurrency === 'NGN' && fromCurrency !== 'NGN';
+        const ngnEquivalentForValidation = fromAmount || (isReceiveTransaction ? amount : calculatedFromAmount);
+
         // Validate amount against transaction limits (using NGN equivalent for minimum)
-        const amountValidation = validateTransactionAmount(amount, fromCurrency as any, toCurrency as any, calculatedFromAmount);
+        const amountValidation = validateTransactionAmount(amount, fromCurrency as any, toCurrency as any, ngnEquivalentForValidation);
         if (!amountValidation.isValid) {
             throw errorResponseMessage.createError(
                 400,
@@ -212,8 +219,9 @@ class TransactionService extends DBService<ITransaction> {
         await rateUtils.validateExchangeRate();
 
         // Calculate NGN equivalent for minimum amount validation
-        // For RMB transactions, amount is in RMB, we need to convert to NGN
-        const ngnEquivalent = await rateUtils.convertAmount(amount);
+        // For RMB transactions, amount is in RMB, we need to convert to NGN (reverse conversion)
+        // Use convertAmountReverse because we're converting from RMB (toCurrency) to NGN (fromCurrency)
+        const ngnEquivalent = await rateUtils.convertAmountReverse(amount);
 
         // Validate amount against transaction limits (using NGN equivalent for minimum)
         const amountValidation = validateTransactionAmount(amount, fromCurrency as any, "RMB", ngnEquivalent);
@@ -395,8 +403,10 @@ class TransactionService extends DBService<ITransaction> {
             }
 
             // Use the transaction's currency (which could be RMB, GHS, XAF, KES, or NGN) instead of hardcoding RMB
+            // transaction.amount is in transaction.currency, we need to convert to transaction.fromCurrency
+            // This is a reverse conversion, so use convertAmountReverse
             const rateUtils = new RateUtils(transaction.fromCurrency, transaction.currency);
-            let fromAmount = await rateUtils.convertAmount(transaction.amount);
+            let fromAmount = await rateUtils.convertAmountReverse(transaction.amount);
             // Round fromAmount to 2 decimal places
             fromAmount = Math.round(fromAmount * 100) / 100;
             
