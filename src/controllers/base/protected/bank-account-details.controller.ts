@@ -13,12 +13,70 @@ class BankAccountDetailsController extends BaseController {
     }
 
     protected setupRoutes(): void {
-        // All routes are admin-only
+        // User-specific routes (authenticated users managing their own saved accounts)
+        this.router.get("/user", this.getUserAccounts.bind(this));
+        this.router.post("/user", this.createUserAccount.bind(this));
+        this.router.patch("/user/:id", this.updateUserAccount.bind(this));
+        this.router.delete("/user/:id", this.deleteUserAccount.bind(this));
+
+        // Admin-only routes (company/platform bank accounts)
         this.router.get("/", RoleMiddleware.isAdmin, this.getAllAccountDetails.bind(this));
         this.router.post("/", RoleMiddleware.isAdmin, this.createAccountDetails.bind(this));
         this.router.patch("/:id", RoleMiddleware.isAdmin, this.updateAccountDetails.bind(this));
         this.router.patch("/:id/make-default", RoleMiddleware.isAdmin, this.makeDefaultAccount.bind(this));
         this.router.delete("/:id", RoleMiddleware.isAdmin, this.deleteAccountDetails.bind(this));
+    }
+
+    /**
+     * Get the calling user's saved payment accounts
+     */
+    private async getUserAccounts(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const userId = res.locals.userId;
+            const accounts = await this.bankAccountDetailsService.getUserAccountDetails(userId);
+            this.sendSuccess(res, { accounts });
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    /**
+     * Create a saved payment account for the calling user
+     */
+    private async createUserAccount(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const userId = res.locals.userId;
+            const account = await this.bankAccountDetailsService.createUserAccountDetails(userId, req.body);
+            this.sendSuccess(res, { account });
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    /**
+     * Update a saved payment account for the calling user
+     */
+    private async updateUserAccount(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const userId = res.locals.userId;
+            const account = await this.bankAccountDetailsService.updateUserAccountDetails(userId, req.params.id, req.body);
+            this.sendSuccess(res, { account });
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    /**
+     * Delete a saved payment account for the calling user
+     */
+    private async deleteUserAccount(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const userId = res.locals.userId;
+            await this.bankAccountDetailsService.deleteUserAccountDetails(userId, req.params.id);
+            this.sendSuccess(res, { message: "Account deleted" });
+        } catch (error) {
+            next(error);
+        }
     }
 
     /**

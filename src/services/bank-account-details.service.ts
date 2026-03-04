@@ -94,6 +94,28 @@ class BankAccountDetailsService extends DBService<IBankAccountDetails> {
         }
         return accountDetails;
     }
+
+    // User-specific methods (accounts linked to a particular user)
+
+    public getUserAccountDetails = async (userId: string) => {
+        return await this.find({ user: userId });
+    }
+
+    public createUserAccountDetails = async (userId: string, data: Partial<IBankAccountDetails>) => {
+        return await this.create({ ...data, user: userId });
+    }
+
+    public updateUserAccountDetails = async (userId: string, id: string, updateData: Partial<IBankAccountDetails>) => {
+        const account = await this.findOne({ _id: id, user: userId } as any);
+        if (!account) throw errorResponseMessage.resourceNotFound("Account");
+        return await this.updateById(id, updateData);
+    }
+
+    public deleteUserAccountDetails = async (userId: string, id: string) => {
+        const account = await this.findOne({ _id: id, user: userId } as any);
+        if (!account) throw errorResponseMessage.resourceNotFound("Account");
+        return await this.deleteById(id);
+    }
 }
 
 export default BankAccountDetailsService;

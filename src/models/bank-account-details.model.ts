@@ -4,6 +4,14 @@ import {IBankAccountDetails} from "./interface";
 
 const bankAccountDetailsSchema = new Schema<IBankAccountDetails>({
     /**
+     * Optional reference to the user who owns this account (null = admin/company account)
+     */
+    user: {
+        type: Schema.Types.ObjectId,
+        ref: MODEL_NAME.USER,
+        default: null
+    },
+    /**
      * Currency code fo the bank
      * @type {string}
      * @required

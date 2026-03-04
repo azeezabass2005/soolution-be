@@ -193,7 +193,8 @@ export interface ITransactionDetail extends Document {
     // TODO: Other types of transaction details will be here
 }
 
-export interface IBankAccountDetails {
+export interface IBankAccountDetails extends Document {
+    user?: mongoose.Schema.Types.ObjectId | string;
     currency: string;
     accountNumber: number;
     accountName: string;

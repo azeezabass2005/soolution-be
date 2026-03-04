@@ -206,6 +206,18 @@ class NotificationService {
         phoneNumber: string,
         config: NotificationConfig
     ): Promise<void> {
+        // Skip notifications on localhost/development
+        if (process.env.NODE_ENV === 'development' ||
+            process.env.FRONTEND_URL?.includes('localhost') ||
+            process.env.FRONTEND_URL?.includes('127.0.0.1')) {
+            console.log('Skipping WhatsApp on localhost:', {
+                phoneNumber,
+                title: config.title,
+                message: config.message,
+            });
+            return;
+        }
+
         try {
             const whatsappMessage = this.formatWhatsAppMessage(config);
             await this.whatsappService.sendTextMessage(phoneNumber, whatsappMessage);
@@ -226,6 +238,18 @@ class NotificationService {
         code: string,
         appName: string = 'Our Service'
     ): Promise<void> {
+        // Skip notifications on localhost/development
+        if (process.env.NODE_ENV === 'development' ||
+            process.env.FRONTEND_URL?.includes('localhost') ||
+            process.env.FRONTEND_URL?.includes('127.0.0.1')) {
+            console.log('Skipping verification code on localhost:', {
+                phoneNumber,
+                code,
+                appName,
+            });
+            return;
+        }
+
         try {
             await this.whatsappService.sendVerificationMessage(phoneNumber, {
                 name: 'there',
