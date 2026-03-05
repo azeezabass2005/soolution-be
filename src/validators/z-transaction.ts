@@ -147,12 +147,16 @@ export const validateCreateBankTransferTransaction = async (req: Request, res: R
         }
 
         // Validate amount against transaction limits
-        // Use fromAmount (NGN equivalent) if provided, otherwise let service calculate it
+        // For receive: toCurrency is NGN, so amount is already the NGN equivalent
+        // For send: fromCurrency is NGN, so fromAmount is the NGN equivalent
+        const ngnEquivalent = parsedData.transactionType === 'receive'
+            ? parsedData.amount
+            : parsedData.fromAmount;
         const amountValidation = validateTransactionAmount(
             parsedData.amount,
             parsedData.fromCurrency as any,
             parsedData.toCurrency as any,
-            parsedData.fromAmount
+            ngnEquivalent
         );
 
         if (!amountValidation.isValid) {

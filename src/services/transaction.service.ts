@@ -96,11 +96,10 @@ class TransactionService extends DBService<ITransaction> {
         calculatedFromAmount = Math.round(calculatedFromAmount * 100) / 100; // Round to 2 decimal places
 
         // Determine NGN equivalent for validation
-        // If fromAmount is provided, use it (it's the NGN equivalent sent from frontend)
-        // For send transactions: fromCurrency is base (NGN), so calculatedFromAmount is NGN equivalent
-        // For receive transactions: toCurrency is base (NGN), so amount is already NGN equivalent
+        // For receive transactions: toCurrency is NGN, so amount is already the NGN equivalent
+        // For send transactions: fromCurrency is NGN, so calculatedFromAmount/fromAmount is the NGN equivalent
         const isReceiveTransaction = toCurrency === 'NGN' && fromCurrency !== 'NGN';
-        const ngnEquivalentForValidation = fromAmount || (isReceiveTransaction ? amount : calculatedFromAmount);
+        const ngnEquivalentForValidation = isReceiveTransaction ? amount : (calculatedFromAmount || fromAmount);
 
         // Validate amount against transaction limits (using NGN equivalent for minimum)
         const amountValidation = validateTransactionAmount(amount, fromCurrency as any, toCurrency as any, ngnEquivalentForValidation);
