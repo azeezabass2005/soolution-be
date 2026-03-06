@@ -58,28 +58,16 @@ class RateUtils {
 
     /**
      * Converts amount in reverse direction (from toCurrency to fromCurrency)
-     * If direct rate exists, uses it. Otherwise, uses reverse rate with division.
+     * Always uses the forward rate (fromCurrency -> toCurrency) with division, which is
+     * the mathematically correct inverse regardless of whether a separate reverse rate exists.
+     * Falling back to the stored reverse rate (toCurrency -> fromCurrency) with multiplication
+     * is avoided as the two rates may not be exact reciprocals of each other.
      * @param amount Amount in toCurrency to convert to fromCurrency
      * @returns Converted amount in fromCurrency
      */
     public convertAmountReverse = async (amount: number) => {
-        // First, try to find the direct reverse rate (toCurrency -> fromCurrency)
-        const reverseRate = await this.exchangeRateService.findOne({
-            from: this.toCurrency,
-            to: this.fromCurrency,
-            isActive: true
-        });
-
-        if (reverseRate) {
-            // Direct reverse rate exists, use it with multiplication
-            // Formula: amount_in_toCurrency * reverseRate = amount_in_fromCurrency
-            // Example: 1 RMB * 0.00103 = 0.00103 NGN (if reverse rate exists)
-            const converted = reverseRate.rate * amount;
-            return Math.round(converted * 100) / 100;
-        }
-
-        // If reverse rate doesn't exist, use the forward rate with division
-        // Validate forward rate exists
+        // Prefer forward rate with division — always correct for reverse conversion.
+        // Example: KES→NGN rate = 240, so 120,000 NGN / 240 = 500 KES.
         await this.validateExchangeRate();
 
         const forwardRate = await this.exchangeRateService.findOne({
@@ -88,16 +76,27 @@ class RateUtils {
             isActive: true
         });
 
-        if(!forwardRate) {
-            throw errorResponseMessage.resourceNotFound(
-                `Active exchange rate from ${this.fromCurrency} to ${this.toCurrency} or from ${this.toCurrency} to ${this.fromCurrency}`
-            );
+        if (forwardRate) {
+            // Formula: amount_in_toCurrency / forwardRate = amount_in_fromCurrency
+            const converted = amount / forwardRate.rate;
+            return Math.round(converted * 100) / 100;
         }
 
-        // Formula: amount_in_toCurrency / forwardRate = amount_in_fromCurrency
-        // Example: If rate is 970 (1 NGN = 970 RMB), then 10,000,000 RMB / 970 = 10,309.28 NGN
-        const converted = amount / forwardRate.rate;
-        return Math.round(converted * 100) / 100;
+        // Fallback: use stored reverse rate with multiplication only when forward rate is absent.
+        const reverseRate = await this.exchangeRateService.findOne({
+            from: this.toCurrency,
+            to: this.fromCurrency,
+            isActive: true
+        });
+
+        if (reverseRate) {
+            const converted = reverseRate.rate * amount;
+            return Math.round(converted * 100) / 100;
+        }
+
+        throw errorResponseMessage.resourceNotFound(
+            `Active exchange rate from ${this.fromCurrency} to ${this.toCurrency} or from ${this.toCurrency} to ${this.fromCurrency}`
+        );
     }
 }
 

@@ -401,18 +401,23 @@ class TransactionService extends DBService<ITransaction> {
                 );
             }
 
-            // Use the transaction's currency (which could be RMB, GHS, XAF, KES, or NGN) instead of hardcoding RMB
-            // transaction.amount is in transaction.currency, we need to convert to transaction.fromCurrency
-            // This is a reverse conversion, so use convertAmountReverse
-            const rateUtils = new RateUtils(transaction.fromCurrency, transaction.currency);
-            let fromAmount = await rateUtils.convertAmountReverse(transaction.amount);
-            // Round fromAmount to 2 decimal places
-            fromAmount = Math.round(fromAmount * 100) / 100;
-            
+            // Preserve fromAmount if already stored at transaction creation time (historically accurate).
+            // Only compute it here for transaction types that don't store it during creation (e.g. Alipay).
+            const existingDetails = await this.transactionDetailsService.findOne({ transactionId });
+            const updateFields: Record<string, any> = { payInReceiptUrl: uploadResult.file.url };
+
+            if (!existingDetails?.fromAmount) {
+                // fromAmount not set at creation — compute from current rate as fallback
+                const rateUtils = new RateUtils(transaction.fromCurrency, transaction.currency);
+                let fromAmount = await rateUtils.convertAmountReverse(transaction.amount);
+                fromAmount = Math.round(fromAmount * 100) / 100;
+                updateFields.fromAmount = fromAmount;
+            }
+
             // Update transaction details with receipt URL (within transaction)
             await this.transactionDetailsService.updateOneWithSession(
-                { transactionId }, 
-                { $set: { payInReceiptUrl: uploadResult.file.url, fromAmount: fromAmount } },
+                { transactionId },
+                { $set: updateFields },
                 session
             );
 
