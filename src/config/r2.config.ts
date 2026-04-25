@@ -13,7 +13,7 @@ export class R2Config {
                     accessKeyId: config.R2_ACCESS_KEY_ID || '',
                     secretAccessKey: config.R2_SECRET_ACCESS_KEY || '',
                 },
-                forcePathStyle: false,
+                forcePathStyle: true,
                 // Increase timeout for large file uploads
                 maxAttempts: 3,
             });

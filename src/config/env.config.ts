@@ -70,13 +70,37 @@ interface EnvConfig {
     SMILE_ID_PROD_LAMBDA_URL: string;
     SMILE_ID_CALLBACK_URL: string;
     SMILE_ID_SID_SERVER: string;
+
+    /** YellowCard payment integration */
+    YELLOWCARD_API_KEY: string;
+    YELLOWCARD_SECRET_KEY: string;
+    YELLOWCARD_WEBHOOK_SECRET: string;
+    YELLOWCARD_BASE_URL: string;
+
+    /** Paystack payment integration (Wallet funding & withdrawals) */
+    PAYSTACK_SECRET_KEY: string;
+    PAYSTACK_PUBLIC_KEY: string;
+    PAYSTACK_BASE_URL: string;
 }
 
 /**
  * Load environment variables based on current NODE_ENV
  * @function loadEnvConfig
  * @returns {EnvConfig} Environment configuration object
+ * @throws {Error} If a required secret is missing or too weak at boot time.
  */
+const MIN_SECRET_LENGTH = 32;
+
+const requireSecret = (name: string, value: string | undefined, { minLength = MIN_SECRET_LENGTH }: { minLength?: number } = {}): string => {
+    if (!value || value.trim().length === 0) {
+        throw new Error(`[env] ${name} is required but was not provided. Set it in your .env file before starting the server.`);
+    }
+    if (value.length < minLength) {
+        throw new Error(`[env] ${name} must be at least ${minLength} characters long (got ${value.length}). Generate a secure value with \`openssl rand -hex 32\`.`);
+    }
+    return value;
+};
+
 const loadEnvConfig = (): EnvConfig => {
     const env = process.env.NODE_ENV || 'development';
 
@@ -94,11 +118,15 @@ const loadEnvConfig = (): EnvConfig => {
         });
     }
 
+    // Fail fast on required secrets. Any server that boots must have a strong
+    // JWT signing key — a fallback literal would let anyone forge tokens.
+    const JWT_SECRET = requireSecret('JWT_SECRET', process.env.JWT_SECRET);
+
     const config = {
         NODE_ENV: env,
         PORT: parseInt(process.env.PORT || '3500', 10),
         MONGODB_URI: process.env.MONGODB_URI || 'mongodb://localhost:27017/your-db-name',
-        JWT_SECRET: process.env.JWT_SECRET || 'your-super-secret-key',
+        JWT_SECRET,
         JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '1d',
         API_VERSION: process.env.API_VERSION || 'v1',
         CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
@@ -113,8 +141,8 @@ const loadEnvConfig = (): EnvConfig => {
         R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY || '',
         R2_BUCKET_NAME: process.env.R2_BUCKET_NAME || "",
         R2_PUBLIC_URL: process.env.R2_PUBLIC_URL || '',
-        FLUTTERWAVE_SECRET_HASH: process.env.FLUTTERWAVE_SECRET_HASH || 'lj3dfd4k5df5jld9ied3fn7df487rn2df',
-        FLUTTERWAVE_CLIENT_ID: process.env.FLUTTERWAVE_CLIENT_ID || '1234',
+        FLUTTERWAVE_SECRET_HASH: process.env.FLUTTERWAVE_SECRET_HASH || '',
+        FLUTTERWAVE_CLIENT_ID: process.env.FLUTTERWAVE_CLIENT_ID || '',
         FLUTTERWAVE_CLIENT_SECRET: process.env.FLUTTERWAVE_CLIENT_SECRET || '',
         MAIL_HOST: process.env.MAIL_HOST || '',
         MAIL_PORT: process.env.MAIL_PORT || '',
@@ -133,6 +161,15 @@ const loadEnvConfig = (): EnvConfig => {
         SMILE_ID_PROD_LAMBDA_URL: process.env.SMILE_ID_PROD_LAMBDA_URL || '',
         SMILE_ID_CALLBACK_URL: process.env.SMILE_ID_CALLBACK_URL || '',
         SMILE_ID_SID_SERVER: process.env.SMILE_ID_SID_SERVER || '',
+        YELLOWCARD_API_KEY: process.env.YELLOWCARD_API_KEY || process.env.YELLOW_CARD_PUBLIC_KEY || '',
+        YELLOWCARD_SECRET_KEY: process.env.YELLOWCARD_SECRET_KEY || process.env.YELLOW_CARD_SECRET_KEY || '',
+        YELLOWCARD_WEBHOOK_SECRET: process.env.YELLOWCARD_WEBHOOK_SECRET || '',
+        YELLOWCARD_BASE_URL: process.env.YELLOWCARD_BASE_URL || 'https://sandbox.api.yellowcard.io/business',
+
+        // Paystack — wallet funding (DVA) & withdrawals (transfers)
+        PAYSTACK_SECRET_KEY: process.env.PAYSTACK_SECRET_KEY || '',
+        PAYSTACK_PUBLIC_KEY: process.env.PAYSTACK_PUBLIC_KEY || '',
+        PAYSTACK_BASE_URL: process.env.PAYSTACK_BASE_URL || 'https://api.paystack.co',
     };
 
     // Log configuration on startup

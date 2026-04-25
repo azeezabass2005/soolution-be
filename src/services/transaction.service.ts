@@ -18,6 +18,10 @@ import transactionStateMachine from "../utils/transaction-state-machine.utils";
 import IdempotencyService from "./idempotency.service";
 import AuditLogService from "./audit-log.service";
 import { validateTransactionAmount, getTransactionLimits } from "../config/transaction-limits.config";
+import yellowCardService from "./yellowcard.service";
+import { YELLOWCARD_STATUS, WALLET_STATUS, WALLET_TRANSACTION_TYPE, WALLET_TRANSACTION_STATUS } from "../common/constant";
+import WalletService from "./wallet.service";
+import WalletTransactionService from "./wallet-transaction.service";
 
 class TransactionService extends DBService<ITransaction> {
 
@@ -27,6 +31,8 @@ class TransactionService extends DBService<ITransaction> {
     storageService: StorageService;
     idempotencyService: IdempotencyService;
     auditLogService: AuditLogService;
+    walletService: WalletService;
+    walletTransactionService: WalletTransactionService;
 
 
     /**
@@ -44,6 +50,8 @@ class TransactionService extends DBService<ITransaction> {
         this.storageService = new StorageService();
         this.idempotencyService = new IdempotencyService();
         this.auditLogService = new AuditLogService();
+        this.walletService = new WalletService();
+        this.walletTransactionService = new WalletTransactionService();
     }
 
     private receiptUploadService = FileUploadFactory.getGeneralUploadService();
@@ -258,7 +266,7 @@ class TransactionService extends DBService<ITransaction> {
             makePublic: true,
         });
         if(!uploadResult.success) {
-            console.log(uploadResult, "This is the result from the alipay QRCode upload")
+            logger.error("Alipay QRCode upload to R2 failed", { error: uploadResult.error });
             throw errorResponseMessage.unableToComplete("Alipay Qrcode upload failed");
         }
 
@@ -679,6 +687,1122 @@ class TransactionService extends DBService<ITransaction> {
      * @param filters - Additional filters
      * @param options - Pagination and sorting options
      */
+    // ============= YELLOWCARD AUTOMATIC PAYMENT METHODS =============
+
+    private generateYellowCardSequenceId = () => {
+        const randomPart = crypto.randomUUID().replace(/-/g, "").slice(0, 22).toUpperCase();
+        return `YC_TX_${randomPart}`;
+    };
+
+    /**
+     * Create a YellowCard automatic payment transaction.
+     * Step 1: Creates the transaction record and submits a collection request to YellowCard.
+     * The collection collects local currency from the user. Once YellowCard confirms collection
+     * via webhook, the disbursement (payment) is triggered automatically.
+     */
+    public createYellowCardTransaction = async (
+        params: {
+            amount: number;
+            fromAmount?: number;
+            fromCurrency: string;
+            toCurrency: string;
+            sender: {
+                name: string;
+                country: string;
+                phone: string;
+                address: string;
+                dob: string;
+                email: string;
+                idNumber?: string;
+                idType?: string;
+            };
+            destination: {
+                accountName: string;
+                accountNumber: string;
+                accountType: string;
+                country: string;
+            };
+            idempotencyKey?: string;
+        },
+        userId: string,
+        ipAddress?: string,
+        userAgent?: string
+    ) => {
+        const { amount, fromAmount, fromCurrency, toCurrency, sender, destination, idempotencyKey } = params;
+
+        if (!amount || amount <= 0) {
+            throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
+        }
+
+        // ========== WALLET DEDUCTION ==========
+        // The NGN amount to deduct from the wallet
+        const ngnAmount = fromAmount || amount;
+        if (!ngnAmount || ngnAmount <= 0) {
+            throw errorResponseMessage.payloadIncorrect("Source amount (fromAmount) must be a positive number");
+        }
+
+        // Check wallet exists and has sufficient balance
+        const wallet = await this.walletService.findOne({ user: userId });
+        if (!wallet) {
+            throw errorResponseMessage.createError(400, "You don't have a wallet yet. Please set up your wallet first.", ErrorSeverity.MEDIUM);
+        }
+        if (wallet.status !== WALLET_STATUS.ACTIVE) {
+            throw errorResponseMessage.createError(400, "Your wallet is not active. Please contact support.", ErrorSeverity.HIGH);
+        }
+        if (wallet.balance < ngnAmount) {
+            throw errorResponseMessage.createError(
+                400,
+                `Insufficient wallet balance. You need ₦${ngnAmount.toLocaleString()} but your balance is ₦${wallet.balance.toLocaleString()}. Please fund your wallet first.`,
+                ErrorSeverity.MEDIUM
+            );
+        }
+
+        // Handle idempotency
+        if (idempotencyKey) {
+            const idempotencyResult = await this.idempotencyService.validateKey(idempotencyKey, userId);
+            if (idempotencyResult.isDuplicate && idempotencyResult.transactionId) {
+                const existingTransaction = await this.findById(idempotencyResult.transactionId);
+                if (existingTransaction) {
+                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existingTransaction._id });
+                    return {
+                        ...existingTransaction.toObject(),
+                        details: existingDetails ? existingDetails.toObject() : {}
+                    };
+                }
+            }
+        }
+
+        // Resolve active channels and networks from YellowCard for the destination country
+        const destCountry = destination.country;
+        const targetType = destination.accountType; // 'bank' or 'momo'
+
+        let channelsData: any;
+        let networksData: any;
+        try {
+            [channelsData, networksData] = await Promise.all([
+                yellowCardService.getChannels(destCountry),
+                yellowCardService.getNetworks(destCountry),
+            ]);
+        } catch (error: any) {
+            logger.error("Failed to fetch YellowCard channels/networks", { destCountry, error: error?.message });
+            throw errorResponseMessage.createError(400, "Unable to fetch payment channels. Please try again.", ErrorSeverity.HIGH);
+        }
+
+        const allChannels = channelsData?.channels || channelsData || [];
+        const allNetworks = networksData?.networks || networksData || [];
+
+        // Payments require off-ramp/withdraw channels
+        const isPaymentChannel = (c: any) => {
+            const rt = (c.rampType || '').toLowerCase();
+            return rt === 'withdraw' || rt === 'off' || rt === 'offramp' || rt === 'off-ramp';
+        };
+        const activeChannels = allChannels.filter((c: any) => c.status === 'active' && isPaymentChannel(c));
+        const sortedChannels = [
+            ...activeChannels.filter((c: any) => c.channelType === targetType),
+            ...activeChannels.filter((c: any) => c.channelType !== targetType),
+        ];
+
+        const activeNetworks = allNetworks.filter((n: any) => n.status === 'active');
+        const network = activeNetworks.find((n: any) => n.type === targetType) || activeNetworks[0];
+
+        if (sortedChannels.length === 0 || !network) {
+            throw errorResponseMessage.createError(
+                400,
+                "Automatic payment is not available for this destination at the moment. Please try manual payment.",
+                ErrorSeverity.MEDIUM
+            );
+        }
+
+        logger.info("YellowCard channels resolved", {
+            destCountry,
+            targetType,
+            activeChannels: sortedChannels.map((c: any) => ({ id: c.id, type: c.channelType })),
+            network: network?.id,
+        });
+
+        const sequenceId = this.generateYellowCardSequenceId();
+
+        // ========== ATOMIC WALLET DEBIT ==========
+        // Debit wallet balance before creating the transaction
+        const walletSession = await mongoose.startSession();
+        walletSession.startTransaction();
+
+        let walletTransaction: any;
+        const walletTxRef = this.walletTransactionService.generateReference('TRF');
+        const balanceBefore = wallet.balance;
+        const balanceAfter = balanceBefore - ngnAmount;
+
+        try {
+            // Atomic balance debit with balance guard
+            await this.walletService.debitBalance(wallet._id as string, ngnAmount, walletSession);
+
+            // Create wallet transaction record
+            walletTransaction = await this.walletTransactionService.create({
+                wallet: wallet._id,
+                user: userId,
+                type: WALLET_TRANSACTION_TYPE.TRANSFER,
+                status: WALLET_TRANSACTION_STATUS.PENDING,
+                amount: ngnAmount,
+                reference: walletTxRef,
+                balanceBefore,
+                balanceAfter,
+                description: `Transfer to ${destination.accountName} (${amount} ${toCurrency})`,
+            }, walletSession);
+
+            await walletSession.commitTransaction();
+        } catch (error: any) {
+            if (walletSession.inTransaction()) {
+                await walletSession.abortTransaction();
+            }
+            walletSession.endSession();
+            throw error;
+        } finally {
+            walletSession.endSession();
+        }
+
+        // Create our internal transaction record
+        let transaction: any;
+        let transactionDetails: any;
+        try {
+            transaction = await this.create({
+                user: userId,
+                reference: sequenceId,
+                amount: Math.round(amount * 100) / 100,
+                fromCurrency,
+                currency: toCurrency,
+                detailType: DETAIL_TYPE.YELLOWCARD,
+                status: TRANSACTION_STATUS.PENDING,
+                initiatedAt: Date.now(),
+            });
+        } catch (dbError: any) {
+            logger.error("Failed to create YellowCard transaction record, refunding wallet", {
+                error: dbError?.message || dbError,
+                sequenceId,
+            });
+            // Refund wallet since we couldn't create the transaction
+            await this.refundWallet(wallet._id, userId, ngnAmount, walletTransaction._id, walletTxRef, "Transaction record creation failed");
+            throw errorResponseMessage.createError(
+                500,
+                `Failed to create transaction: ${dbError?.message || 'Unknown error'}`,
+                ErrorSeverity.CRITICAL
+            );
+        }
+
+        // Link wallet transaction to the YellowCard transaction
+        await this.walletTransactionService.updateById(walletTransaction._id as string, {
+            paystackReference: sequenceId, // reuse field to link to YC transaction
+        });
+
+        if (idempotencyKey) {
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+        }
+
+        // Create transaction detail with YC-specific fields (channelId updated after successful submission)
+        try {
+            transactionDetails = await this.transactionDetailsService.create({
+                transactionId: transaction._id,
+                type: DETAIL_TYPE.YELLOWCARD,
+                ycSequenceId: sequenceId,
+                ycChannelId: sortedChannels[0].id,
+                ycNetworkId: network.id,
+                ycStatus: YELLOWCARD_STATUS.PENDING,
+                fromAmount: fromAmount || amount,
+                accountName: destination.accountName,
+                accountNumber: destination.accountNumber,
+                institutionType: destination.accountType,
+                country: destination.country,
+            });
+        } catch (dbError: any) {
+            logger.error("Failed to create YellowCard transaction detail", {
+                error: dbError?.message || dbError,
+                transactionId: transaction._id,
+                sequenceId,
+            });
+            throw errorResponseMessage.createError(
+                500,
+                `Failed to create transaction detail: ${dbError?.message || 'Unknown error'}`,
+                ErrorSeverity.CRITICAL
+            );
+        }
+
+        // Try each active channel until one succeeds
+        let lastError: any = null;
+        for (const channel of sortedChannels) {
+            try {
+                logger.info("YellowCard: attempting payment with channel", {
+                    channelId: channel.id,
+                    channelType: channel.channelType,
+                    sequenceId,
+                });
+
+                const paymentResponse = await yellowCardService.submitPaymentRequest({
+                    channelId: channel.id,
+                    sequenceId,
+                    localAmount: amount,
+                    sender,
+                    destination: {
+                        accountName: destination.accountName,
+                        accountNumber: destination.accountNumber,
+                        accountType: destination.accountType,
+                        networkId: network.id,
+                        country: destination.country,
+                    },
+                    forceAccept: true,
+                });
+
+                // Success — update detail with the channel that worked
+                await this.transactionDetailsService.update(
+                    { transactionId: transaction._id },
+                    {
+                        ycChannelId: channel.id,
+                        ycPaymentId: paymentResponse?.id,
+                        ycStatus: paymentResponse?.status || YELLOWCARD_STATUS.PROCESSING,
+                        ycRawPayload: paymentResponse,
+                    }
+                );
+
+                await this.updateById(transaction._id.toString(), {
+                    status: TRANSACTION_STATUS.PROCESSING,
+                });
+
+                // Mark wallet transaction as processing (payment submitted to YellowCard)
+                await this.walletTransactionService.updateById(walletTransaction._id as string, {
+                    status: WALLET_TRANSACTION_STATUS.PROCESSING,
+                });
+
+                logger.info("YellowCard transaction created and payment submitted", {
+                    transactionId: transaction._id,
+                    sequenceId,
+                    channelId: channel.id,
+                    ycPaymentId: paymentResponse?.id,
+                    walletDebit: ngnAmount,
+                });
+
+                return {
+                    ...transaction.toObject(),
+                    status: TRANSACTION_STATUS.PROCESSING,
+                    details: {
+                        ...transactionDetails.toObject(),
+                        ycChannelId: channel.id,
+                        ycPaymentId: paymentResponse?.id,
+                        ycStatus: paymentResponse?.status || YELLOWCARD_STATUS.PROCESSING,
+                    },
+                };
+            } catch (error: any) {
+                const ycError = error?.ycError || error?.response?.data || error?.data;
+                const ycMessage = ycError?.message || error?.message || '';
+
+                logger.warn("YellowCard channel failed, trying next", {
+                    channelId: channel.id,
+                    error: ycMessage,
+                    remainingChannels: sortedChannels.indexOf(channel) < sortedChannels.length - 1,
+                });
+
+                lastError = error;
+
+                // If the error is NOT channel-related (e.g. invalid account), don't retry
+                const isChannelError = ycMessage.toLowerCase().includes('channel') && ycMessage.toLowerCase().includes('disabled');
+                if (!isChannelError) {
+                    break; // No point trying other channels for non-channel errors
+                }
+            }
+        }
+
+        // All channels failed — mark transaction as failed and REFUND wallet
+        await this.updateById(transaction._id.toString(), {
+            status: TRANSACTION_STATUS.FAILED,
+            failedAt: new Date(),
+        });
+        await this.transactionDetailsService.update(
+            { transactionId: transaction._id },
+            { ycStatus: YELLOWCARD_STATUS.FAILED }
+        );
+
+        // Refund wallet balance
+        await this.refundWallet(wallet._id, userId, ngnAmount, walletTransaction._id, walletTxRef, "YellowCard payment failed on all channels");
+
+        const ycError = lastError?.ycError || lastError?.response?.data || lastError?.data;
+        logger.error("YellowCard payment submission failed on all channels — wallet refunded", {
+            transactionId: transaction._id,
+            sequenceId,
+            ycError,
+            errorMessage: lastError?.message,
+            refundedAmount: ngnAmount,
+        });
+
+        const ycMessage = ycError?.message || ycError?.code || lastError?.message || "YellowCard payment failed";
+        throw errorResponseMessage.createError(
+            400,
+            `YellowCard: ${ycMessage}`,
+            ErrorSeverity.HIGH
+        );
+    };
+
+    /**
+     * Refund wallet balance when a YellowCard transaction fails.
+     * Credits back the debited amount and creates a reversal record.
+     */
+    private refundWallet = async (
+        walletId: any,
+        userId: string,
+        amount: number,
+        walletTransactionId: any,
+        originalRef: string,
+        reason: string
+    ) => {
+        try {
+            // Credit back the balance
+            const wallet = await this.walletService.creditBalance(walletId as string, amount);
+
+            // Mark original wallet transaction as failed
+            await this.walletTransactionService.updateById(walletTransactionId as string, {
+                status: WALLET_TRANSACTION_STATUS.FAILED,
+                failureReason: reason,
+            });
+
+            // Create reversal record
+            const reversalRef = this.walletTransactionService.generateReference('REV');
+            await this.walletTransactionService.create({
+                wallet: walletId,
+                user: userId,
+                type: WALLET_TRANSACTION_TYPE.REVERSAL,
+                status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                amount,
+                reference: reversalRef,
+                balanceBefore: (wallet?.balance || 0) - amount,
+                balanceAfter: wallet?.balance || 0,
+                description: `Reversal: ${reason} (${originalRef})`,
+            });
+
+            logger.info("Wallet refunded for failed YellowCard transaction", {
+                walletId, amount, reason, originalRef,
+            });
+        } catch (refundError: any) {
+            // Critical: refund failed — log for manual intervention
+            logger.error("CRITICAL: Wallet refund failed", {
+                walletId, userId, amount, originalRef,
+                error: refundError?.message,
+            });
+        }
+    };
+
+    /**
+     * Poll YellowCard for the current payment status and sync to local transaction.
+     * Used when webhooks aren't available (e.g. localhost development).
+     */
+    public pollYellowCardStatus = async (transactionId: string) => {
+        const transaction = await this.findById(transactionId);
+        if (!transaction) {
+            throw errorResponseMessage.createError(404, "Transaction not found", ErrorSeverity.MEDIUM);
+        }
+        if (transaction.detailType !== DETAIL_TYPE.YELLOWCARD) {
+            throw errorResponseMessage.createError(400, "Not a YellowCard transaction", ErrorSeverity.MEDIUM);
+        }
+
+        const detail = await this.transactionDetailsService.findOne({ transactionId: transaction._id });
+        if (!detail?.ycSequenceId) {
+            throw errorResponseMessage.createError(400, "No YellowCard sequence ID found", ErrorSeverity.MEDIUM);
+        }
+
+        // Lookup payment status from YellowCard
+        let ycPayment: any;
+        try {
+            ycPayment = await yellowCardService.lookupPaymentBySequenceId(detail.ycSequenceId);
+        } catch (error: any) {
+            logger.error("Failed to poll YellowCard payment status", {
+                transactionId,
+                sequenceId: detail.ycSequenceId,
+                error: error?.ycError || error?.message,
+            });
+            return {
+                transaction: transaction.toObject(),
+                ycStatus: detail.ycStatus || "unknown",
+                message: "Could not fetch status from YellowCard",
+            };
+        }
+
+        // YellowCard may return { status: "..." } directly or nested like { payment: { status: "..." } }
+        const rawPayment = ycPayment?.payment || ycPayment?.data || ycPayment;
+        const ycStatus = (rawPayment?.status || '')?.toLowerCase();
+
+        logger.info("YellowCard poll: raw response", {
+            transactionId,
+            sequenceId: detail.ycSequenceId,
+            ycPaymentTopLevelKeys: ycPayment ? Object.keys(ycPayment) : [],
+            rawPaymentStatus: rawPayment?.status,
+            ycStatusResolved: ycStatus,
+            localStatus: transaction.status,
+            ycPaymentRaw: JSON.stringify(ycPayment).substring(0, 800),
+        });
+
+        // Update local detail with latest YC data
+        await this.transactionDetailsService.update(
+            { _id: detail._id },
+            { ycRawPayload: ycPayment, ycStatus, ycPaymentId: ycPayment?.id || detail.ycPaymentId }
+        );
+
+        // Sync transaction status based on YC status
+        // YellowCard uses "complete" (not "completed")
+        logger.info("YellowCard poll: status sync check", {
+            transactionId,
+            ycStatus,
+            localStatus: transaction.status,
+            ycStatusIsComplete: ycStatus === "complete" || ycStatus === "completed",
+            localIsNotCompleted: transaction.status !== TRANSACTION_STATUS.COMPLETED,
+            TRANSACTION_STATUS_COMPLETED: TRANSACTION_STATUS.COMPLETED,
+        });
+
+        if ((ycStatus === "complete" || ycStatus === "completed") && transaction.status !== TRANSACTION_STATUS.COMPLETED) {
+            const canTransition = transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.COMPLETED);
+            logger.info("YellowCard poll: attempting completed transition", {
+                transactionId,
+                fromStatus: transaction.status,
+                toStatus: TRANSACTION_STATUS.COMPLETED,
+                canTransition,
+            });
+            if (canTransition) {
+                try {
+                    const updateResult = await this.updateById(transactionId, {
+                        status: TRANSACTION_STATUS.COMPLETED,
+                        completedAt: new Date(),
+                    });
+                    logger.info("YellowCard poll: updateById result", {
+                        transactionId,
+                        updateResultStatus: updateResult?.status,
+                        updateResultId: updateResult?._id?.toString(),
+                    });
+                } catch (updateError: any) {
+                    logger.error("YellowCard poll: updateById FAILED, trying direct update", {
+                        transactionId,
+                        error: updateError?.message,
+                    });
+                    // Fallback: direct Mongoose update
+                    await this.Model.updateOne(
+                        { _id: transactionId },
+                        { $set: { status: TRANSACTION_STATUS.COMPLETED, completedAt: new Date() } }
+                    );
+                    logger.info("YellowCard poll: direct update completed", { transactionId });
+                }
+
+                logger.info("YellowCard poll: transaction completed", { transactionId });
+
+                // Mark linked wallet transaction as successful
+                const walletTx = await this.walletTransactionService.findOne({
+                    paystackReference: transaction.reference,
+                    type: WALLET_TRANSACTION_TYPE.TRANSFER,
+                });
+                if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.SUCCESSFUL) {
+                    await this.walletTransactionService.updateById(walletTx._id as string, {
+                        status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                    });
+                    await this.walletService.adjustLedgerBalance(walletTx.wallet as string, -walletTx.amount);
+                    logger.info("Wallet transfer marked successful via poll", { walletTxId: walletTx._id, amount: walletTx.amount });
+                }
+
+                // Notify user
+                const user = transaction.user as IUser;
+                if (user?.email) {
+                    try {
+                        await this.notificationService.sendTransactionNotification(
+                            user,
+                            "payment_completed",
+                            {
+                                amount: `${transaction.amount} ${transaction.currency}`,
+                                reference: transaction.reference,
+                                recipient: detail.accountName || "Recipient",
+                                actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
+                            }
+                        );
+                    } catch (e) {
+                        logger.warn("Failed to send YC poll completion notification", { error: e });
+                    }
+                }
+            } else {
+                logger.warn("YellowCard poll: canTransition returned false!", {
+                    transactionId,
+                    fromStatus: transaction.status,
+                    toStatus: TRANSACTION_STATUS.COMPLETED,
+                });
+            }
+        } else if ((ycStatus === "failed" || ycStatus === "expired" || ycStatus === "refunded") && transaction.status !== TRANSACTION_STATUS.FAILED) {
+            const newStatus = ycStatus === "cancelled" ? TRANSACTION_STATUS.CANCELLED : TRANSACTION_STATUS.FAILED;
+            if (transactionStateMachine.canTransition(transaction.status, newStatus)) {
+                await this.updateById(transactionId, {
+                    status: newStatus,
+                    ...(newStatus === TRANSACTION_STATUS.FAILED ? { failedAt: new Date() } : {}),
+                });
+
+                // Refund wallet on failure
+                const walletTx = await this.walletTransactionService.findOne({
+                    paystackReference: transaction.reference,
+                    type: WALLET_TRANSACTION_TYPE.TRANSFER,
+                });
+                if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.FAILED && walletTx.status !== WALLET_TRANSACTION_STATUS.REVERSED) {
+                    await this.refundWallet(
+                        walletTx.wallet,
+                        walletTx.user as string,
+                        walletTx.amount,
+                        walletTx._id,
+                        walletTx.reference,
+                        `YellowCard payment ${ycStatus}`
+                    );
+                    logger.info("Wallet refunded via poll", { walletTxId: walletTx._id, amount: walletTx.amount });
+                }
+
+                logger.info("YellowCard poll: transaction failed/cancelled", { transactionId, ycStatus });
+            }
+        } else {
+            logger.info("YellowCard poll: no status change needed", {
+                transactionId,
+                ycStatus,
+                localStatus: transaction.status,
+            });
+        }
+
+        const updatedTransaction = await this.findById(transactionId);
+        logger.info("YellowCard poll: final transaction status", {
+            transactionId,
+            finalStatus: updatedTransaction?.status,
+        });
+        return {
+            transaction: updatedTransaction?.toObject(),
+            ycStatus,
+            ycPayment,
+        };
+    };
+
+    // ===================== YELLOWCARD COLLECTION (RECEIVE) =====================
+
+    /**
+     * Create a YellowCard collection transaction (receive money).
+     * Sender pays in foreign currency → YellowCard collects → NGN credited to user's wallet.
+     */
+    public createYellowCardCollectionTransaction = async (
+        params: {
+            amount: number;          // Amount in foreign currency (what sender pays)
+            fromAmount?: number;     // NGN equivalent (what user receives)
+            fromCurrency: string;    // Foreign currency (KES, GHS, XAF)
+            toCurrency: string;      // NGN (user's wallet currency)
+            sender: {
+                name: string;
+                country: string;
+                phone: string;
+                address: string;
+                dob: string;
+                email: string;
+                idNumber?: string;
+                idType?: string;
+            };
+            destination?: {
+                accountName?: string;
+                accountNumber?: string;
+                accountType?: string;
+                country?: string;
+            };
+            idempotencyKey?: string;
+        },
+        userId: string,
+    ) => {
+        const { amount, fromAmount, fromCurrency, toCurrency, sender, destination, idempotencyKey } = params;
+
+        if (!amount || amount <= 0) {
+            throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
+        }
+
+        // Handle idempotency
+        if (idempotencyKey) {
+            const idempotencyResult = await this.idempotencyService.validateKey(idempotencyKey, userId);
+            if (idempotencyResult.isDuplicate && idempotencyResult.transactionId) {
+                const existingTransaction = await this.findById(idempotencyResult.transactionId);
+                if (existingTransaction) {
+                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existingTransaction._id });
+                    return {
+                        ...existingTransaction.toObject(),
+                        details: existingDetails ? existingDetails.toObject() : {}
+                    };
+                }
+            }
+        }
+
+        // Resolve channels/networks for the SENDER's country (where collection happens)
+        const senderCountry = sender.country;
+        const targetType = destination?.accountType || 'momo';
+
+        let channelsData: any;
+        let networksData: any;
+        try {
+            [channelsData, networksData] = await Promise.all([
+                yellowCardService.getChannels(senderCountry),
+                yellowCardService.getNetworks(senderCountry),
+            ]);
+        } catch (error: any) {
+            logger.error("Failed to fetch YellowCard channels/networks for collection", { senderCountry, error: error?.message });
+            throw errorResponseMessage.createError(400, "Unable to fetch payment channels. Please try again.", ErrorSeverity.HIGH);
+        }
+
+        const allChannels = channelsData?.channels || channelsData || [];
+        const allNetworks = networksData?.networks || networksData || [];
+
+        // Collections require on-ramp/deposit channels
+        const isCollectionChannel = (c: any) => {
+            const rt = (c.rampType || '').toLowerCase();
+            return rt === 'deposit' || rt === 'on' || rt === 'onramp' || rt === 'on-ramp';
+        };
+        const activeChannels = allChannels.filter((c: any) => c.status === 'active' && isCollectionChannel(c));
+        const sortedChannels = [
+            ...activeChannels.filter((c: any) => c.channelType === targetType),
+            ...activeChannels.filter((c: any) => c.channelType !== targetType),
+        ];
+
+        const activeNetworks = allNetworks.filter((n: any) => n.status === 'active');
+        const network = activeNetworks.find((n: any) => n.type === targetType) || activeNetworks[0];
+
+        if (sortedChannels.length === 0) {
+            logger.error("No active on-ramp channels found for collection", {
+                senderCountry,
+                targetType,
+                totalChannels: allChannels.length,
+                activeOnRampCount: activeChannels.length,
+                allChannelDetails: allChannels.map((c: any) => ({ id: c.id, rampType: c.rampType, status: c.status, channelType: c.channelType, apiStatus: c.apiStatus })),
+            });
+            throw errorResponseMessage.createError(
+                400,
+                "Collection is not available for this currency at the moment.",
+                ErrorSeverity.MEDIUM
+            );
+        }
+
+        const sequenceId = this.generateYellowCardSequenceId();
+
+        // Create internal transaction record
+        let transaction: any;
+        let transactionDetails: any;
+        try {
+            transaction = await this.create({
+                user: userId,
+                reference: sequenceId,
+                amount: Math.round(amount * 100) / 100,
+                fromCurrency,
+                currency: toCurrency,
+                detailType: DETAIL_TYPE.YELLOWCARD,
+                status: TRANSACTION_STATUS.PENDING,
+                initiatedAt: Date.now(),
+            });
+        } catch (dbError: any) {
+            logger.error("Failed to create collection transaction record", { error: dbError?.message, sequenceId });
+            throw errorResponseMessage.createError(500, `Failed to create transaction: ${dbError?.message || 'Unknown error'}`, ErrorSeverity.CRITICAL);
+        }
+
+        if (idempotencyKey) {
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+        }
+
+        try {
+            transactionDetails = await this.transactionDetailsService.create({
+                transactionId: transaction._id,
+                type: DETAIL_TYPE.YELLOWCARD,
+                ycSequenceId: sequenceId,
+                ycChannelId: sortedChannels[0]?.id,
+                ycNetworkId: network?.id,
+                ycStatus: YELLOWCARD_STATUS.PENDING,
+                fromAmount: fromAmount || amount,
+                accountName: destination?.accountName,
+                accountNumber: destination?.accountNumber,
+                institutionType: destination?.accountType,
+                country: senderCountry,
+            });
+        } catch (dbError: any) {
+            logger.error("Failed to create collection transaction detail", { error: dbError?.message, sequenceId });
+            throw errorResponseMessage.createError(500, `Failed to create transaction detail: ${dbError?.message || 'Unknown error'}`, ErrorSeverity.CRITICAL);
+        }
+
+        // Try each channel for the collection
+        let lastError: any = null;
+        for (const channel of sortedChannels) {
+            try {
+                logger.info("YellowCard: attempting collection with channel", {
+                    channelId: channel.id,
+                    channelType: channel.channelType,
+                    sequenceId,
+                });
+
+                const collectionResponse = await yellowCardService.submitCollectionRequest({
+                    channelId: channel.id,
+                    sequenceId,
+                    localAmount: amount,
+                    sender,
+                    destination: destination ? {
+                        accountName: destination.accountName,
+                        accountNumber: destination.accountNumber,
+                        accountType: destination.accountType,
+                        networkId: network?.id,
+                    } : undefined,
+                    forceAccept: true,
+                });
+
+                // Success — update detail
+                await this.transactionDetailsService.update(
+                    { transactionId: transaction._id },
+                    {
+                        ycChannelId: channel.id,
+                        ycCollectionId: collectionResponse?.id,
+                        ycStatus: collectionResponse?.status || YELLOWCARD_STATUS.PROCESSING,
+                        ycRawPayload: collectionResponse,
+                    }
+                );
+
+                await this.updateById(transaction._id.toString(), {
+                    status: TRANSACTION_STATUS.PROCESSING,
+                });
+
+                logger.info("YellowCard collection created", {
+                    transactionId: transaction._id,
+                    sequenceId,
+                    channelId: channel.id,
+                    ycCollectionId: collectionResponse?.id,
+                });
+
+                return {
+                    ...transaction.toObject(),
+                    status: TRANSACTION_STATUS.PROCESSING,
+                    details: {
+                        ...transactionDetails.toObject(),
+                        ycChannelId: channel.id,
+                        ycCollectionId: collectionResponse?.id,
+                        ycStatus: collectionResponse?.status || YELLOWCARD_STATUS.PROCESSING,
+                    },
+                };
+            } catch (error: any) {
+                const ycError = error?.ycError || error?.response?.data || error?.data;
+                const ycMessage = ycError?.message || error?.message || '';
+                logger.warn("YellowCard collection channel failed", {
+                    channelId: channel.id,
+                    error: ycMessage,
+                });
+                lastError = error;
+
+                const isChannelError = ycMessage.toLowerCase().includes('channel') && ycMessage.toLowerCase().includes('disabled');
+                if (!isChannelError) break;
+            }
+        }
+
+        // All channels failed
+        await this.updateById(transaction._id.toString(), { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
+        await this.transactionDetailsService.update({ transactionId: transaction._id }, { ycStatus: YELLOWCARD_STATUS.FAILED });
+
+        const ycError = lastError?.ycError || lastError?.response?.data || lastError?.data;
+        const ycMessage = ycError?.message || ycError?.code || lastError?.message || "Collection request failed";
+        throw errorResponseMessage.createError(400, `YellowCard: ${ycMessage}`, ErrorSeverity.HIGH);
+    };
+
+    /**
+     * Poll YellowCard for collection status and sync to local transaction.
+     * When collection completes, credits the user's wallet with the NGN equivalent.
+     */
+    public pollYellowCardCollectionStatus = async (transactionId: string) => {
+        const transaction = await this.findById(transactionId);
+        if (!transaction) {
+            throw errorResponseMessage.createError(404, "Transaction not found", ErrorSeverity.MEDIUM);
+        }
+
+        const detail = await this.transactionDetailsService.findOne({ transactionId: transaction._id });
+        if (!detail?.ycSequenceId) {
+            throw errorResponseMessage.createError(400, "No YellowCard sequence ID found", ErrorSeverity.MEDIUM);
+        }
+
+        // Try lookup by collection ID first, then by sequence ID
+        let ycCollection: any;
+        try {
+            if (detail.ycCollectionId) {
+                ycCollection = await yellowCardService.lookupCollection(detail.ycCollectionId);
+            } else {
+                ycCollection = await yellowCardService.lookupCollectionBySequenceId(detail.ycSequenceId);
+            }
+        } catch (error: any) {
+            logger.error("Failed to poll YellowCard collection status", {
+                transactionId,
+                sequenceId: detail.ycSequenceId,
+                error: error?.ycError || error?.message,
+            });
+            return {
+                transaction: transaction.toObject(),
+                ycStatus: detail.ycStatus || "unknown",
+                message: "Could not fetch status from YellowCard",
+            };
+        }
+
+        const rawCollection = ycCollection?.collection || ycCollection?.data || ycCollection;
+        const ycStatus = (rawCollection?.status || '')?.toLowerCase();
+
+        logger.info("YellowCard collection poll", {
+            transactionId,
+            sequenceId: detail.ycSequenceId,
+            ycStatus,
+            localStatus: transaction.status,
+        });
+
+        // Update local detail
+        await this.transactionDetailsService.update(
+            { _id: detail._id },
+            { ycRawPayload: ycCollection, ycStatus, ycCollectionId: rawCollection?.id || detail.ycCollectionId }
+        );
+
+        // Handle completed collection → credit wallet
+        if ((ycStatus === "complete" || ycStatus === "completed") && transaction.status !== TRANSACTION_STATUS.COMPLETED) {
+            const canTransition = transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.COMPLETED);
+            if (canTransition) {
+                await this.updateById(transactionId, {
+                    status: TRANSACTION_STATUS.COMPLETED,
+                    completedAt: new Date(),
+                });
+
+                // Credit user's wallet with the NGN equivalent
+                await this.creditWalletFromCollection(transaction, detail);
+
+                logger.info("YellowCard collection completed, wallet credited", { transactionId });
+
+                // Notify user
+                const user = transaction.user as IUser;
+                if (user?.email) {
+                    try {
+                        await this.notificationService.sendTransactionNotification(
+                            user,
+                            "payment_completed",
+                            {
+                                amount: `${detail.fromAmount || transaction.amount} NGN`,
+                                reference: transaction.reference,
+                                recipient: "Your Wallet",
+                                actionUrl: `${config.FRONTEND_URL}/dashboard/user/wallet`,
+                            }
+                        );
+                    } catch (e) {
+                        logger.warn("Failed to send collection completion notification", { error: e });
+                    }
+                }
+            }
+        } else if ((ycStatus === "failed" || ycStatus === "expired" || ycStatus === "cancelled") && transaction.status !== TRANSACTION_STATUS.FAILED) {
+            const newStatus = ycStatus === "cancelled" ? TRANSACTION_STATUS.CANCELLED : TRANSACTION_STATUS.FAILED;
+            if (transactionStateMachine.canTransition(transaction.status, newStatus)) {
+                await this.updateById(transactionId, {
+                    status: newStatus,
+                    ...(newStatus === TRANSACTION_STATUS.FAILED ? { failedAt: new Date() } : {}),
+                });
+            }
+        }
+
+        const updatedTransaction = await this.findById(transactionId);
+        return {
+            transaction: updatedTransaction?.toObject(),
+            ycStatus,
+            ycCollection,
+        };
+    };
+
+    /**
+     * Credit user's wallet when a YellowCard collection completes.
+     * The NGN amount is stored in detail.fromAmount (for receive: fromAmount is the NGN equivalent).
+     */
+    private creditWalletFromCollection = async (transaction: any, detail: any) => {
+        const userId = typeof transaction.user === 'object' ? transaction.user._id?.toString() : transaction.user?.toString();
+        // For receive: toCurrency is NGN, fromAmount is the NGN equivalent
+        const ngnAmount = detail.fromAmount || transaction.amount;
+
+        try {
+            const wallet = await this.walletService.findOne({ user: userId });
+            if (!wallet) {
+                logger.error("Wallet not found for collection credit", { userId });
+                return;
+            }
+
+            // Credit wallet
+            await this.walletService.creditBalance(wallet._id as string, ngnAmount);
+
+            // Create wallet funding transaction
+            const ref = this.walletTransactionService.generateReference('COL');
+            await this.walletTransactionService.create({
+                wallet: wallet._id,
+                user: userId,
+                type: WALLET_TRANSACTION_TYPE.FUNDING,
+                status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                amount: ngnAmount,
+                reference: ref,
+                balanceBefore: wallet.balance,
+                balanceAfter: wallet.balance + ngnAmount,
+                description: `Received ${transaction.amount} ${transaction.fromCurrency} → ₦${ngnAmount.toLocaleString()}`,
+                paystackReference: transaction.reference, // Link to YC transaction
+            });
+
+            // Update ledger balance
+            await this.walletService.adjustLedgerBalance(wallet._id as string, ngnAmount);
+
+            logger.info("Wallet credited from collection", {
+                userId,
+                walletId: wallet._id,
+                ngnAmount,
+                foreignAmount: transaction.amount,
+                foreignCurrency: transaction.fromCurrency,
+            });
+        } catch (error: any) {
+            logger.error("CRITICAL: Failed to credit wallet from collection", {
+                userId,
+                transactionId: transaction._id,
+                ngnAmount,
+                error: error?.message,
+            });
+        }
+    };
+
+    /**
+     * Handle YellowCard webhook callback for payment status updates.
+     * Called by the webhook controller after signature verification.
+     */
+    public handleYellowCardWebhook = async (webhookData: any) => {
+        const { event, data } = webhookData;
+
+        if (!data?.sequenceId) {
+            logger.warn("YellowCard webhook missing sequenceId", { event });
+            return;
+        }
+
+        // Look up transaction detail by sequenceId
+        const detail = await this.transactionDetailsService.findOne({ ycSequenceId: data.sequenceId });
+        if (!detail) {
+            logger.warn("YellowCard webhook: no matching transaction detail", { sequenceId: data.sequenceId });
+            return;
+        }
+
+        const transactionId = detail.transactionId.toString();
+        const transaction = await this.findById(transactionId);
+        if (!transaction) {
+            logger.warn("YellowCard webhook: no matching transaction", { transactionId });
+            return;
+        }
+
+        const status = data.status?.toLowerCase();
+
+        // Update the raw payload
+        await this.transactionDetailsService.update(
+            { _id: detail._id },
+            { ycRawPayload: data, ycStatus: status }
+        );
+
+        // Helper: find the wallet transaction linked to this YellowCard transaction
+        const findLinkedWalletTx = async () => {
+            return this.walletTransactionService.findOne({
+                paystackReference: transaction.reference, // linked via sequenceId
+                type: WALLET_TRANSACTION_TYPE.TRANSFER,
+            });
+        };
+
+        // Handle payment completed
+        if (event === "payment.completed" || event === "payment.complete" || status === "complete" || status === "completed") {
+            logger.info("YellowCard payment completed", { transactionId });
+
+            await this.updateById(transactionId, {
+                status: TRANSACTION_STATUS.COMPLETED,
+                completedAt: new Date(),
+            });
+            await this.transactionDetailsService.update(
+                { _id: detail._id },
+                { ycStatus: YELLOWCARD_STATUS.COMPLETED }
+            );
+
+            // Mark wallet transaction as successful
+            const walletTx = await findLinkedWalletTx();
+            if (walletTx) {
+                await this.walletTransactionService.updateById(walletTx._id as string, {
+                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                });
+                // Update ledger balance
+                await this.walletService.adjustLedgerBalance(walletTx.wallet as string, -walletTx.amount);
+            }
+
+            // Notify user
+            const user = transaction.user as IUser;
+            if (user?.email) {
+                try {
+                    await this.notificationService.sendTransactionNotification(
+                        user,
+                        "payment_completed",
+                        {
+                            amount: `${transaction.amount} ${transaction.currency}`,
+                            reference: transaction.reference,
+                            recipient: detail.accountName || "Recipient",
+                            actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
+                        }
+                    );
+                } catch (e) {
+                    logger.warn("Failed to send YC completion notification", { error: e });
+                }
+            }
+            return;
+        }
+
+        // Handle failures
+        if (status === "failed" || status === "cancelled" || status === "expired" || status === "refunded") {
+            const newStatus = status === "cancelled" ? TRANSACTION_STATUS.CANCELLED : TRANSACTION_STATUS.FAILED;
+
+            if (transactionStateMachine.canTransition(transaction.status, newStatus)) {
+                await this.updateById(transactionId, {
+                    status: newStatus,
+                    ...(newStatus === TRANSACTION_STATUS.FAILED ? { failedAt: new Date() } : {}),
+                });
+            }
+            await this.transactionDetailsService.update(
+                { _id: detail._id },
+                { ycStatus: status }
+            );
+
+            // Refund wallet on YellowCard failure
+            const walletTx = await findLinkedWalletTx();
+            if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.FAILED && walletTx.status !== WALLET_TRANSACTION_STATUS.REVERSED) {
+                await this.refundWallet(
+                    walletTx.wallet,
+                    walletTx.user as string,
+                    walletTx.amount,
+                    walletTx._id,
+                    walletTx.reference,
+                    `YellowCard payment ${status}`
+                );
+            }
+
+            logger.info("YellowCard transaction failed/cancelled — wallet refunded", {
+                transactionId,
+                ycStatus: status,
+            });
+            return;
+        }
+
+        // Handle collection events (receive money)
+        if (event?.startsWith("collection.")) {
+            const isReceive = transaction.currency === 'NGN' && transaction.fromCurrency !== 'NGN';
+            if ((event === "collection.completed" || event === "collection.complete" || status === "complete" || status === "completed") && isReceive) {
+                if (transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.COMPLETED)) {
+                    await this.updateById(transactionId, {
+                        status: TRANSACTION_STATUS.COMPLETED,
+                        completedAt: new Date(),
+                    });
+                    await this.transactionDetailsService.update(
+                        { _id: detail._id },
+                        { ycStatus: YELLOWCARD_STATUS.COMPLETED }
+                    );
+
+                    // Credit wallet
+                    await this.creditWalletFromCollection(transaction, detail);
+                    logger.info("YellowCard collection completed via webhook, wallet credited", { transactionId });
+                }
+                return;
+            }
+        }
+
+        // For other statuses (processing, pending, etc.), just update the YC status
+        logger.info("YellowCard webhook status update", {
+            transactionId,
+            event,
+            ycStatus: status,
+        });
+    };
+
     public async searchTransactions(
         searchTerm: string,
         filters: Partial<ITransaction> = {},

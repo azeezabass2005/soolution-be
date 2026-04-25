@@ -1,5 +1,4 @@
 import Jwt, { JwtPayload } from 'jsonwebtoken';
-import dotenv from 'dotenv';
 import crypto from 'crypto';
 import {
     ITokenPayload,
@@ -9,8 +8,7 @@ import {
     ITokenOptions
 } from './interface';
 import { IUser } from '../models/interface';
-
-dotenv.config()
+import config from '../config/env.config';
 
 /**
  * Utility functions for token-related operations
@@ -178,16 +176,12 @@ class Token {
     }
 
     /**
-     * Retrieves the secret key from environment variables
-     * @returns JWT secret key
-     * @throws {Error} If TOKEN_SECRET is not set
+     * Retrieves the JWT signing/verifying secret.
+     * The secret is validated for presence and minimum strength at application
+     * boot in `env.config.ts`, so by the time this runs it is guaranteed to exist.
      */
     private getSecretKey(): string {
-        const secret = process.env["JWT_SECRET"];
-        if (!secret) {
-            throw new Error('TOKEN_SECRET is not defined in environment variables');
-        }
-        return secret;
+        return config.JWT_SECRET;
     }
 }
 

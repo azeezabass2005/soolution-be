@@ -52,7 +52,7 @@ export const TRANSACTION_LIMITS: Partial<Record<CurrencyPair, TransactionLimit>>
     'XAF->KES': { min: 1000 },
     'XAF->XAF': { min: 1000 },
 
-    // Other currency pairs (add as needed)
+    // Other currency pairs
     'ZAR->NGN': { min: 100 },
     'ZAR->GHS': { min: 100 },
     'TZS->NGN': { min: 5000 },
@@ -65,6 +65,44 @@ export const TRANSACTION_LIMITS: Partial<Record<CurrencyPair, TransactionLimit>>
     'RWF->GHS': { min: 1000 },
     'USDT->NGN': { min: 10 },
     'USDT->GHS': { min: 10 },
+
+    // New YellowCard-supported currencies
+    'NGN->ZAR': { min: 1000 },
+    'NGN->TZS': { min: 1000 },
+    'NGN->UGX': { min: 1000 },
+    'NGN->XOF': { min: 1000 },
+    'NGN->RWF': { min: 1000 },
+    'NGN->BWP': { min: 1000 },
+    'NGN->ETB': { min: 1000 },
+    'NGN->ZMW': { min: 1000 },
+    'NGN->CDF': { min: 1000 },
+    'NGN->SLL': { min: 1000 },
+    'NGN->MWK': { min: 1000 },
+
+    'GHS->ZAR': { min: 50 },
+    'GHS->TZS': { min: 50 },
+    'GHS->UGX': { min: 50 },
+    'GHS->XOF': { min: 50 },
+    'GHS->RWF': { min: 50 },
+    'GHS->BWP': { min: 50 },
+    'GHS->ETB': { min: 50 },
+    'GHS->ZMW': { min: 50 },
+    'GHS->CDF': { min: 50 },
+    'GHS->SLL': { min: 50 },
+    'GHS->MWK': { min: 50 },
+
+    'BWP->NGN': { min: 100 },
+    'BWP->GHS': { min: 100 },
+    'ETB->NGN': { min: 500 },
+    'ETB->GHS': { min: 500 },
+    'ZMW->NGN': { min: 100 },
+    'ZMW->GHS': { min: 100 },
+    'CDF->NGN': { min: 5000 },
+    'CDF->GHS': { min: 5000 },
+    'SLL->NGN': { min: 5000 },
+    'SLL->GHS': { min: 5000 },
+    'MWK->NGN': { min: 1000 },
+    'MWK->GHS': { min: 1000 },
 };
 
 /**

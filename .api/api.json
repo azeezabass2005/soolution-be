@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "apis": [
+    {
+      "identifier": "payments-service",
+      "source": "@payments-service/v1.0.33#5iz0kllmiyx1rmy",
+      "integrity": "sha512-iIgabJLx9b42pVp2n21sR0P0Q2hy8Xbncqz3T4xQ3HEbWgBEil2fnPxrJajLTGWYM4DBZGBhpvn1v8lUH6bMeA==",
+      "installerVersion": "6.1.3"
+    }
+  ]
+}

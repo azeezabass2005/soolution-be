@@ -1,7 +1,8 @@
 import mongoose, {Document, Schema} from 'mongoose';
 import {
     USER_STATUS,
-    PUBLICATION_STATUS, TRANSACTION_STATUS, TRANSACTION_TYPE, DETAIL_TYPE, ALIPAY_PLATFORM
+    PUBLICATION_STATUS, TRANSACTION_STATUS, TRANSACTION_TYPE, DETAIL_TYPE, ALIPAY_PLATFORM,
+    WALLET_STATUS, WALLET_TRANSACTION_TYPE, WALLET_TRANSACTION_STATUS
 } from "../common/constant";
 
 export type UserStatus = (typeof USER_STATUS)[keyof typeof USER_STATUS];
@@ -15,6 +16,12 @@ export type TransactionType = (typeof TRANSACTION_TYPE)[keyof typeof TRANSACTION
 export type DetailType = (typeof DETAIL_TYPE)[keyof typeof DETAIL_TYPE];
 
 export type AlipayPlatform = (typeof ALIPAY_PLATFORM)[keyof typeof ALIPAY_PLATFORM];
+
+export type WalletStatus = (typeof WALLET_STATUS)[keyof typeof WALLET_STATUS];
+
+export type WalletTransactionType = (typeof WALLET_TRANSACTION_TYPE)[keyof typeof WALLET_TRANSACTION_TYPE];
+
+export type WalletTransactionStatus = (typeof WALLET_TRANSACTION_STATUS)[keyof typeof WALLET_TRANSACTION_STATUS];
 
 export interface IUser extends Document {
     username: string;
@@ -52,7 +59,7 @@ export interface IRefreshToken extends Document {
     ipAddress?: string;
 }
 
-export type CurrencyCode = 'RMB' | 'GHS' | 'NGN' | 'KES' | 'ZAR' | 'TZS' | 'UGX' | 'XOF' | 'XAF' | 'RWF' | 'USDT';
+export type CurrencyCode = 'RMB' | 'GHS' | 'NGN' | 'KES' | 'ZAR' | 'TZS' | 'UGX' | 'XOF' | 'XAF' | 'RWF' | 'BWP' | 'ETB' | 'ZMW' | 'CDF' | 'SLL' | 'MWK' | 'USDT';
 
 export interface IExchangeRate extends Document {
     from: CurrencyCode;
@@ -190,7 +197,35 @@ export interface ITransactionDetail extends Document {
     momoNumber?: string;
     momoName?: string;
 
-    // TODO: Other types of transaction details will be here
+    // Destination country (used by YellowCard disbursement)
+    country?: string;
+
+    // YellowCard specific fields
+    ycCollectionId?: string;
+    ycPaymentId?: string;
+    ycSequenceId?: string;
+    ycChannelId?: string;
+    ycNetworkId?: string;
+    ycStatus?: string;
+    ycRawPayload?: any;
+}
+
+export interface IYellowCardChannel {
+    id: string;
+    name: string;
+    country: string;
+    currency: string;
+    type: 'collection' | 'payment';
+    status: string;
+}
+
+export interface IYellowCardRate {
+    code: string;
+    buy: number;
+    sell: number;
+    locale: string;
+    country: string;
+    currency: string;
 }
 
 export interface IBankAccountDetails extends Document {
@@ -231,12 +266,55 @@ export interface IBankAccountDetails extends Document {
 //     failedAt?: Date;
 // }
 
-export interface IWallet {
-    // TODO: Find out all the information that needs to be stored on wallet
-    currency: 'GHS' | 'NGN', // This will only be GHS for now, other currencies will be introduced later
+export interface IWallet extends Document {
+    user: Schema.Types.ObjectId | string;
+    currency: 'NGN';
     balance: number;
-    user: Schema.Types.ObjectId;
+    ledgerBalance: number;
+    status: WalletStatus;
 
+    // Paystack customer & DVA fields
+    paystackCustomerCode?: string;
+    paystackCustomerId?: number;
+    dvaBankName?: string;
+    dvaAccountNumber?: string;
+    dvaAccountName?: string;
+    dvaBankId?: number;
+    dvaId?: number;
+    isDVAProvisioned: boolean;
+
+    // PIN security
+    pinHash?: string;
+    isPinSet: boolean;
+    pinAttempts: number;
+    pinLockedUntil?: Date;
+}
+
+export interface IWalletTransaction extends Document {
+    wallet: Schema.Types.ObjectId | string;
+    user: Schema.Types.ObjectId | string;
+    type: WalletTransactionType;
+    status: WalletTransactionStatus;
+    amount: number;
+    reference: string;
+    balanceBefore: number;
+    balanceAfter: number;
+    description?: string;
+
+    // Paystack references
+    paystackReference?: string;
+    paystackTransferCode?: string;
+
+    // Recipient bank details (for withdrawals)
+    recipientBankCode?: string;
+    recipientBankName?: string;
+    recipientAccountNumber?: string;
+    recipientAccountName?: string;
+    paystackRecipientCode?: string;
+
+    // Failure/reversal info
+    failureReason?: string;
+    reversedTransactionId?: Schema.Types.ObjectId | string;
 }
 
 export interface IVerification extends Document {

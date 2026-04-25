@@ -151,6 +151,11 @@ export const TransactionDetailSchema = new Schema<ITransactionDetail>(
             required: false
         },
 
+        country: {
+            type: String,
+            required: false
+        },
+
         /**
          * Bank name (for bank transfers)
          * @type {string}
@@ -223,10 +228,85 @@ export const TransactionDetailSchema = new Schema<ITransactionDetail>(
             trim: true,
             maxlength: 100,
             required: false
-        }
+        },
 
-        // TODO: Add other transaction detail types here as needed
-        // Example: Bank transfer details, Card payment details, etc.
+        // ============= YELLOWCARD SPECIFIC FIELDS =============
+
+        /**
+         * YellowCard collection ID (for collection requests)
+         * @type {string}
+         * @optional
+         */
+        ycCollectionId: {
+            type: String,
+            trim: true,
+            required: false
+        },
+
+        /**
+         * YellowCard payment/disbursement ID
+         * @type {string}
+         * @optional
+         */
+        ycPaymentId: {
+            type: String,
+            trim: true,
+            required: false
+        },
+
+        /**
+         * YellowCard sequence ID (our unique reference for YC)
+         * @type {string}
+         * @optional
+         */
+        ycSequenceId: {
+            type: String,
+            trim: true,
+            required: false
+        },
+
+        /**
+         * YellowCard channel ID used for the transaction
+         * @type {string}
+         * @optional
+         */
+        ycChannelId: {
+            type: String,
+            trim: true,
+            required: false
+        },
+
+        /**
+         * YellowCard network ID (bank/momo provider)
+         * @type {string}
+         * @optional
+         */
+        ycNetworkId: {
+            type: String,
+            trim: true,
+            required: false
+        },
+
+        /**
+         * YellowCard transaction status
+         * @type {string}
+         * @optional
+         */
+        ycStatus: {
+            type: String,
+            trim: true,
+            required: false
+        },
+
+        /**
+         * Raw YellowCard webhook/API payload for debugging
+         * @type {Mixed}
+         * @optional
+         */
+        ycRawPayload: {
+            type: Schema.Types.Mixed,
+            required: false
+        }
     },
     {
         /** Enable virtual properties when converting to plain object */
@@ -259,6 +339,11 @@ TransactionDetailSchema.index({ alipayNo: 1 }, { sparse: true });
 
 // Compound index for efficient type-specific queries
 TransactionDetailSchema.index({ type: 1, platform: 1 }, { sparse: true });
+
+// YellowCard-specific indexes
+TransactionDetailSchema.index({ ycSequenceId: 1 }, { sparse: true });
+TransactionDetailSchema.index({ ycCollectionId: 1 }, { sparse: true });
+TransactionDetailSchema.index({ ycPaymentId: 1 }, { sparse: true });
 
 // ============= METHODS =============
 

@@ -342,16 +342,11 @@ class AuthController extends BaseController {
                 // Don't fail login if email fails - authentication is already successful
             }
 
-            console.log(accessToken, "This is the access token");
-            console.log(refreshToken, "This is the refresh token")
-
             // Save refresh token to database
             const decodedRefresh = await this.tokenBuilder
                 .setToken(refreshToken)
                 .build()
                 .verifyToken();
-
-            console.log(decodedRefresh, "This is the decoded refresh token");
 
             if(decodedRefresh && decodedRefresh.type === TokenType.REFRESH) {
                 const refreshPayload = decodedRefresh.data as IRefreshTokenPayload;

@@ -46,7 +46,16 @@ class PostController extends BaseController {
             const page = parseInt(req.query.page as string) || 1;
             const limit = parseInt(req.query.limit as string) || 10;
 
-            const posts = await this.postService.paginate(req.query, {
+            // Build the filter from a strict whitelist — never pass req.query as the Mongo filter
+            // (Express parses ?foo[$ne]=x into operator objects and would inject into the query).
+            const { category, publicationStatus, user, tag } = req.query;
+            const filter: Record<string, unknown> = {};
+            if (typeof category === 'string' && category) filter.category = category;
+            if (typeof publicationStatus === 'string' && publicationStatus) filter.publicationStatus = publicationStatus;
+            if (typeof user === 'string' && user) filter.user = user;
+            if (typeof tag === 'string' && tag) filter.tags = tag;
+
+            const posts = await this.postService.paginate(filter, {
                 page,
                 limit,
                 sort: {createdAt: -1},

@@ -50,7 +50,8 @@ class App {
                 'http://localhost:3000',
                 'https://solutionpay.co',
                 'https://www.solutionpay.co',
-                'https://trycloudflared.com'
+                'https://trycloudflared.com',
+                'https://df0c-102-89-83-98.ngrok-free.app'
             ],
             credentials: true,
             exposedHeaders: ['set-cookie']
@@ -73,8 +74,13 @@ class App {
         });
         this.app.use('/api', limiter);
 
-        // Body parsing
-        this.app.use(express.json({ limit: '10mb' }));
+        // Body parsing — capture raw body for webhook signature verification
+        this.app.use(express.json({
+            limit: '10mb',
+            verify: (req: any, _res, buf) => {
+                req.rawBody = buf.toString();
+            },
+        }));
         this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
         // Compression

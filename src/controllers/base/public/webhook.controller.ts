@@ -8,6 +8,10 @@ import NotificationService from "../../../utils/notification.utils";
 import config from "../../../config/env.config";
 import UserService from "../../../services/user.service";
 import SmileId from "../../../services/smile-id.service";
+import yellowCardService from "../../../services/yellowcard.service";
+import paystackService from "../../../services/paystack.service";
+import WalletService from "../../../services/wallet.service";
+import logger from "../../../utils/logger.utils";
 
 class WebhookController extends BaseController {
 
@@ -16,57 +20,55 @@ class WebhookController extends BaseController {
     notificationService: NotificationService;
     userService: UserService;
     smileIdService: SmileId;
+    walletService: WalletService;
 
     constructor () {
         super();
         this.verificationService = new VerificationService();
-        this.transactionService = new TransactionService();
+        this.transactionService = new TransactionService(["user"]);
         this.notificationService = new NotificationService();
         this.userService = new UserService();
         this.smileIdService = new SmileId();
+        this.walletService = new WalletService();
         this.setupRoutes();
     }
 
     protected setupRoutes(): void {
         this.router.post("/smile-id-callback", this.smileIdCallback.bind(this));
+        this.router.post("/yellowcard-callback", this.yellowCardCallback.bind(this));
+        this.router.post("/paystack-callback", this.paystackCallback.bind(this));
     }
 
     private async smileIdCallback(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const webhookData = req.body;
-            
-            // SECURITY: Verify webhook signature to ensure it's from Smile ID
+
+            // SECURITY: Verify webhook signature to ensure it's from Smile ID.
+            // An unsigned or tampered webhook could forge KYC success for an arbitrary user,
+            // flipping isVerified / isKYCDone and bulk-advancing pending transactions.
             const signature = webhookData.signature;
             const timestamp = webhookData.timestamp;
-            
+
             if (!signature || !timestamp) {
-                console.error("❌ [SECURITY] Missing signature or timestamp in webhook payload");
+                logger.warn("Smile ID webhook: missing signature or timestamp");
                 res.status(400).json({ error: "Invalid webhook payload - missing signature or timestamp" });
                 return;
             }
-            
-            // Verify signature with error handling
+
             let isValidSignature = false;
             try {
                 isValidSignature = this.smileIdService.verifySignature(signature, timestamp);
             } catch (error: any) {
-                console.error("❌ [SECURITY] Error during signature verification:", error?.message || error);
-                console.error("   Signature:", signature);
-                console.error("   Timestamp:", timestamp);
-                // Continue processing but log the error - in production you might want to reject
-                // For now, we'll allow it to continue but log the security concern
-                console.warn("⚠️ [SECURITY] Signature verification failed, but continuing with webhook processing");
+                logger.error("Smile ID webhook: signature verification threw", {
+                    error: error?.message || String(error),
+                });
+                isValidSignature = false;
             }
-            
+
             if (!isValidSignature) {
-                console.error("❌ [SECURITY] Invalid webhook signature - potential security threat");
-                console.error("   Signature:", signature);
-                console.error("   Timestamp:", timestamp);
-                // In production, you might want to reject here, but for now we'll log and continue
-                // to prevent blocking legitimate webhooks due to timestamp format issues
-                console.warn("⚠️ [SECURITY] Invalid signature, but continuing with webhook processing");
-            } else {
-                console.log("✅ [SECURITY] Webhook signature verified successfully");
+                logger.error("Smile ID webhook: invalid signature — rejecting");
+                res.status(401).json({ error: "Invalid signature" });
+                return;
             }
             
             // Extract key verification details with safe access
@@ -498,6 +500,115 @@ class WebhookController extends BaseController {
         }
         
         return reasonMap[resultCode] || `Verification failed with code: ${resultCode}`;
+    }
+
+    /**
+     * YellowCard webhook handler.
+     * Verifies the webhook signature and delegates processing to the transaction service.
+     */
+    private async yellowCardCallback(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+            const signature = req.headers["x-yc-signature"] as string || req.headers["x-yellowcard-signature"] as string;
+
+            if (!signature) {
+                logger.warn("YellowCard webhook: missing signature header");
+                res.status(400).json({ error: "Missing signature" });
+                return;
+            }
+
+            const isValid = yellowCardService.verifyWebhookSignature(rawBody, signature);
+            if (!isValid) {
+                logger.error("YellowCard webhook: invalid signature");
+                res.status(401).json({ error: "Invalid signature" });
+                return;
+            }
+
+            logger.info("YellowCard webhook received", {
+                event: req.body?.event,
+                sequenceId: req.body?.data?.sequenceId,
+            });
+
+            // Process the webhook asynchronously — respond 200 immediately to avoid timeouts
+            res.status(200).json({ received: true });
+
+            // Delegate to transaction service
+            await this.transactionService.handleYellowCardWebhook(req.body);
+        } catch (error: any) {
+            logger.error("YellowCard webhook processing error", { error: error?.message || error });
+            // Still return 200 to prevent retries if we haven't already responded
+            if (!res.headersSent) {
+                res.status(200).json({ received: true, error: "Processing failed" });
+            }
+        }
+    }
+    /**
+     * Paystack webhook handler for wallet funding and withdrawal events.
+     * Verifies HMAC SHA512 signature and processes:
+     * - charge.success → wallet funding
+     * - transfer.success → withdrawal completed
+     * - transfer.failed / transfer.reversed → withdrawal failed, reverse balance
+     */
+    private async paystackCallback(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+            const signature = req.headers["x-paystack-signature"] as string;
+
+            if (!signature) {
+                logger.warn("Paystack webhook: missing signature header");
+                res.status(400).json({ error: "Missing signature" });
+                return;
+            }
+
+            const isValid = paystackService.verifyWebhookSignature(rawBody, signature);
+            if (!isValid) {
+                logger.error("Paystack webhook: invalid signature");
+                res.status(401).json({ error: "Invalid signature" });
+                return;
+            }
+
+            // Respond 200 immediately to avoid timeouts
+            res.status(200).json({ received: true });
+
+            const { event, data } = req.body;
+            logger.info("Paystack webhook received", { event, reference: data?.reference });
+
+            switch (event) {
+                case "charge.success":
+                    // DVA funding — credit wallet
+                    // Pass the full data object so processFunding can extract customer info reliably
+                    await this.walletService.processFunding(
+                        data.reference,
+                        data.amount, // in kobo
+                        data
+                    );
+                    break;
+
+                case "transfer.success":
+                    await this.walletService.processWithdrawalSuccess(
+                        data.transfer_code,
+                        data.reference
+                    );
+                    break;
+
+                case "transfer.failed":
+                case "transfer.reversed":
+                    await this.walletService.processWithdrawalFailure(
+                        data.transfer_code,
+                        data.reference,
+                        data.reason || `Transfer ${event.split('.')[1]}`
+                    );
+                    break;
+
+                default:
+                    logger.info("Paystack webhook: unhandled event", { event });
+            }
+        } catch (error: any) {
+            logger.error("Paystack webhook processing error", { error: error?.message || error });
+            if (!res.headersSent) {
+                res.status(200).json({ received: true, error: "Processing failed" });
+            }
+        }
     }
 }
 

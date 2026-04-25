@@ -37,7 +37,8 @@ class TransactionStateMachine {
         ],
         [TRANSACTION_STATUS.PROCESSING]: [
             TRANSACTION_STATUS.COMPLETED,
-            TRANSACTION_STATUS.FAILED
+            TRANSACTION_STATUS.FAILED,
+            TRANSACTION_STATUS.CANCELLED
         ],
         [TRANSACTION_STATUS.COMPLETED]: [], // Terminal state - no transitions allowed
         [TRANSACTION_STATUS.SUCCESSFUL]: [], // Terminal state - no transitions allowed

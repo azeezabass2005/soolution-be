@@ -16,9 +16,6 @@ class RefreshTokenService extends DBService<IRefreshToken> {
         ipAddress?: string,
         session?: ClientSession
     ): Promise<IRefreshToken> {
-
-        console.log("RefreshTokenService saveRefreshToken", tokenId, userAgent, ipAddress, session);
-
         return this.save({
             userId: (userId as unknown) as Schema.Types.ObjectId,
             token: tokenId,
@@ -46,9 +43,6 @@ class RefreshTokenService extends DBService<IRefreshToken> {
     }
 
     async revokeAllUserTokens(userId: any, session?: ClientSession): Promise<void> {
-
-        console.log(userId, "This is the userid received by the revokeAllUserTokens")
-
         await this.update(
             { userId: userId, isRevoked: false },
             { isRevoked: true },

@@ -8,6 +8,8 @@ import transactionController from "../../controllers/base/protected/transaction.
 import bankAccountDetailsController from "../../controllers/base/protected/bank-account-details.controller";
 import verificationController from "../../controllers/base/protected/verification.controller";
 import dashboardController from "../../controllers/base/protected/dashboard.controller";
+import yellowCardTransactionController from "../../controllers/base/protected/yellowcard-transaction.controller";
+import walletController from "../../controllers/base/protected/wallet.controller";
 
 const path = "/protected";
 const protectedRouter = Router();
@@ -29,5 +31,7 @@ protectedRouter.use(`${path}/transactions`, transactionController);
 protectedRouter.use(`${path}/bank-account-details`, bankAccountDetailsController);
 protectedRouter.use(`${path}/verify`, verificationController);
 protectedRouter.use(`${path}/dashboard`, dashboardController);
+protectedRouter.use(`${path}/yellowcard`, yellowCardTransactionController);
+protectedRouter.use(`${path}/wallet`, walletController);
 
 export default protectedRouter;

@@ -91,9 +91,13 @@ class DBService<T> {
      * @returns {Promise<any>} Created document
      */
     public create(data: any, session: ClientSession | null = null): Promise<any> {
-        return this.executeWithErrorHandling(() =>
-                this.Model.create(data)
-            , 'Create operation failed');
+        return this.executeWithErrorHandling(async () => {
+            if (session) {
+                const [doc] = await this.Model.create([data], { session });
+                return doc;
+            }
+            return this.Model.create(data);
+        }, 'Create operation failed');
     }
 
     /**

@@ -11,6 +11,8 @@ export const MODEL_NAME = {
     VERIFICATION: "VerificationModel",
     IDEMPOTENCY_KEY: "IdempotencyKeyModel",
     AUDIT_LOG: "AuditLogModel",
+    WALLET: "WalletModel",
+    WALLET_TRANSACTION: "WalletTransactionModel",
 }
 
 export const ROLE_MAP = {
@@ -42,9 +44,15 @@ export const CURRENCY_CODES = [
     "ZAR", // South Africa
     "TZS", // Tanzania
     "UGX", // Uganda
-    "XOF", // Benin, Mali, Ivory Coast, Burkina Faso
-    "XAF", // Cameroon
+    "XOF", // Benin, Mali, Ivory Coast, Burkina Faso, Senegal
+    "XAF", // Cameroon, Chad, Congo, Gabon
     "RWF", // Rwanda
+    "BWP", // Botswana
+    "ETB", // Ethiopia
+    "ZMW", // Zambia
+    "CDF", // Congo (DRC)
+    "SLL", // Sierra Leone
+    "MWK", // Malawi
     "USDT" // Crypto
 ]
 
@@ -78,6 +86,17 @@ export const DETAIL_TYPE = {
     WECHAT: 'wechat',
     BANK_TRANSFER: 'bank_transfer',
     MOBILE_MONEY: 'mobile_money',
+    YELLOWCARD: 'yellowcard',
+}
+
+export const YELLOWCARD_STATUS = {
+    PENDING: 'pending',
+    PROCESSING: 'processing',
+    COMPLETED: 'completed',
+    FAILED: 'failed',
+    CANCELLED: 'cancelled',
+    EXPIRED: 'expired',
+    REFUNDED: 'refunded',
 }
 
 export const ALIPAY_PLATFORM = {
@@ -89,4 +108,25 @@ export const INSTITUTION_TYPE = {
     BANK: 'bank',
     MOMO: 'momo', // For GHS and XAF
     MPESA: 'mpesa', // For KES
+}
+
+export const WALLET_TRANSACTION_TYPE = {
+    FUNDING: 'funding',
+    WITHDRAWAL: 'withdrawal',
+    TRANSFER: 'transfer',
+    REVERSAL: 'reversal',
+}
+
+export const WALLET_TRANSACTION_STATUS = {
+    PENDING: 'pending',
+    PROCESSING: 'processing',
+    SUCCESSFUL: 'successful',
+    FAILED: 'failed',
+    REVERSED: 'reversed',
+}
+
+export const WALLET_STATUS = {
+    ACTIVE: 'active',
+    FROZEN: 'frozen',
+    CLOSED: 'closed',
 }

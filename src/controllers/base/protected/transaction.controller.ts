@@ -154,74 +154,78 @@ class TransactionController extends BaseController {
         }
     }
 
+    /**
+     * Parse YYYY-MM-DD startDate/endDate query params into a Mongo-compatible
+     * { $gte, $lte } range. Returns undefined if no valid dates are provided.
+     */
+    private buildDateRangeFilter(startDate: unknown, endDate: unknown): Record<string, Date> | undefined {
+        const dateFilter: Record<string, Date> = {};
+
+        if (typeof startDate === 'string') {
+            const parts = startDate.split('-');
+            if (parts.length === 3) {
+                const year = parseInt(parts[0], 10);
+                const month = parseInt(parts[1], 10) - 1;
+                const day = parseInt(parts[2], 10);
+                if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
+                    dateFilter.$gte = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+                }
+            }
+        }
+
+        if (typeof endDate === 'string') {
+            const parts = endDate.split('-');
+            if (parts.length === 3) {
+                const year = parseInt(parts[0], 10);
+                const month = parseInt(parts[1], 10) - 1;
+                const day = parseInt(parts[2], 10);
+                if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
+                    dateFilter.$lte = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+                }
+            }
+        }
+
+        return Object.keys(dateFilter).length > 0 ? dateFilter : undefined;
+    }
+
     private async getAlipayTransactions(req: Request, res: Response, next: NextFunction, isAdmin: boolean) {
         try {
-            const { page, limit, searchTerm, status, startDate, endDate, ...otherQueries } = req.query;
+            const { page, limit, searchTerm, status, startDate, endDate } = req.query;
             const user = res.locals.user;
 
+            // Build the filter from a strict whitelist — never spread req.query into a Mongo filter
+            // (Express parses ?foo[$ne]=x into operator objects and would inject into the query).
+            const filter: Record<string, unknown> = {
+                currency: 'RMB',
+            };
+
             if (!isAdmin) {
-                otherQueries.user = user?.id;
+                filter.user = user?.id;
             }
 
-            // Filter for RMB transactions only
-            otherQueries.currency = 'RMB';
-
-            // Handle status filter
-            if (status && status !== 'all') {
-                otherQueries.status = status;
+            if (typeof status === 'string' && status && status !== 'all') {
+                filter.status = status;
             }
 
-            // Handle date range filter
-            if (startDate || endDate) {
-                const dateFilter: any = {};
-                if (startDate) {
-                    // Parse date string (YYYY-MM-DD) and create start of day in UTC
-                    const dateParts = (startDate as string).split('-');
-                    if (dateParts.length === 3) {
-                        const year = parseInt(dateParts[0], 10);
-                        const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
-                        const day = parseInt(dateParts[2], 10);
-                        // Create date in UTC to avoid timezone issues
-                        const start = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
-                        dateFilter.$gte = start;
-                    }
-                }
-                if (endDate) {
-                    // Parse date string (YYYY-MM-DD) and create end of day in UTC
-                    const dateParts = (endDate as string).split('-');
-                    if (dateParts.length === 3) {
-                        const year = parseInt(dateParts[0], 10);
-                        const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
-                        const day = parseInt(dateParts[2], 10);
-                        // Create date in UTC to avoid timezone issues
-                        const end = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
-                        dateFilter.$lte = end;
-                    }
-                }
-                if (Object.keys(dateFilter).length > 0) {
-                    otherQueries.createdAt = dateFilter;
-                }
+            const createdAt = this.buildDateRangeFilter(startDate, endDate);
+            if (createdAt) {
+                filter.createdAt = createdAt;
             }
 
-            let transactions;
+            const parsedPage = parseInt(page as string) || 1;
+            const parsedLimit = parseInt(limit as string) || 10;
 
-            if (searchTerm) {
-                transactions = await this.transactionService.searchTransactions(
-                    searchTerm.toString(),
-                    otherQueries,
-                    {
-                        page: parseInt(page as string) || 1,
-                        limit: parseInt(limit as string) || 10,
-                        useTextSearch: false
-                    }
-                );
-            } else {
-                transactions = await this.transactionService.paginate(otherQueries, {
-                    page: parseInt(page as string) || 1,
-                    limit: parseInt(limit as string) || 10,
-                    sort: { createdAt: -1 }
+            const transactions = typeof searchTerm === 'string' && searchTerm
+                ? await this.transactionService.searchTransactions(
+                    searchTerm,
+                    filter,
+                    { page: parsedPage, limit: parsedLimit, useTextSearch: false }
+                )
+                : await this.transactionService.paginate(filter, {
+                    page: parsedPage,
+                    limit: parsedLimit,
+                    sort: { createdAt: -1 },
                 });
-            }
 
             return this.sendSuccess(res, transactions)
         } catch (error: any) {
@@ -231,74 +235,46 @@ class TransactionController extends BaseController {
 
     private async getBankTransferTransactions(req: Request, res: Response, next: NextFunction, isAdmin: boolean) {
         try {
-            const { page, limit, searchTerm, status, startDate, endDate, ...otherQueries } = req.query;
+            const { page, limit, searchTerm, status, startDate, endDate } = req.query;
             const user = res.locals.user;
 
+            // Build the filter from a strict whitelist — never spread req.query into a Mongo filter
+            // (Express parses ?foo[$ne]=x into operator objects and would inject into the query).
+            // Filter for bank transfer / YellowCard transactions (includes both send and receive).
+            // Excludes RMB (alipay/wechat) which is served by a separate endpoint.
+            const filter: Record<string, unknown> = {
+                currency: {
+                    $in: ['GHS', 'NGN', 'KES', 'XAF', 'ZAR', 'TZS', 'UGX', 'XOF', 'RWF', 'BWP', 'ZMW', 'MWK'],
+                },
+            };
+
             if (!isAdmin) {
-                otherQueries.user = user?.id;
+                filter.user = user?.id;
             }
 
-            // Filter for bank transfer transactions (includes both send and receive)
-            // Send: fromCurrency = NGN/GHS, currency = GHS/XAF/KES
-            // Receive: fromCurrency = GHS/KES/XAF/NGN, currency = NGN/GHS
-            otherQueries.currency = { $in: ['GHS', 'XAF', 'KES', 'NGN'] };
-
-            // Handle status filter
-            if (status && status !== 'all') {
-                otherQueries.status = status;
+            if (typeof status === 'string' && status && status !== 'all') {
+                filter.status = status;
             }
 
-            // Handle date range filter
-            if (startDate || endDate) {
-                const dateFilter: any = {};
-                if (startDate) {
-                    // Parse date string (YYYY-MM-DD) and create start of day in UTC
-                    const dateParts = (startDate as string).split('-');
-                    if (dateParts.length === 3) {
-                        const year = parseInt(dateParts[0], 10);
-                        const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
-                        const day = parseInt(dateParts[2], 10);
-                        // Create date in UTC to avoid timezone issues
-                        const start = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
-                        dateFilter.$gte = start;
-                    }
-                }
-                if (endDate) {
-                    // Parse date string (YYYY-MM-DD) and create end of day in UTC
-                    const dateParts = (endDate as string).split('-');
-                    if (dateParts.length === 3) {
-                        const year = parseInt(dateParts[0], 10);
-                        const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
-                        const day = parseInt(dateParts[2], 10);
-                        // Create date in UTC to avoid timezone issues
-                        const end = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
-                        dateFilter.$lte = end;
-                    }
-                }
-                if (Object.keys(dateFilter).length > 0) {
-                    otherQueries.createdAt = dateFilter;
-                }
+            const createdAt = this.buildDateRangeFilter(startDate, endDate);
+            if (createdAt) {
+                filter.createdAt = createdAt;
             }
 
-            let transactions;
+            const parsedPage = parseInt(page as string) || 1;
+            const parsedLimit = parseInt(limit as string) || 10;
 
-            if (searchTerm) {
-                transactions = await this.transactionService.searchTransactions(
-                    searchTerm.toString(),
-                    otherQueries,
-                    {
-                        page: parseInt(page as string) || 1,
-                        limit: parseInt(limit as string) || 10,
-                        useTextSearch: false
-                    }
-                );
-            } else {
-                transactions = await this.transactionService.paginate(otherQueries, {
-                    page: parseInt(page as string) || 1,
-                    limit: parseInt(limit as string) || 10,
-                    sort: { createdAt: -1 }
+            const transactions = typeof searchTerm === 'string' && searchTerm
+                ? await this.transactionService.searchTransactions(
+                    searchTerm,
+                    filter,
+                    { page: parsedPage, limit: parsedLimit, useTextSearch: false }
+                )
+                : await this.transactionService.paginate(filter, {
+                    page: parsedPage,
+                    limit: parsedLimit,
+                    sort: { createdAt: -1 },
                 });
-            }
 
             return this.sendSuccess(res, transactions)
         } catch (error: any) {
