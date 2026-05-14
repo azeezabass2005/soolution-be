@@ -55,8 +55,8 @@ class TransactionController extends BaseController {
 
     private async createAlipayTransaction(req: Request, res: Response, next: NextFunction) {
         try {
-            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string }> = req.body;
-            
+            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string; pin?: string }> = req.body;
+
             // Extract idempotency key from header if not in body
             const idempotencyKey = transactionData.idempotencyKey || req.headers['idempotency-key'] as string;
 
@@ -86,8 +86,8 @@ class TransactionController extends BaseController {
 
     private async createBankTransferTransaction(req: Request, res: Response, next: NextFunction) {
         try {
-            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string; idempotencyKey?: string }> = req.body;
-            
+            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string; idempotencyKey?: string; transactionType?: 'send' | 'receive'; pin?: string }> = req.body;
+
             // Extract idempotency key from header if not in body
             const idempotencyKey = transactionData.idempotencyKey || req.headers['idempotency-key'] as string;
 

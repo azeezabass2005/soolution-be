@@ -3,26 +3,46 @@ import { IWallet, IWalletTransaction, IUser } from "../models/interface";
 import Wallet from "../models/wallet.model";
 import WalletTransactionService from "./wallet-transaction.service";
 import paystackService from "./paystack.service";
-import HashService from "../utils/hash.utils";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
-import { WALLET_STATUS, WALLET_TRANSACTION_TYPE, WALLET_TRANSACTION_STATUS } from "../common/constant";
+import {
+    WALLET_STATUS,
+    WALLET_TRANSACTION_TYPE,
+    WALLET_TRANSACTION_STATUS,
+    ACCOUNT_TYPE,
+    JOURNAL_DIRECTION,
+    JOURNAL_SOURCE,
+    SYSTEM_ACCOUNT_CODES,
+    WEBHOOK_PROVIDER,
+    userWalletAccountCode,
+} from "../common/constant";
 import { WALLET_LIMITS } from "../config/wallet-limits.config";
 import config from "../config/env.config";
 import mongoose from "mongoose";
 import logger from "../utils/logger.utils";
+import PinService from "./pin.service";
+import User from "../models/user.model";
+import Account from "../models/account.model";
+import ledgerService from "./ledger.service";
+import AuditLogService from "./audit-log.service";
+
+const auditLogService = new AuditLogService();
 
 class WalletService extends DBService<IWallet> {
     private walletTransactionService: WalletTransactionService;
+    private pinService: PinService;
 
     constructor(populatePaths: string[] = []) {
         super(Wallet, populatePaths);
         this.walletTransactionService = new WalletTransactionService();
+        this.pinService = new PinService();
     }
 
     // ===================== WALLET MANAGEMENT =====================
 
     /**
-     * Get or create a wallet for a user
+     * Get or create a wallet for a user. Also ensures the user's per-currency
+     * ledger account (USER_WALLET_NGN:{userId}) exists so subsequent journal
+     * postings have a target account ready.
      */
     async getOrCreateWallet(userId: string): Promise<IWallet> {
         let wallet = await this.findOne({ user: userId });
@@ -38,7 +58,30 @@ class WalletService extends DBService<IWallet> {
                 pinAttempts: 0,
             });
         }
+        await this.ensureUserLedgerAccount(userId, wallet);
         return wallet;
+    }
+
+    /**
+     * Idempotently create the user's per-currency ledger liability account.
+     * Called from getOrCreateWallet so any path that touches a wallet has the
+     * matching ledger account in place.
+     */
+    private async ensureUserLedgerAccount(userId: string, wallet: IWallet): Promise<void> {
+        const code = userWalletAccountCode(userId, wallet.currency);
+        const existing = await Account.findOne({ code });
+        if (existing) return;
+
+        await Account.create({
+            code,
+            type: ACCOUNT_TYPE.LIABILITY,
+            currency: wallet.currency,
+            name: `User wallet — ${userId}`,
+            ownerUser: userId,
+            ownerWallet: wallet._id,
+            balance: 0,
+            isSystem: false,
+        });
     }
 
     /**
@@ -79,92 +122,58 @@ class WalletService extends DBService<IWallet> {
     }
 
     // ===================== PIN MANAGEMENT =====================
+    // The PIN is now stored on the User document and managed by PinService.
+    // These methods preserve the old wallet-scoped API so wallet.controller.ts
+    // and initiateWithdrawal continue to work unchanged. They also perform a
+    // one-time lazy migration of any pre-existing wallet pinHash into the user.
 
     /**
-     * Set wallet PIN (first time only)
+     * Set the user's transaction PIN (first time).
      */
     async setPin(userId: string, pin: string): Promise<void> {
-        const wallet = await this.findOne({ user: userId });
-        if (!wallet) throw errorResponseMessage.resourceNotFound("Wallet");
-
-        if (wallet.isPinSet) {
-            throw errorResponseMessage.createError(400, "PIN is already set. Use change PIN instead.", ErrorSeverity.MEDIUM);
-        }
-
-        const { password: pinHash } = await HashService.hashPassword(pin);
-        await this.updateById(wallet._id as string, {
-            pinHash,
-            isPinSet: true,
-            pinAttempts: 0,
-            pinLockedUntil: undefined,
-        });
+        await this.pinService.setPin(userId, pin);
     }
 
     /**
-     * Change wallet PIN
+     * Change the user's transaction PIN.
      */
     async changePin(userId: string, oldPin: string, newPin: string): Promise<void> {
-        await this.verifyPin(userId, oldPin);
-
-        const wallet = await this.Model.findOne({ user: userId }).select('+pinHash');
-        if (!wallet) throw errorResponseMessage.resourceNotFound("Wallet");
-
-        const { password: pinHash } = await HashService.hashPassword(newPin);
-        await this.updateById(wallet._id as string, {
-            pinHash,
-            pinAttempts: 0,
-            pinLockedUntil: undefined,
-        });
+        await this.migrateWalletPinToUserIfNeeded(userId);
+        await this.pinService.changePin(userId, oldPin, newPin);
     }
 
     /**
-     * Verify wallet PIN with lockout protection
+     * Verify the user's transaction PIN, with lockout enforcement.
+     * Lazily migrates an old wallet-scoped pinHash to the user document on first call.
      */
     async verifyPin(userId: string, pin: string): Promise<void> {
+        await this.migrateWalletPinToUserIfNeeded(userId);
+        await this.pinService.verifyPin(userId, pin);
+    }
+
+    /**
+     * One-time migration: copy a pre-existing wallet.pinHash onto the user
+     * document so subsequent verifications go through PinService. Safe to call
+     * repeatedly — it no-ops once the user already has a PIN.
+     */
+    private async migrateWalletPinToUserIfNeeded(userId: string): Promise<void> {
+        const user = await User.findById(userId).select('+transactionPinHash');
+        if (!user || user.isTransactionPinSet) return;
+
         const wallet = await this.Model.findOne({ user: userId }).select('+pinHash');
-        if (!wallet) throw errorResponseMessage.resourceNotFound("Wallet");
+        if (!wallet || !wallet.isPinSet || !wallet.pinHash) return;
 
-        if (!wallet.isPinSet || !wallet.pinHash) {
-            throw errorResponseMessage.createError(400, "PIN has not been set yet.", ErrorSeverity.MEDIUM);
-        }
-
-        // Check lockout
-        if (wallet.pinLockedUntil && wallet.pinLockedUntil.getTime() > Date.now()) {
-            const remainingMinutes = Math.ceil((wallet.pinLockedUntil.getTime() - Date.now()) / 60000);
-            throw errorResponseMessage.createError(
-                429,
-                `PIN is locked. Try again in ${remainingMinutes} minute(s).`,
-                ErrorSeverity.HIGH
-            );
-        }
-
-        const isValid = await HashService.verifyPassword(pin, wallet.pinHash);
-        if (!isValid) {
-            const attempts = (wallet.pinAttempts || 0) + 1;
-            const updates: any = { pinAttempts: attempts };
-
-            if (attempts >= WALLET_LIMITS.MAX_PIN_ATTEMPTS) {
-                updates.pinLockedUntil = new Date(Date.now() + WALLET_LIMITS.PIN_LOCKOUT_MINUTES * 60 * 1000);
-                updates.pinAttempts = 0;
-                logger.warn("Wallet PIN locked", { userId, attempts });
+        await User.updateOne(
+            { _id: userId },
+            {
+                transactionPinHash: wallet.pinHash,
+                isTransactionPinSet: true,
+                transactionPinAttempts: wallet.pinAttempts || 0,
+                ...(wallet.pinLockedUntil ? { transactionPinLockedUntil: wallet.pinLockedUntil } : {}),
             }
+        );
 
-            await this.updateById(wallet._id as string, updates);
-
-            const remaining = WALLET_LIMITS.MAX_PIN_ATTEMPTS - attempts;
-            throw errorResponseMessage.createError(
-                401,
-                remaining > 0
-                    ? `Incorrect PIN. ${remaining} attempt(s) remaining.`
-                    : `Too many incorrect attempts. PIN locked for ${WALLET_LIMITS.PIN_LOCKOUT_MINUTES} minutes.`,
-                ErrorSeverity.HIGH
-            );
-        }
-
-        // Reset attempts on success
-        if (wallet.pinAttempts > 0) {
-            await this.updateById(wallet._id as string, { pinAttempts: 0, pinLockedUntil: undefined });
-        }
+        logger.info("Migrated wallet PIN to user document", { userId, walletId: wallet._id });
     }
 
     // ===================== FUNDING (Webhook-driven) =====================
@@ -203,15 +212,36 @@ class WalletService extends DBService<IWallet> {
             wallet = await this.findOne({ dvaAccountNumber });
         }
 
+        // No matching wallet — instead of silently dropping the money, post a
+        // suspense entry so the funds are captured in the ledger and can be
+        // attributed manually by an admin later.
         if (!wallet) {
-            logger.error("Wallet not found for funding", { paystackReference, customerCode, dvaAccountNumber });
+            logger.error("Wallet not found for funding — routing to SUSPENSE", { paystackReference, customerCode, dvaAccountNumber });
+            await this.recordSuspenseFunding({
+                paystackReference,
+                amount,
+                customerCode,
+                dvaAccountNumber,
+                webhookData,
+            });
             return null;
         }
 
         if (wallet.status !== WALLET_STATUS.ACTIVE) {
-            logger.warn("Funding attempted on non-active wallet", { walletId: wallet._id, status: wallet.status });
+            logger.warn("Funding attempted on non-active wallet — routing to SUSPENSE", { walletId: wallet._id, status: wallet.status });
+            await this.recordSuspenseFunding({
+                paystackReference,
+                amount,
+                customerCode,
+                dvaAccountNumber,
+                webhookData,
+                note: `wallet status is ${wallet.status}`,
+            });
             return null;
         }
+
+        // Make sure the user's ledger account exists before we try to credit it.
+        await this.ensureUserLedgerAccount(wallet.user as string, wallet);
 
         const session = await mongoose.startSession();
         session.startTransaction();
@@ -221,7 +251,24 @@ class WalletService extends DBService<IWallet> {
             const balanceBefore = wallet.balance;
             const balanceAfter = balanceBefore + amount;
 
-            // Atomic balance update
+            // Post the journal entry first — it's our source of truth.
+            // Money entered the platform via Paystack (CASH_PAYSTACK_NGN) and
+            // we now owe the user (USER_WALLET_NGN:{userId}).
+            const userAccountCode = userWalletAccountCode(wallet.user as string, wallet.currency);
+            await ledgerService.post({
+                legs: [
+                    { accountCode: SYSTEM_ACCOUNT_CODES.CASH_PAYSTACK_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount },
+                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount },
+                ],
+                source: JOURNAL_SOURCE.FUNDING,
+                reference,
+                description: `Wallet funding via Paystack DVA (${paystackReference})`,
+                externalRef: { provider: WEBHOOK_PROVIDER.PAYSTACK, id: paystackReference },
+                metadata: { customerCode, dvaAccountNumber },
+                session,
+            });
+
+            // Update the cached wallet.balance projection in the same session.
             const updatedWallet = await this.Model.findOneAndUpdate(
                 { _id: wallet._id, status: WALLET_STATUS.ACTIVE },
                 { $inc: { balance: amount, ledgerBalance: amount } },
@@ -248,6 +295,27 @@ class WalletService extends DBService<IWallet> {
 
             await session.commitTransaction();
             logger.info("Wallet funded successfully", { walletId: wallet._id, amount, reference });
+
+            // Audit-log the funding event for compliance / replay traceability.
+            // Best-effort: a logging failure does NOT block the funding result.
+            try {
+                await auditLogService.logAction(
+                    undefined,
+                    wallet.user as string,
+                    'funding_received',
+                    undefined,
+                    { amount, reference, paystackReference },
+                    undefined,
+                    undefined,
+                    { customerCode, dvaAccountNumber, walletId: wallet._id }
+                );
+            } catch (auditError) {
+                logger.warn('Audit log write failed (funding_received)', {
+                    paystackReference,
+                    error: auditError instanceof Error ? auditError.message : String(auditError),
+                });
+            }
+
             return walletTransaction;
         } catch (error) {
             await session.abortTransaction();
@@ -255,6 +323,70 @@ class WalletService extends DBService<IWallet> {
             throw error;
         } finally {
             session.endSession();
+        }
+    }
+
+    /**
+     * Capture an unmatched funding event in the SUSPENSE ledger so the funds
+     * are tracked. Idempotent on paystackReference: if a journal entry for the
+     * same Paystack reference already exists, this is a no-op.
+     *
+     * Posted on its own session — the calling webhook flow has already
+     * decided we cannot credit a user, so atomicity here is just about
+     * keeping the SUSPENSE entry consistent with CASH_PAYSTACK_NGN.
+     */
+    private async recordSuspenseFunding(opts: {
+        paystackReference: string;
+        amount: number;
+        customerCode?: string;
+        dvaAccountNumber?: string;
+        webhookData?: any;
+        note?: string;
+    }): Promise<void> {
+        try {
+            await ledgerService.postStandalone({
+                legs: [
+                    { accountCode: SYSTEM_ACCOUNT_CODES.CASH_PAYSTACK_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: opts.amount },
+                    { accountCode: SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: opts.amount },
+                ],
+                source: JOURNAL_SOURCE.FUNDING,
+                reference: opts.paystackReference,
+                description: `Unmatched Paystack funding held in suspense${opts.note ? ` — ${opts.note}` : ''}`,
+                externalRef: { provider: WEBHOOK_PROVIDER.PAYSTACK, id: opts.paystackReference },
+                metadata: {
+                    customerCode: opts.customerCode,
+                    dvaAccountNumber: opts.dvaAccountNumber,
+                    webhookData: opts.webhookData,
+                    note: opts.note,
+                },
+            });
+
+            try {
+                await auditLogService.logAction(
+                    undefined,
+                    undefined,
+                    'funding_suspense_held',
+                    undefined,
+                    { amount: opts.amount, paystackReference: opts.paystackReference },
+                    undefined,
+                    undefined,
+                    {
+                        customerCode: opts.customerCode,
+                        dvaAccountNumber: opts.dvaAccountNumber,
+                        note: opts.note,
+                    }
+                );
+            } catch (auditError) {
+                logger.warn('Audit log write failed (funding_suspense_held)', {
+                    paystackReference: opts.paystackReference,
+                    error: auditError instanceof Error ? auditError.message : String(auditError),
+                });
+            }
+        } catch (error) {
+            logger.error('Failed to record suspense funding entry', {
+                paystackReference: opts.paystackReference,
+                error: error instanceof Error ? error.message : String(error),
+            });
         }
     }
 
@@ -304,13 +436,18 @@ class WalletService extends DBService<IWallet> {
             throw errorResponseMessage.createError(400, "Insufficient wallet balance", ErrorSeverity.MEDIUM);
         }
 
+        // Make sure the user's ledger account exists before posting against it.
+        await this.ensureUserLedgerAccount(userId, wallet);
+
         const session = await mongoose.startSession();
         session.startTransaction();
 
+        let initTxGroupId: string | undefined;
         try {
             const reference = this.walletTransactionService.generateReference('WDR');
             const balanceBefore = wallet.balance;
             const balanceAfter = balanceBefore - amount;
+            const userAccountCode = userWalletAccountCode(userId, wallet.currency);
 
             // 5. Atomic balance debit
             const updatedWallet = await this.Model.findOneAndUpdate(
@@ -322,6 +459,21 @@ class WalletService extends DBService<IWallet> {
             if (!updatedWallet) {
                 throw errorResponseMessage.createError(400, "Insufficient balance or wallet unavailable", ErrorSeverity.HIGH);
             }
+
+            // Post journal: user's wallet liability decreases (debit), money is now
+            // sitting in the in-flight asset awaiting Paystack settlement.
+            const post = await ledgerService.post({
+                legs: [
+                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount },
+                    { accountCode: SYSTEM_ACCOUNT_CODES.PAYSTACK_TRANSFER_INFLIGHT_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount },
+                ],
+                source: JOURNAL_SOURCE.WITHDRAWAL,
+                reference,
+                description: `Withdrawal initiated to ${accountName} (${accountNumber})`,
+                metadata: { bankCode, accountNumber },
+                session,
+            });
+            initTxGroupId = post.txGroupId;
 
             // 6. Create wallet transaction record FIRST (so we have a record even if Paystack fails)
             const walletTransaction = await this.walletTransactionService.create({
@@ -376,15 +528,41 @@ class WalletService extends DBService<IWallet> {
                     reference, error: paystackError?.response?.data || paystackError?.message,
                 });
 
-                await this.Model.findOneAndUpdate(
-                    { _id: wallet._id },
-                    { $inc: { balance: amount } }
-                );
+                // Reverse both the wallet projection and the journal posting in one session.
+                const reverseSession = await mongoose.startSession();
+                reverseSession.startTransaction();
+                try {
+                    await this.Model.findOneAndUpdate(
+                        { _id: wallet._id },
+                        { $inc: { balance: amount } },
+                        { session: reverseSession }
+                    );
 
-                await this.walletTransactionService.updateById(walletTransaction._id as string, {
-                    status: WALLET_TRANSACTION_STATUS.FAILED,
-                    failureReason: paystackError?.response?.data?.message || paystackError?.message || "Transfer initiation failed",
-                });
+                    await ledgerService.post({
+                        legs: [
+                            { accountCode: SYSTEM_ACCOUNT_CODES.PAYSTACK_TRANSFER_INFLIGHT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount },
+                            { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount },
+                        ],
+                        source: JOURNAL_SOURCE.REVERSAL,
+                        reference,
+                        description: `Reversal — Paystack transfer initiation failed`,
+                        metadata: { reverses: initTxGroupId },
+                        session: reverseSession,
+                    });
+
+                    await this.walletTransactionService.updateById(walletTransaction._id as string, {
+                        status: WALLET_TRANSACTION_STATUS.FAILED,
+                        failureReason: paystackError?.response?.data?.message || paystackError?.message || "Transfer initiation failed",
+                    });
+
+                    await reverseSession.commitTransaction();
+                } catch (reverseError) {
+                    if (reverseSession.inTransaction()) await reverseSession.abortTransaction();
+                    logger.error('Reversal of failed Paystack initiation also failed', { reference, error: reverseError });
+                    throw reverseError;
+                } finally {
+                    reverseSession.endSession();
+                }
 
                 throw errorResponseMessage.createError(
                     500,
@@ -394,6 +572,25 @@ class WalletService extends DBService<IWallet> {
             }
 
             logger.info("Withdrawal initiated", { walletId: wallet._id, amount, reference });
+
+            try {
+                await auditLogService.logAction(
+                    undefined,
+                    userId,
+                    'withdrawal_initiated',
+                    undefined,
+                    { amount, reference, accountNumber, bankCode },
+                    undefined,
+                    undefined,
+                    { walletId: wallet._id }
+                );
+            } catch (auditError) {
+                logger.warn('Audit log write failed (withdrawal_initiated)', {
+                    reference,
+                    error: auditError instanceof Error ? auditError.message : String(auditError),
+                });
+            }
+
             return walletTransaction;
         } catch (error: any) {
             // Only abort if the transaction hasn't been committed yet
@@ -408,7 +605,9 @@ class WalletService extends DBService<IWallet> {
     }
 
     /**
-     * Process successful withdrawal (from Paystack webhook: transfer.success)
+     * Process successful withdrawal (from Paystack webhook: transfer.success).
+     * Posts the final journal entry settling the in-flight balance against the
+     * Paystack cash balance (i.e. money has actually left Paystack).
      */
     async processWithdrawalSuccess(transferCode: string, reference: string): Promise<void> {
         const walletTx = await this.walletTransactionService.findOne({
@@ -425,17 +624,62 @@ class WalletService extends DBService<IWallet> {
             return;
         }
 
-        await this.walletTransactionService.updateById(walletTx._id as string, {
-            status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
-        });
+        const session = await mongoose.startSession();
+        session.startTransaction();
+        try {
+            // Settle: in-flight asset → cash at Paystack (both are assets, so a
+            // debit on inflight reduces it and a credit on cash reduces it too,
+            // i.e. cash leaves Paystack to the recipient).
+            await ledgerService.post({
+                legs: [
+                    { accountCode: SYSTEM_ACCOUNT_CODES.PAYSTACK_TRANSFER_INFLIGHT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: walletTx.amount },
+                    { accountCode: SYSTEM_ACCOUNT_CODES.CASH_PAYSTACK_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: walletTx.amount },
+                ],
+                source: JOURNAL_SOURCE.WITHDRAWAL,
+                reference: walletTx.reference,
+                description: `Withdrawal settled at Paystack (${reference})`,
+                externalRef: { provider: WEBHOOK_PROVIDER.PAYSTACK, id: transferCode || reference },
+                session,
+            });
 
-        // Update ledger balance to match (balance was already debited at initiation)
-        await this.Model.findOneAndUpdate(
-            { _id: walletTx.wallet },
-            { $inc: { ledgerBalance: -walletTx.amount } }
-        );
+            await this.walletTransactionService.updateById(walletTx._id as string, {
+                status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+            });
 
-        logger.info("Withdrawal completed successfully", { reference, amount: walletTx.amount });
+            // Update ledger balance to match (balance was already debited at initiation)
+            await this.Model.findOneAndUpdate(
+                { _id: walletTx.wallet },
+                { $inc: { ledgerBalance: -walletTx.amount } },
+                { session }
+            );
+
+            await session.commitTransaction();
+            logger.info("Withdrawal completed successfully", { reference, amount: walletTx.amount });
+
+            try {
+                await auditLogService.logAction(
+                    undefined,
+                    walletTx.user as string,
+                    'withdrawal_settled',
+                    undefined,
+                    { amount: walletTx.amount, reference, transferCode },
+                    undefined,
+                    undefined,
+                    { walletTransactionId: walletTx._id }
+                );
+            } catch (auditError) {
+                logger.warn('Audit log write failed (withdrawal_settled)', {
+                    reference,
+                    error: auditError instanceof Error ? auditError.message : String(auditError),
+                });
+            }
+        } catch (error) {
+            if (session.inTransaction()) await session.abortTransaction();
+            logger.error("Withdrawal success processing failed", { reference, error });
+            throw error;
+        } finally {
+            session.endSession();
+        }
     }
 
     /**
@@ -478,6 +722,21 @@ class WalletService extends DBService<IWallet> {
                 throw errorResponseMessage.createError(500, "Wallet not found for reversal", ErrorSeverity.CRITICAL);
             }
 
+            // Reverse the journal: in-flight asset → user wallet liability.
+            const userAccountCode = userWalletAccountCode(walletTx.user as string, wallet.currency);
+            await ledgerService.post({
+                legs: [
+                    { accountCode: SYSTEM_ACCOUNT_CODES.PAYSTACK_TRANSFER_INFLIGHT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: walletTx.amount },
+                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount: walletTx.amount },
+                ],
+                source: JOURNAL_SOURCE.REVERSAL,
+                reference: walletTx.reference,
+                description: `Reversal — withdrawal ${walletTx.reference} failed (${reason || 'no reason given'})`,
+                externalRef: { provider: WEBHOOK_PROVIDER.PAYSTACK, id: transferCode || walletTx.reference },
+                metadata: { reverses: walletTx.reference, reason },
+                session,
+            });
+
             // Create reversal transaction record
             const reversalRef = this.walletTransactionService.generateReference('REV');
             await this.walletTransactionService.create({
@@ -495,6 +754,24 @@ class WalletService extends DBService<IWallet> {
 
             await session.commitTransaction();
             logger.info("Withdrawal reversed", { originalRef: reference, reversalRef, amount: walletTx.amount });
+
+            try {
+                await auditLogService.logAction(
+                    undefined,
+                    walletTx.user as string,
+                    'withdrawal_reversed',
+                    undefined,
+                    { amount: walletTx.amount, originalRef: reference, reversalRef, reason },
+                    undefined,
+                    undefined,
+                    { walletTransactionId: walletTx._id }
+                );
+            } catch (auditError) {
+                logger.warn('Audit log write failed (withdrawal_reversed)', {
+                    reference,
+                    error: auditError instanceof Error ? auditError.message : String(auditError),
+                });
+            }
         } catch (error) {
             await session.abortTransaction();
             logger.error("Withdrawal reversal failed", { reference, error });
@@ -597,24 +874,29 @@ class WalletService extends DBService<IWallet> {
     }
 
     /**
-     * Credit wallet balance (e.g. refund).
+     * Credit wallet balance (e.g. refund). Optionally participates in a session
+     * so the credit can be coordinated atomically with a journal posting.
      */
-    async creditBalance(walletId: string, amount: number) {
+    async creditBalance(walletId: string, amount: number, session?: mongoose.ClientSession) {
+        const opts: any = { new: true };
+        if (session) opts.session = session;
         return this.Model.findOneAndUpdate(
             { _id: walletId },
             { $inc: { balance: amount } },
-            { new: true }
+            opts
         );
     }
 
     /**
-     * Update ledger balance (after confirmed settlement).
+     * Update ledger balance (after confirmed settlement). Optional session.
      */
-    async adjustLedgerBalance(walletId: string, amount: number) {
+    async adjustLedgerBalance(walletId: string, amount: number, session?: mongoose.ClientSession) {
+        const opts: any = { new: true };
+        if (session) opts.session = session;
         return this.Model.findOneAndUpdate(
             { _id: walletId },
             { $inc: { ledgerBalance: amount } },
-            { new: true }
+            opts
         );
     }
 

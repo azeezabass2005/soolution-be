@@ -10,6 +10,11 @@ import verificationController from "../../controllers/base/protected/verificatio
 import dashboardController from "../../controllers/base/protected/dashboard.controller";
 import yellowCardTransactionController from "../../controllers/base/protected/yellowcard-transaction.controller";
 import walletController from "../../controllers/base/protected/wallet.controller";
+import pinController from "../../controllers/base/protected/pin.controller";
+import adminLedgerController from "../../controllers/base/protected/admin/ledger.controller";
+import adminReconciliationController from "../../controllers/base/protected/admin/reconciliation.controller";
+import adminWebhooksController from "../../controllers/base/protected/admin/webhooks.controller";
+import adminSuspenseController from "../../controllers/base/protected/admin/suspense.controller";
 
 const path = "/protected";
 const protectedRouter = Router();
@@ -33,5 +38,12 @@ protectedRouter.use(`${path}/verify`, verificationController);
 protectedRouter.use(`${path}/dashboard`, dashboardController);
 protectedRouter.use(`${path}/yellowcard`, yellowCardTransactionController);
 protectedRouter.use(`${path}/wallet`, walletController);
+protectedRouter.use(`${path}/pin`, pinController);
+
+// Admin-only routes (each controller applies RoleMiddleware.isAdmin internally)
+protectedRouter.use(`${path}/admin/ledger`, adminLedgerController);
+protectedRouter.use(`${path}/admin/reconciliation`, adminReconciliationController);
+protectedRouter.use(`${path}/admin/webhooks`, adminWebhooksController);
+protectedRouter.use(`${path}/admin/suspense`, adminSuspenseController);
 
 export default protectedRouter;

@@ -11,6 +11,8 @@ import routes from './routes';
 import DatabaseService from "./config/db.config";
 import ResponseErrorHandler from "./middlewares/error.middleware";
 import NotificationService from './utils/notification.utils';
+import { bootstrapSystemAccounts } from './services/account.bootstrap';
+import { registerJobs } from './jobs';
 
 
 /**
@@ -104,7 +106,27 @@ class App {
      * @private
      */
     private async setupDatabase(): Promise<void> {
-        await this.dbService.connect()
+        await this.dbService.connect();
+        // System ledger accounts must exist before any money path runs.
+        // Idempotent — only creates missing accounts.
+        try {
+            await bootstrapSystemAccounts();
+        } catch (error) {
+            logger.error('Failed to bootstrap system ledger accounts', {
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+        // Background source-of-truth jobs (reconciliation + stale sweeper).
+        // Skipped under tests if needed by setting DISABLE_JOBS=true.
+        if (process.env.DISABLE_JOBS !== 'true') {
+            try {
+                registerJobs();
+            } catch (error) {
+                logger.error('Failed to register background jobs', {
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
     }
 
     /**

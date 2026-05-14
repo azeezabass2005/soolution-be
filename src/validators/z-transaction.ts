@@ -3,6 +3,13 @@ import { ALIPAY_PLATFORM, DETAIL_TYPE, INSTITUTION_TYPE } from "../common/consta
 import {Request, Response, NextFunction} from "express";
 import zodErrorHandler from "./zod.error";
 import { validateTransactionAmount } from "../config/transaction-limits.config";
+import { WALLET_LIMITS } from "../config/wallet-limits.config";
+
+// Reusable 4-digit transaction PIN field — required on every outbound send.
+const transactionPinField = z
+    .string()
+    .length(WALLET_LIMITS.PIN_LENGTH, `PIN must be exactly ${WALLET_LIMITS.PIN_LENGTH} digits`)
+    .regex(/^\d+$/, "PIN must contain only digits");
 
 // Schema for Alipay transaction creation
 const ZCreateAlipayTransaction = z.object({
@@ -36,6 +43,8 @@ const ZCreateAlipayTransaction = z.object({
         .trim()
         .max(100, "Alipay Name cannot exceed 100 characters")
         .optional(),
+
+    pin: transactionPinField,
 
     // File validation - ensure it’s uploaded
     // alipayQrCode: z
@@ -102,7 +111,8 @@ const institutionFieldsRefine = (data: any) => {
     return true;
 };
 
-// Send: fromCurrency is user's base (NGN/GHS), toCurrency is any supported currency
+// Send: fromCurrency is user's base (NGN/GHS), toCurrency is any supported currency.
+// Send debits the user's wallet, so a transaction PIN is required.
 const ZCreateSendBankTransferTransaction = z.object({
     ...bankTransferFields,
     transactionType: z.literal('send'),
@@ -112,6 +122,7 @@ const ZCreateSendBankTransferTransaction = z.object({
     toCurrency: z.enum(ALL_TRANSFER_CURRENCIES, {
         errorMap: () => ({message: "Currency To Not Supported"})
     }),
+    pin: transactionPinField,
 });
 
 // Receive: fromCurrency is any supported currency, toCurrency is user's base (NGN/GHS)

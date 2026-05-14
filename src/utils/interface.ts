@@ -22,7 +22,8 @@ export enum TokenType {
     ACCESS = 'access',
     VERIFY = 'verify',
     REFRESH = 'refresh',
-    RESET = 'reset'
+    RESET = 'reset',
+    RESET_PIN = 'reset_pin'
 }
 
 /**

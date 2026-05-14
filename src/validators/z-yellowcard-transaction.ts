@@ -1,6 +1,7 @@
 import z from "zod";
 import { Request, Response, NextFunction } from "express";
 import zodErrorHandler from "./zod.error";
+import { WALLET_LIMITS } from "../config/wallet-limits.config";
 
 const ZCreateYellowCardTransaction = z.object({
     amount: z
@@ -33,6 +34,13 @@ const ZCreateYellowCardTransaction = z.object({
         accountType: z.string().min(1, "Destination account type is required"),
         country: z.string().min(1, "Destination country is required"),
     }),
+
+    // YellowCard send debits the user's wallet — PIN is required.
+    // Note: this schema is NOT applied to /collect (collections don't debit).
+    pin: z
+        .string()
+        .length(WALLET_LIMITS.PIN_LENGTH, `PIN must be exactly ${WALLET_LIMITS.PIN_LENGTH} digits`)
+        .regex(/^\d+$/, "PIN must contain only digits"),
 });
 
 export const validateCreateYellowCardTransaction = async (req: Request, res: Response, next: NextFunction) => {

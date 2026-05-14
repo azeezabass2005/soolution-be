@@ -108,7 +108,7 @@ class AuditLogService extends DBService<IAuditLog> {
      */
     public async logAction(
         transactionId: string | undefined,
-        userId: string,
+        userId: string | undefined,
         action: string,
         beforeValue?: any,
         afterValue?: any,
@@ -118,7 +118,7 @@ class AuditLogService extends DBService<IAuditLog> {
     ): Promise<IAuditLog> {
         return await this.create({
             transactionId: transactionId ? new Types.ObjectId(transactionId) : undefined,
-            userId: new Types.ObjectId(userId),
+            userId: userId ? new Types.ObjectId(userId) : undefined,
             action,
             beforeValue,
             afterValue,

@@ -117,6 +117,7 @@ class EmailService {
     private registerTemplates(): void {
         this.templates.set('welcome', this.welcomeTemplate.bind(this));
         this.templates.set('reset-password', this.resetPasswordTemplate.bind(this));
+        this.templates.set('reset-pin', this.resetPinTemplate.bind(this));
         this.templates.set('verification', this.verificationTemplate.bind(this));
         this.templates.set('notification', this.notificationTemplate.bind(this));
     }
@@ -292,6 +293,50 @@ class EmailService {
             </div>
             <p style="margin: 16px 0 12px 0; font-size: 14px; line-height: 1.6; color: #666;">
                 For security reasons, never share this link or code with anyone.
+            </p>
+            <p style="margin: 0; font-size: 14px; line-height: 1.6; color: #333;">
+                Best regards,<br>
+                <strong>The SolutionPay Team</strong>
+            </p>
+        `;
+        return content;
+    }
+
+    /**
+     * Transaction PIN reset email template
+     */
+    private resetPinTemplate(data: EmailTemplateData): string {
+        const warningIcon = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle; margin-right: 6px;"><path d="M8 0L0 14h16L8 0zm0 4v6h1.5V4H8zm0 8a1 1 0 100-2 1 1 0 000 2z" fill="#DC2626"/></svg>`;
+
+        const content = `
+            <h2 style="margin: 0 0 16px 0; font-size: 24px; font-weight: 600; color: ${this.theme.textDark}; letter-spacing: -0.3px;">
+                Reset Your Transaction PIN
+            </h2>
+            <p style="margin: 0 0 16px 0; font-size: 15px; line-height: 1.6; color: #333;">
+                Hi <strong>${data.name || 'there'}</strong>,
+            </p>
+            <p style="margin: 0 0 20px 0; font-size: 15px; line-height: 1.6; color: #333;">
+                We received a request to reset the 4-digit PIN you use to authorize transactions on your SolutionPay account.
+                Click the button below to set a new PIN:
+            </p>
+            ${data.resetUrl ? `
+            <div style="text-align: center; margin: 24px 0;">
+                <a href="${data.resetUrl}" style="display: inline-block; background-color: ${this.theme.primaryColor}; color: white; padding: 12px 28px; text-decoration: none; font-weight: 600; font-size: 14px; border-radius: 0;">
+                    Reset Transaction PIN
+                </a>
+            </div>
+            ` : ''}
+            <div style="background-color: #FEF2F2; border-left: 3px solid #DC2626; padding: 14px 16px; margin: 20px 0;">
+                <p style="margin: 0 0 6px 0; font-weight: 600; font-size: 14px; color: ${this.theme.textDark};">
+                    ${warningIcon}Important
+                </p>
+                <p style="margin: 0; font-size: 14px; line-height: 1.5; color: #555;">
+                    This link will expire in <strong>${data.expiryTime || '30 minutes'}</strong>.
+                    If you didn't request a PIN reset, please ignore this email and your PIN will remain unchanged.
+                </p>
+            </div>
+            <p style="margin: 16px 0 12px 0; font-size: 14px; line-height: 1.6; color: #666;">
+                For your security, never share this link with anyone — including SolutionPay support.
             </p>
             <p style="margin: 0; font-size: 14px; line-height: 1.6; color: #333;">
                 Best regards,<br>
@@ -520,6 +565,23 @@ class EmailService {
             to,
             subject: 'Reset Your Password',
             template: 'reset-password',
+            data,
+            attachments,
+        });
+    }
+
+    /**
+     * Sends a transaction PIN reset email
+     */
+    public async sendPinResetEmail(
+        to: string,
+        data: EmailTemplateData,
+        attachments?: EmailAttachment[]
+    ): Promise<any> {
+        return this.send({
+            to,
+            subject: 'Reset Your Transaction PIN',
+            template: 'reset-pin',
             data,
             attachments,
         });

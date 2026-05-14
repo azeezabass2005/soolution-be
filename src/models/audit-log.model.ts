@@ -3,7 +3,7 @@ import { MODEL_NAME } from "../common/constant";
 
 export interface IAuditLog extends Document {
     transactionId?: Schema.Types.ObjectId;
-    userId: Schema.Types.ObjectId;
+    userId?: Schema.Types.ObjectId;
     action: string;
     beforeValue?: any;
     afterValue?: any;
@@ -37,10 +37,10 @@ export const AuditLogSchema = new Schema<IAuditLog>(
          * @ref User
          * @required
          */
+        // Optional: system-level events (cron, suspense, replay) have no user.
         userId: {
             type: Schema.Types.ObjectId,
             ref: MODEL_NAME.USER,
-            required: true,
             index: true
         },
 

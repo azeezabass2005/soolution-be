@@ -160,6 +160,15 @@ export const UserSchema = new Schema<IUser>(
          * @optional
          */
         hearAboutUsOther: { type: String },
+
+        // ===================== TRANSACTION PIN =====================
+        // Single 4-digit PIN per user, required to authorize any outbound
+        // money movement (Alipay send, bank-transfer SEND, YellowCard send,
+        // wallet withdrawal). Hash is excluded from default queries.
+        transactionPinHash: { type: String, select: false },
+        isTransactionPinSet: { type: Boolean, default: false },
+        transactionPinAttempts: { type: Number, default: 0 },
+        transactionPinLockedUntil: { type: Date },
     },
     {
         /** Enable virtual properties when converting to plain object */
@@ -172,6 +181,12 @@ export const UserSchema = new Schema<IUser>(
         timestamps: true,
     }
 );
+
+// Virtual: PIN is currently locked due to too many failed attempts
+UserSchema.virtual('isTransactionPinLocked').get(function (this: IUser) {
+    if (!this.transactionPinLockedUntil) return false;
+    return this.transactionPinLockedUntil.getTime() > Date.now();
+});
 
 /**
  * User model based on IUser interface

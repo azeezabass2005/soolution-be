@@ -7,10 +7,11 @@ import {IRefreshTokenPayload, TokenType} from "../../../utils/interface";
 import {ROLE_MAP} from "../../../common/constant";
 import RefreshTokenService from "../../../services/refresh.service";
 import authMiddleware from "../../../middlewares/auth.middleware";
-import {loginValidate, postRegisterValidate, registerValidate} from "../../../validators";
+import {loginValidate, postRegisterValidate, registerValidate, validateResetTransactionPin} from "../../../validators";
 import {IUser} from "../../../models/interface";
 import config from "../../../config/env.config";
 import NotificationService from "../../../utils/notification.utils";
+import PinService from "../../../services/pin.service";
 
 /**
  * Controller handling authentication-related operations
@@ -21,6 +22,7 @@ class AuthController extends BaseController {
     private tokenBuilder: TokenBuilder;
     private refreshTokenService: RefreshTokenService;
     private notificationService: NotificationService;
+    private pinService: PinService;
 
     /**
      * Creates an instance of AuthController
@@ -30,6 +32,7 @@ class AuthController extends BaseController {
         this.tokenBuilder = new TokenBuilder();
         this.refreshTokenService = new RefreshTokenService;
         this.notificationService = new NotificationService();
+        this.pinService = new PinService();
         this.setupRoutes();
     }
 
@@ -55,6 +58,9 @@ class AuthController extends BaseController {
 
         // Reset password route
         this.router.post("/reset-password", this.resetPassword.bind(this));
+
+        // Reset transaction PIN via emailed token
+        this.router.post("/reset-pin", validateResetTransactionPin, this.resetPin.bind(this));
 
         // Refresh token route
         this.router.post("/refresh-token", this.refreshToken.bind(this));
@@ -513,6 +519,22 @@ class AuthController extends BaseController {
             this.sendSuccess(res, {
                 message: "Password reset successful"
             });
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    /**
+     * Resets the user's 4-digit transaction PIN using a token from the
+     * forgot-PIN email link. The PinService validates the token type and
+     * expiry; on success the user can immediately authorize transactions
+     * with the new PIN.
+     */
+    private async resetPin (req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const { token, newPin } = req.body;
+            await this.pinService.resetWithToken(token, newPin);
+            this.sendSuccess(res, { message: "Transaction PIN reset successful" });
         } catch (error) {
             return next(error);
         }

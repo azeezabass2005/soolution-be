@@ -48,6 +48,13 @@ export interface IUser extends Document {
     isKYCDone?: boolean;
     isKYCRejected?: boolean;
     kycRejectionReason?: string;
+
+    // Transaction PIN security (single PIN per user, used by all send paths)
+    transactionPinHash?: string;
+    isTransactionPinSet?: boolean;
+    transactionPinAttempts?: number;
+    transactionPinLockedUntil?: Date;
+    isTransactionPinLocked?: boolean; // virtual
 }
 
 export interface IRefreshToken extends Document {
@@ -167,6 +174,13 @@ export interface ITransaction extends Document {
 
     // New Fields
     fromCurrency: string;
+
+    // FX snapshot — captured at transaction creation so reports can replay
+    // the exact rate used, independent of live exchange-rate changes.
+    lockedRate?: number;
+    lockedRateFromCurrency?: string;
+    lockedRateToCurrency?: string;
+    lockedRateAt?: Date;
 }
 
 export interface ITransactionDetail extends Document {

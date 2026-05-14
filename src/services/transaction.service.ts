@@ -19,9 +19,21 @@ import IdempotencyService from "./idempotency.service";
 import AuditLogService from "./audit-log.service";
 import { validateTransactionAmount, getTransactionLimits } from "../config/transaction-limits.config";
 import yellowCardService from "./yellowcard.service";
-import { YELLOWCARD_STATUS, WALLET_STATUS, WALLET_TRANSACTION_TYPE, WALLET_TRANSACTION_STATUS } from "../common/constant";
+import {
+    YELLOWCARD_STATUS,
+    WALLET_STATUS,
+    WALLET_TRANSACTION_TYPE,
+    WALLET_TRANSACTION_STATUS,
+    JOURNAL_DIRECTION,
+    JOURNAL_SOURCE,
+    SYSTEM_ACCOUNT_CODES,
+    WEBHOOK_PROVIDER,
+    userWalletAccountCode,
+} from "../common/constant";
 import WalletService from "./wallet.service";
 import WalletTransactionService from "./wallet-transaction.service";
+import PinService from "./pin.service";
+import ledgerService from "./ledger.service";
 
 class TransactionService extends DBService<ITransaction> {
 
@@ -33,6 +45,7 @@ class TransactionService extends DBService<ITransaction> {
     auditLogService: AuditLogService;
     walletService: WalletService;
     walletTransactionService: WalletTransactionService;
+    pinService: PinService;
 
 
     /**
@@ -52,6 +65,7 @@ class TransactionService extends DBService<ITransaction> {
         this.auditLogService = new AuditLogService();
         this.walletService = new WalletService();
         this.walletTransactionService = new WalletTransactionService();
+        this.pinService = new PinService();
     }
 
     private receiptUploadService = FileUploadFactory.getGeneralUploadService();
@@ -68,13 +82,13 @@ class TransactionService extends DBService<ITransaction> {
     };
 
     public createBankTransferTransaction = async (
-        transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string; idempotencyKey?: string }>,
+        transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string; idempotencyKey?: string; transactionType?: 'send' | 'receive'; pin?: string }>,
         user: string,
         ipAddress?: string,
         userAgent?: string
     ) => {
-        const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName, idempotencyKey, fromAmount } = transactionData;
-        
+        const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName, idempotencyKey, fromAmount, transactionType, pin } = transactionData;
+
         if (!toCurrency) {
             throw errorResponseMessage.payloadIncorrect("Target currency (toCurrency) is required");
         }
@@ -85,6 +99,15 @@ class TransactionService extends DBService<ITransaction> {
 
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
+        }
+
+        // PIN authorization is required for SEND transactions only.
+        // Receive transactions don't debit the wallet so the PIN gate doesn't apply.
+        if (transactionType === 'send') {
+            if (!pin) {
+                throw errorResponseMessage.payloadIncorrect("Transaction PIN is required");
+            }
+            await this.pinService.verifyPin(user, pin);
         }
 
         // Validate exchange rate exists and is active before creating transaction
@@ -210,9 +233,9 @@ class TransactionService extends DBService<ITransaction> {
         return { ...transaction.toObject(), details: { ...transactionDetails.toObject() } } 
     }
 
-    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string }>, alipayQrCode: Express.Multer.File, user: string, ipAddress?: string, userAgent?: string) =>  {
-        const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod, idempotencyKey } = transactionData;
-        
+    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string; pin?: string }>, alipayQrCode: Express.Multer.File, user: string, ipAddress?: string, userAgent?: string) =>  {
+        const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod, idempotencyKey, pin } = transactionData;
+
         if (!fromCurrency) {
             throw errorResponseMessage.payloadIncorrect("Source currency (fromCurrency) is required");
         }
@@ -220,6 +243,12 @@ class TransactionService extends DBService<ITransaction> {
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
         }
+
+        // Alipay is always a send (debit) flow — PIN is required.
+        if (!pin) {
+            throw errorResponseMessage.payloadIncorrect("Transaction PIN is required");
+        }
+        await this.pinService.verifyPin(user, pin);
 
         // Validate exchange rate exists and is active before creating transaction
         const rateUtils = new RateUtils(fromCurrency, "RMB");
@@ -723,16 +752,23 @@ class TransactionService extends DBService<ITransaction> {
                 country: string;
             };
             idempotencyKey?: string;
+            pin?: string;
         },
         userId: string,
         ipAddress?: string,
         userAgent?: string
     ) => {
-        const { amount, fromAmount, fromCurrency, toCurrency, sender, destination, idempotencyKey } = params;
+        const { amount, fromAmount, fromCurrency, toCurrency, sender, destination, idempotencyKey, pin } = params;
 
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
         }
+
+        // YellowCard send is always an outbound debit — PIN is required.
+        if (!pin) {
+            throw errorResponseMessage.payloadIncorrect("Transaction PIN is required");
+        }
+        await this.pinService.verifyPin(userId, pin);
 
         // ========== WALLET DEDUCTION ==========
         // The NGN amount to deduct from the wallet
@@ -836,6 +872,24 @@ class TransactionService extends DBService<ITransaction> {
             // Atomic balance debit with balance guard
             await this.walletService.debitBalance(wallet._id as string, ngnAmount, walletSession);
 
+            // Post journal: user's NGN wallet liability decreases (debit), the
+            // NGN value is now held at YellowCard awaiting payout (credit).
+            // We track YC float in NGN-equivalent for this slice. The destination
+            // currency amount is preserved on the transaction record below.
+            const userAccountCode = userWalletAccountCode(userId, wallet.currency);
+            await ledgerService.post({
+                legs: [
+                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount: ngnAmount },
+                    { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
+                ],
+                source: JOURNAL_SOURCE.YC_SEND,
+                reference: sequenceId,
+                description: `YellowCard send — ${amount} ${toCurrency} to ${destination.accountName}`,
+                externalRef: { provider: WEBHOOK_PROVIDER.YELLOWCARD, id: sequenceId },
+                metadata: { destinationAmount: amount, destinationCurrency: toCurrency, destCountry },
+                session: walletSession,
+            });
+
             // Create wallet transaction record
             walletTransaction = await this.walletTransactionService.create({
                 wallet: wallet._id,
@@ -860,6 +914,11 @@ class TransactionService extends DBService<ITransaction> {
             walletSession.endSession();
         }
 
+        // Capture the locked FX rate so reports can replay the exact rate used.
+        // The amount-to-NGN conversion already happened above (caller passes
+        // both fromAmount and amount). lockedRate = ngnAmount per 1 unit of toCurrency.
+        const lockedRate = amount > 0 ? ngnAmount / amount : undefined;
+
         // Create our internal transaction record
         let transaction: any;
         let transactionDetails: any;
@@ -873,6 +932,10 @@ class TransactionService extends DBService<ITransaction> {
                 detailType: DETAIL_TYPE.YELLOWCARD,
                 status: TRANSACTION_STATUS.PENDING,
                 initiatedAt: Date.now(),
+                lockedRate,
+                lockedRateFromCurrency: 'NGN',
+                lockedRateToCurrency: toCurrency,
+                lockedRateAt: new Date(),
             });
         } catch (dbError: any) {
             logger.error("Failed to create YellowCard transaction record, refunding wallet", {
@@ -1039,8 +1102,9 @@ class TransactionService extends DBService<ITransaction> {
     };
 
     /**
-     * Refund wallet balance when a YellowCard transaction fails.
-     * Credits back the debited amount and creates a reversal record.
+     * Refund wallet balance when a YellowCard transaction fails. Credits back
+     * the debited amount, posts a balanced reversal journal entry, and creates
+     * a reversal wallet-transaction record.
      */
     private refundWallet = async (
         walletId: any,
@@ -1050,9 +1114,28 @@ class TransactionService extends DBService<ITransaction> {
         originalRef: string,
         reason: string
     ) => {
+        const session = await mongoose.startSession();
+        session.startTransaction();
         try {
-            // Credit back the balance
-            const wallet = await this.walletService.creditBalance(walletId as string, amount);
+            // Credit back the balance (in the same session as the journal post).
+            const updated = await this.walletService.creditBalance(walletId as string, amount, session) as any;
+            const balanceAfter = updated?.balance || 0;
+
+            // Reverse the original YC_SEND posting: pull funds back from
+            // YC_FLOAT_NGN into the user's wallet liability.
+            const userAccountCode = userWalletAccountCode(userId, 'NGN');
+            await ledgerService.post({
+                legs: [
+                    { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount },
+                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount },
+                ],
+                source: JOURNAL_SOURCE.REVERSAL,
+                reference: originalRef,
+                description: `Reversal — YC send refund (${reason})`,
+                externalRef: { provider: WEBHOOK_PROVIDER.YELLOWCARD, id: originalRef },
+                metadata: { reverses: originalRef, reason },
+                session,
+            });
 
             // Mark original wallet transaction as failed
             await this.walletTransactionService.updateById(walletTransactionId as string, {
@@ -1069,20 +1152,24 @@ class TransactionService extends DBService<ITransaction> {
                 status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
                 amount,
                 reference: reversalRef,
-                balanceBefore: (wallet?.balance || 0) - amount,
-                balanceAfter: wallet?.balance || 0,
+                balanceBefore: balanceAfter - amount,
+                balanceAfter,
                 description: `Reversal: ${reason} (${originalRef})`,
-            });
+            }, session);
 
+            await session.commitTransaction();
             logger.info("Wallet refunded for failed YellowCard transaction", {
                 walletId, amount, reason, originalRef,
             });
         } catch (refundError: any) {
+            if (session.inTransaction()) await session.abortTransaction();
             // Critical: refund failed — log for manual intervention
             logger.error("CRITICAL: Wallet refund failed", {
                 walletId, userId, amount, originalRef,
                 error: refundError?.message,
             });
+        } finally {
+            session.endSession();
         }
     };
 
@@ -1614,26 +1701,56 @@ class TransactionService extends DBService<ITransaction> {
                 return;
             }
 
-            // Credit wallet
-            await this.walletService.creditBalance(wallet._id as string, ngnAmount);
+            // Make sure the user's ledger account exists.
+            await this.walletService.getOrCreateWallet(userId);
 
-            // Create wallet funding transaction
-            const ref = this.walletTransactionService.generateReference('COL');
-            await this.walletTransactionService.create({
-                wallet: wallet._id,
-                user: userId,
-                type: WALLET_TRANSACTION_TYPE.FUNDING,
-                status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
-                amount: ngnAmount,
-                reference: ref,
-                balanceBefore: wallet.balance,
-                balanceAfter: wallet.balance + ngnAmount,
-                description: `Received ${transaction.amount} ${transaction.fromCurrency} → ₦${ngnAmount.toLocaleString()}`,
-                paystackReference: transaction.reference, // Link to YC transaction
-            });
+            const session = await mongoose.startSession();
+            session.startTransaction();
+            try {
+                // Credit wallet in the same session as the journal posting.
+                await this.walletService.creditBalance(wallet._id as string, ngnAmount, session);
 
-            // Update ledger balance
-            await this.walletService.adjustLedgerBalance(wallet._id as string, ngnAmount);
+                // Post journal: YellowCard float decreases as the inbound
+                // collection settles, the user's wallet liability grows.
+                const userAccountCode = userWalletAccountCode(userId, wallet.currency);
+                await ledgerService.post({
+                    legs: [
+                        { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: ngnAmount },
+                        { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
+                    ],
+                    source: JOURNAL_SOURCE.YC_COLLECT,
+                    reference: transaction.reference,
+                    description: `Collection settled — ${transaction.amount} ${transaction.fromCurrency} → ₦${ngnAmount.toFixed(2)}`,
+                    externalRef: { provider: WEBHOOK_PROVIDER.YELLOWCARD, id: transaction.reference },
+                    metadata: { fromAmount: transaction.amount, fromCurrency: transaction.fromCurrency },
+                    session,
+                });
+
+                // Create wallet funding transaction
+                const ref = this.walletTransactionService.generateReference('COL');
+                await this.walletTransactionService.create({
+                    wallet: wallet._id,
+                    user: userId,
+                    type: WALLET_TRANSACTION_TYPE.FUNDING,
+                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                    amount: ngnAmount,
+                    reference: ref,
+                    balanceBefore: wallet.balance,
+                    balanceAfter: wallet.balance + ngnAmount,
+                    description: `Received ${transaction.amount} ${transaction.fromCurrency} → ₦${ngnAmount.toLocaleString()}`,
+                    paystackReference: transaction.reference, // Link to YC transaction
+                }, session);
+
+                // Update ledger balance projection
+                await this.walletService.adjustLedgerBalance(wallet._id as string, ngnAmount, session);
+
+                await session.commitTransaction();
+            } catch (sessionError) {
+                if (session.inTransaction()) await session.abortTransaction();
+                throw sessionError;
+            } finally {
+                session.endSession();
+            }
 
             logger.info("Wallet credited from collection", {
                 userId,
