@@ -6,6 +6,10 @@ import {
     ycCashAccountCode,
     ycPaymentInflightCode,
     ycCollectionInflightCode,
+    OG_CURRENCIES,
+    ogCashAccountCode,
+    ogPaymentInflightCode,
+    ogCollectionInflightCode,
 } from '../common/constant';
 import logger from '../utils/logger.utils';
 
@@ -97,6 +101,31 @@ function buildSystemAccountList(): SystemAccountSpec[] {
             currency,
             name: `YellowCard collections in flight (${currency})`,
             description: `Inbound ${currency} collections awaiting deposit settlement.`,
+        });
+    }
+
+    // OGateway accounts (Ghana only, for now): cash + payment-in-flight + collection-in-flight.
+    for (const currency of OG_CURRENCIES) {
+        accounts.push({
+            code: ogCashAccountCode(currency),
+            type: ACCOUNT_TYPE.ASSET,
+            currency,
+            name: `Cash at OGateway (${currency})`,
+            description: `${currency} balance held at OGateway for the corresponding rail.`,
+        });
+        accounts.push({
+            code: ogPaymentInflightCode(currency),
+            type: ACCOUNT_TYPE.ASSET,
+            currency,
+            name: `OGateway payments in flight (${currency})`,
+            description: `Outbound ${currency} payments awaiting OGateway webhook confirmation.`,
+        });
+        accounts.push({
+            code: ogCollectionInflightCode(currency),
+            type: ACCOUNT_TYPE.ASSET,
+            currency,
+            name: `OGateway collections in flight (${currency})`,
+            description: `Inbound ${currency} collections awaiting OGateway settlement.`,
         });
     }
 

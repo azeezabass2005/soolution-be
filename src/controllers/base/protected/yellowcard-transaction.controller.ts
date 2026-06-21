@@ -1,6 +1,7 @@
 import BaseController from "../base-controller";
 import TransactionService from "../../../services/transaction.service";
 import yellowCardService from "../../../services/yellowcard.service";
+import platformSettingsService from "../../../services/platform-settings.service";
 import { Request, Response, NextFunction } from "express";
 import { validateCreateYellowCardTransaction } from "../../../validators/z-yellowcard-transaction";
 import TransactionRateLimitMiddleware from "../../../middlewares/transaction-rate-limit.middleware";
@@ -32,6 +33,10 @@ class YellowCardTransactionController extends BaseController {
 
         // Get YellowCard exchange rates
         this.router.get("/rates", this.getRates.bind(this));
+
+        // Markup-adjusted quote for a specific pair (UI uses this to render
+        // the same rate/fee breakdown the backend will book against).
+        this.router.get("/quote", this.getQuote.bind(this));
 
         // Resolve a bank account before sending payment
         this.router.post("/resolve-bank", this.resolveBankAccount.bind(this));
@@ -102,6 +107,64 @@ class YellowCardTransactionController extends BaseController {
         try {
             const rates = await yellowCardService.getRates();
             return this.sendSuccess(res, rates);
+        } catch (error: any) {
+            return next(error);
+        }
+    }
+
+    /**
+     * Markup-adjusted single-pair quote with the fee preview.
+     *
+     * Query params:
+     *   - from: source currency code (required)
+     *   - to:   destination currency code (required)
+     *   - direction: 'send' | 'receive' (required; matches the flow the user
+     *     is in so the markup is applied with the right sign)
+     *   - amount?: optional, defaults to 1 — used to compute convertedAmount
+     *     and feeAmount for the breakdown
+     */
+    private async getQuote(req: Request, res: Response, next: NextFunction) {
+        try {
+            const from = String(req.query.from || "").toUpperCase();
+            const to = String(req.query.to || "").toUpperCase();
+            const directionRaw = String(req.query.direction || "send").toLowerCase();
+            const direction = (directionRaw === 'receive' ? 'receive' : 'send') as 'send' | 'receive';
+            const amount = req.query.amount !== undefined ? parseFloat(String(req.query.amount)) : 1;
+
+            if (!from || !to || from === to) {
+                return next({ response_code: 400, message: "from and to are required and must differ" });
+            }
+            if (!isFinite(amount) || amount <= 0) {
+                return next({ response_code: 400, message: "amount must be a positive number" });
+            }
+
+            const providerRate = await yellowCardService.getImpliedRate(from, to, direction);
+            const userRate = await platformSettingsService.applyRateMarkup(providerRate, direction);
+            const convertedAmount = Math.round(amount * userRate * 100) / 100;
+
+            // For YC the NGN-denominated side is always the platform side. Fee
+            // base = whichever leg is in NGN (or convertedAmount if neither is).
+            const feeBase = from === 'NGN' ? amount : (to === 'NGN' ? convertedAmount : convertedAmount);
+            const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('yellowcard', feeBase);
+
+            const totalAmount = direction === 'send'
+                ? Math.round((convertedAmount + feeAmount) * 100) / 100
+                : Math.round((convertedAmount - feeAmount) * 100) / 100;
+
+            return this.sendSuccess(res, {
+                from,
+                to,
+                direction,
+                amount,
+                providerRate,
+                userRate,
+                rate: userRate,
+                convertedAmount,
+                feeAmount,
+                feePercent,
+                providerFeePercent,
+                totalAmount,
+            });
         } catch (error: any) {
             return next(error);
         }

@@ -306,7 +306,66 @@ export const TransactionDetailSchema = new Schema<ITransactionDetail>(
         ycRawPayload: {
             type: Schema.Types.Mixed,
             required: false
-        }
+        },
+
+        // ============= OGATEWAY SPECIFIC FIELDS (Ghana send + receive) =============
+
+        /** OGateway transaction id returned by their API. */
+        ogId: {
+            type: String,
+            trim: true,
+            required: false,
+        },
+
+        /**
+         * Our unique reference for this OGateway transaction (sent as `reference`
+         * in the API call and echoed back as `reference_business` in webhooks).
+         */
+        ogReference: {
+            type: String,
+            trim: true,
+            required: false,
+        },
+
+        /** "MOMO" or "BANK" — which OGateway channel was used. */
+        ogChannel: {
+            type: String,
+            trim: true,
+            required: false,
+        },
+
+        /** Mobile money network code (MTN / VOD / ATM / ORANGE). */
+        ogNetwork: {
+            type: String,
+            trim: true,
+            required: false,
+        },
+
+        /** Ghana bank code (e.g. ZEN, GTB) for BANK payouts. */
+        ogBank: {
+            type: String,
+            trim: true,
+            required: false,
+        },
+
+        /** Last-known OGateway status. */
+        ogStatus: {
+            type: String,
+            trim: true,
+            required: false,
+        },
+
+        /** Raw OGateway webhook/API payload for debugging + admin replay. */
+        ogRawPayload: {
+            type: Schema.Types.Mixed,
+            required: false,
+        },
+
+        /** Universal fee/markup snapshot — see ITransactionDetail. */
+        feeAmount: { type: Number, required: false, default: 0 },
+        feePercent: { type: Number, required: false, default: 0 },
+        providerFeePercent: { type: Number, required: false, default: 0 },
+        markupPercent: { type: Number, required: false, default: 0 },
     },
     {
         /** Enable virtual properties when converting to plain object */
@@ -344,6 +403,10 @@ TransactionDetailSchema.index({ type: 1, platform: 1 }, { sparse: true });
 TransactionDetailSchema.index({ ycSequenceId: 1 }, { sparse: true });
 TransactionDetailSchema.index({ ycCollectionId: 1 }, { sparse: true });
 TransactionDetailSchema.index({ ycPaymentId: 1 }, { sparse: true });
+
+// OGateway-specific indexes
+TransactionDetailSchema.index({ ogReference: 1 }, { sparse: true });
+TransactionDetailSchema.index({ ogId: 1 }, { sparse: true });
 
 // ============= METHODS =============
 

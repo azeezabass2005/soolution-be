@@ -259,6 +259,41 @@ class YellowCardService {
     }
 
     /**
+     * Implied rate between an arbitrary pair, bridged via USD as YellowCard
+     * quotes each currency per-USD. Returns the *provider* (raw) rate; apply
+     * the platform markup separately through PlatformSettingsService.
+     *
+     *   - direction='send'    (user pays `from`, recipient gets `to`): rate = from-units-per-`to` unit
+     *   - direction='receive' (user receives `to`, sender pays `from`): rate = to-units-per-`from` unit
+     *
+     * In both cases the *first* currency in the name is what's multiplied:
+     *   send:   fromAmount   = toAmount   × rate
+     *   receive: toAmount    = fromAmount × rate
+     */
+    public async getImpliedRate(from: string, to: string, direction: 'send' | 'receive'): Promise<number> {
+        const data = await this.getRates();
+        const ratesArr = data?.rates || (Array.isArray(data) ? data : []);
+        const find = (cur: string) => ratesArr.find((r: any) =>
+            r.code === cur || r.currency === cur || r.currencyCode === cur,
+        );
+        const fromRate = find(from);
+        const toRate = find(to);
+        if (!fromRate || !toRate) {
+            throw new Error(`YellowCard: no rate found for ${from}→${to}`);
+        }
+        const buyFrom = Number(fromRate.buy);
+        const sellFrom = Number(fromRate.sell);
+        const buyTo = Number(toRate.buy);
+        const sellTo = Number(toRate.sell);
+        if (!isFinite(buyFrom) || !isFinite(sellTo) || buyFrom <= 0 || sellTo <= 0) {
+            throw new Error(`YellowCard: invalid rate values for ${from}→${to}`);
+        }
+        return direction === 'send'
+            ? buyFrom / sellTo       // from-units per to-unit
+            : sellTo / buyFrom;      // to-units per from-unit  (legacy: uses sellTo/buyFrom; symmetry with display memo)
+    }
+
+    /**
      * Get account info including available balance.
      */
     public async getAccount() {

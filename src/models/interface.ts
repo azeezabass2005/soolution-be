@@ -75,6 +75,24 @@ export interface IExchangeRate extends Document {
     isActive?: boolean;
 }
 
+/**
+ * Universal platform fee/markup settings. Single document (kind === 'singleton').
+ *   - rateMarkupPercent: % platform adds on top of the provider's FX rate (admin profit)
+ *   - additionalFeePercent: % platform charges on top of providerBaseFeePercent
+ *   - providerBaseFeePercent: the rail's own fee (e.g. OGateway 1.5%); editable
+ *     so we can track provider changes without code deploys
+ */
+export interface IPlatformSettings extends Document {
+    kind: 'singleton';
+    rateMarkupPercent: number;
+    additionalFeePercent: number;
+    providerBaseFeePercent: {
+        ogateway: number;
+        yellowcard: number;
+    };
+    updatedBy?: Schema.Types.ObjectId | string;
+}
+
 export type PartnerRole =
     | "LOGISTICS"
     | "SUPPLIER"
@@ -222,6 +240,22 @@ export interface ITransactionDetail extends Document {
     ycNetworkId?: string;
     ycStatus?: string;
     ycRawPayload?: any;
+
+    // OGateway specific fields (Ghana send + receive)
+    ogId?: string;                // OGateway transaction id (from response)
+    ogReference?: string;         // our sequenceId / reference_business
+    ogChannel?: string;           // MOMO or BANK
+    ogNetwork?: string;           // MTN / VOD / ATM / ORANGE for MoMo
+    ogBank?: string;              // bank code for BANK
+    ogStatus?: string;            // initiated / pending / completed / failed
+    ogRawPayload?: any;
+
+    // Universal fee/markup snapshot — captured at creation so reports can
+    // explain exactly what was charged even if the admin changes settings later.
+    feeAmount?: number;            // total fee in NGN
+    feePercent?: number;           // total % the user paid (providerBase + additional)
+    providerFeePercent?: number;   // what the rail itself charged
+    markupPercent?: number;        // % spread applied to the FX rate at the time
 }
 
 export interface IYellowCardChannel {

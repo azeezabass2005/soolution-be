@@ -19,8 +19,12 @@ import IdempotencyService from "./idempotency.service";
 import AuditLogService from "./audit-log.service";
 import { validateTransactionAmount, getTransactionLimits } from "../config/transaction-limits.config";
 import yellowCardService from "./yellowcard.service";
+import ogatewayService from "./ogateway.service";
+import platformSettingsService from "./platform-settings.service";
 import {
     YELLOWCARD_STATUS,
+    OGATEWAY_STATUS,
+    OGATEWAY_CHANNELS,
     WALLET_STATUS,
     WALLET_TRANSACTION_TYPE,
     WALLET_TRANSACTION_STATUS,
@@ -29,6 +33,9 @@ import {
     SYSTEM_ACCOUNT_CODES,
     WEBHOOK_PROVIDER,
     userWalletAccountCode,
+    ogCashAccountCode,
+    ogPaymentInflightCode,
+    ogCollectionInflightCode,
 } from "../common/constant";
 import WalletService from "./wallet.service";
 import WalletTransactionService from "./wallet-transaction.service";
@@ -758,7 +765,7 @@ class TransactionService extends DBService<ITransaction> {
         ipAddress?: string,
         userAgent?: string
     ) => {
-        const { amount, fromAmount, fromCurrency, toCurrency, sender, destination, idempotencyKey, pin } = params;
+        const { amount, fromCurrency, toCurrency, sender, destination, idempotencyKey, pin } = params;
 
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
@@ -770,12 +777,27 @@ class TransactionService extends DBService<ITransaction> {
         }
         await this.pinService.verifyPin(userId, pin);
 
-        // ========== WALLET DEDUCTION ==========
-        // The NGN amount to deduct from the wallet
-        const ngnAmount = fromAmount || amount;
+        // ========== SERVER-SIDE RATE + FEE ==========
+        // Compute the NGN debit from YellowCard's live rates and apply the
+        // platform's universal markup so display and journal agree. Client-
+        // supplied fromAmount is ignored.
+        let providerRate: number;
+        let userRate: number;
+        try {
+            providerRate = await yellowCardService.getImpliedRate(fromCurrency, toCurrency, 'send');
+            userRate = await platformSettingsService.applyRateMarkup(providerRate, 'send');
+        } catch (err: any) {
+            logger.error("YellowCard rate lookup failed during send", { fromCurrency, toCurrency, error: err?.message });
+            throw errorResponseMessage.createError(400, `Could not retrieve the ${fromCurrency}→${toCurrency} rate from YellowCard. Please try again.`, ErrorSeverity.HIGH);
+        }
+        const ngnAmount = Math.round(amount * userRate * 100) / 100;
         if (!ngnAmount || ngnAmount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Source amount (fromAmount) must be a positive number");
         }
+
+        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('yellowcard', ngnAmount);
+        const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
+        const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
 
         // Check wallet exists and has sufficient balance
         const wallet = await this.walletService.findOne({ user: userId });
@@ -785,10 +807,10 @@ class TransactionService extends DBService<ITransaction> {
         if (wallet.status !== WALLET_STATUS.ACTIVE) {
             throw errorResponseMessage.createError(400, "Your wallet is not active. Please contact support.", ErrorSeverity.HIGH);
         }
-        if (wallet.balance < ngnAmount) {
+        if (wallet.balance < totalDebit) {
             throw errorResponseMessage.createError(
                 400,
-                `Insufficient wallet balance. You need ₦${ngnAmount.toLocaleString()} but your balance is ₦${wallet.balance.toLocaleString()}. Please fund your wallet first.`,
+                `Insufficient wallet balance. You need ₦${totalDebit.toLocaleString()} but your balance is ₦${wallet.balance.toLocaleString()}. Please fund your wallet first.`,
                 ErrorSeverity.MEDIUM
             );
         }
@@ -866,27 +888,33 @@ class TransactionService extends DBService<ITransaction> {
         let walletTransaction: any;
         const walletTxRef = this.walletTransactionService.generateReference('TRF');
         const balanceBefore = wallet.balance;
-        const balanceAfter = balanceBefore - ngnAmount;
+        const balanceAfter = balanceBefore - totalDebit;
 
         try {
             // Atomic balance debit with balance guard
-            await this.walletService.debitBalance(wallet._id as string, ngnAmount, walletSession);
+            await this.walletService.debitBalance(wallet._id as string, totalDebit, walletSession);
 
-            // Post journal: user's NGN wallet liability decreases (debit), the
-            // NGN value is now held at YellowCard awaiting payout (credit).
-            // We track YC float in NGN-equivalent for this slice. The destination
-            // currency amount is preserved on the transaction record below.
+            // Post journal: user's NGN wallet drops by totalDebit (converted +
+            // fee). The converted portion sits at YC awaiting payout; the fee
+            // lands in FEES_NGN as platform revenue, recognised on initiation.
             const userAccountCode = userWalletAccountCode(userId, wallet.currency);
+            const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
+                { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount: totalDebit },
+                { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
+            ];
+            if (feeAmount > 0) {
+                legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
+            }
             await ledgerService.post({
-                legs: [
-                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount: ngnAmount },
-                    { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
-                ],
+                legs,
                 source: JOURNAL_SOURCE.YC_SEND,
                 reference: sequenceId,
                 description: `YellowCard send — ${amount} ${toCurrency} to ${destination.accountName}`,
                 externalRef: { provider: WEBHOOK_PROVIDER.YELLOWCARD, id: sequenceId },
-                metadata: { destinationAmount: amount, destinationCurrency: toCurrency, destCountry },
+                metadata: {
+                    destinationAmount: amount, destinationCurrency: toCurrency, destCountry,
+                    feeAmount, feePercent, providerFeePercent, markupPercent, providerRate, userRate,
+                },
                 session: walletSession,
             });
 
@@ -896,7 +924,7 @@ class TransactionService extends DBService<ITransaction> {
                 user: userId,
                 type: WALLET_TRANSACTION_TYPE.TRANSFER,
                 status: WALLET_TRANSACTION_STATUS.PENDING,
-                amount: ngnAmount,
+                amount: totalDebit,
                 reference: walletTxRef,
                 balanceBefore,
                 balanceAfter,
@@ -915,9 +943,8 @@ class TransactionService extends DBService<ITransaction> {
         }
 
         // Capture the locked FX rate so reports can replay the exact rate used.
-        // The amount-to-NGN conversion already happened above (caller passes
-        // both fromAmount and amount). lockedRate = ngnAmount per 1 unit of toCurrency.
-        const lockedRate = amount > 0 ? ngnAmount / amount : undefined;
+        // lockedRate = userRate (markup already applied above).
+        const lockedRate = userRate;
 
         // Create our internal transaction record
         let transaction: any;
@@ -943,7 +970,7 @@ class TransactionService extends DBService<ITransaction> {
                 sequenceId,
             });
             // Refund wallet since we couldn't create the transaction
-            await this.refundWallet(wallet._id, userId, ngnAmount, walletTransaction._id, walletTxRef, "Transaction record creation failed");
+            await this.refundWallet(wallet._id, userId, totalDebit, walletTransaction._id, walletTxRef, "Transaction record creation failed", feeAmount);
             throw errorResponseMessage.createError(
                 500,
                 `Failed to create transaction: ${dbError?.message || 'Unknown error'}`,
@@ -969,7 +996,11 @@ class TransactionService extends DBService<ITransaction> {
                 ycChannelId: sortedChannels[0].id,
                 ycNetworkId: network.id,
                 ycStatus: YELLOWCARD_STATUS.PENDING,
-                fromAmount: fromAmount || amount,
+                fromAmount: totalDebit,
+                feeAmount,
+                feePercent,
+                providerFeePercent,
+                markupPercent,
                 accountName: destination.accountName,
                 accountNumber: destination.accountNumber,
                 institutionType: destination.accountType,
@@ -1082,7 +1113,7 @@ class TransactionService extends DBService<ITransaction> {
         );
 
         // Refund wallet balance
-        await this.refundWallet(wallet._id, userId, ngnAmount, walletTransaction._id, walletTxRef, "YellowCard payment failed on all channels");
+        await this.refundWallet(wallet._id, userId, totalDebit, walletTransaction._id, walletTxRef, "YellowCard payment failed on all channels", feeAmount);
 
         const ycError = lastError?.ycError || lastError?.response?.data || lastError?.data;
         logger.error("YellowCard payment submission failed on all channels — wallet refunded", {
@@ -1090,7 +1121,7 @@ class TransactionService extends DBService<ITransaction> {
             sequenceId,
             ycError,
             errorMessage: lastError?.message,
-            refundedAmount: ngnAmount,
+            refundedAmount: totalDebit,
         });
 
         const ycMessage = ycError?.message || ycError?.code || lastError?.message || "YellowCard payment failed";
@@ -1112,7 +1143,8 @@ class TransactionService extends DBService<ITransaction> {
         amount: number,
         walletTransactionId: any,
         originalRef: string,
-        reason: string
+        reason: string,
+        feeAmount: number = 0,
     ) => {
         const session = await mongoose.startSession();
         session.startTransaction();
@@ -1122,18 +1154,24 @@ class TransactionService extends DBService<ITransaction> {
             const balanceAfter = updated?.balance || 0;
 
             // Reverse the original YC_SEND posting: pull funds back from
-            // YC_FLOAT_NGN into the user's wallet liability.
+            // YC_FLOAT_NGN (converted portion) and FEES_NGN (fee portion)
+            // into the user's wallet liability.
+            const convertedPortion = amount - feeAmount;
             const userAccountCode = userWalletAccountCode(userId, 'NGN');
+            const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
+                { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: convertedPortion },
+                { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount },
+            ];
+            if (feeAmount > 0) {
+                legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: feeAmount });
+            }
             await ledgerService.post({
-                legs: [
-                    { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount },
-                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount },
-                ],
+                legs,
                 source: JOURNAL_SOURCE.REVERSAL,
                 reference: originalRef,
                 description: `Reversal — YC send refund (${reason})`,
                 externalRef: { provider: WEBHOOK_PROVIDER.YELLOWCARD, id: originalRef },
-                metadata: { reverses: originalRef, reason },
+                metadata: { reverses: originalRef, reason, feeAmount },
                 session,
             });
 
@@ -1325,13 +1363,16 @@ class TransactionService extends DBService<ITransaction> {
                     type: WALLET_TRANSACTION_TYPE.TRANSFER,
                 });
                 if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.FAILED && walletTx.status !== WALLET_TRANSACTION_STATUS.REVERSED) {
+                    const ycDetail = await this.transactionDetailsService.findOne({ transactionId: transaction._id });
+                    const fee = (ycDetail as any)?.feeAmount || 0;
                     await this.refundWallet(
                         walletTx.wallet,
                         walletTx.user as string,
                         walletTx.amount,
                         walletTx._id,
                         walletTx.reference,
-                        `YellowCard payment ${ycStatus}`
+                        `YellowCard payment ${ycStatus}`,
+                        fee,
                     );
                     logger.info("Wallet refunded via poll", { walletTxId: walletTx._id, amount: walletTx.amount });
                 }
@@ -1390,11 +1431,30 @@ class TransactionService extends DBService<ITransaction> {
         },
         userId: string,
     ) => {
-        const { amount, fromAmount, fromCurrency, toCurrency, sender, destination, idempotencyKey } = params;
+        const { amount, fromCurrency, toCurrency, sender, destination, idempotencyKey } = params;
 
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
         }
+
+        // Server-side rate + fee for the collection. The user receives
+        // `gross − fee` NGN at the markup-adjusted (receive) rate.
+        let providerRate: number;
+        let userRate: number;
+        try {
+            providerRate = await yellowCardService.getImpliedRate(fromCurrency, toCurrency, 'receive');
+            userRate = await platformSettingsService.applyRateMarkup(providerRate, 'receive');
+        } catch (err: any) {
+            logger.error("YellowCard rate lookup failed during collection", { fromCurrency, toCurrency, error: err?.message });
+            throw errorResponseMessage.createError(400, `Could not retrieve the ${fromCurrency}→${toCurrency} rate from YellowCard. Please try again.`, ErrorSeverity.HIGH);
+        }
+        const grossNgn = Math.round(amount * userRate * 100) / 100;
+        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('yellowcard', grossNgn);
+        const ngnAmount = Math.round((grossNgn - feeAmount) * 100) / 100;
+        if (ngnAmount <= 0) {
+            throw errorResponseMessage.createError(400, "Fee exceeds the converted amount. Please increase the amount.", ErrorSeverity.MEDIUM);
+        }
+        const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
 
         // Handle idempotency
         if (idempotencyKey) {
@@ -1474,6 +1534,10 @@ class TransactionService extends DBService<ITransaction> {
                 detailType: DETAIL_TYPE.YELLOWCARD,
                 status: TRANSACTION_STATUS.PENDING,
                 initiatedAt: Date.now(),
+                lockedRate: userRate,
+                lockedRateFromCurrency: fromCurrency,
+                lockedRateToCurrency: toCurrency,
+                lockedRateAt: new Date(),
             });
         } catch (dbError: any) {
             logger.error("Failed to create collection transaction record", { error: dbError?.message, sequenceId });
@@ -1492,7 +1556,11 @@ class TransactionService extends DBService<ITransaction> {
                 ycChannelId: sortedChannels[0]?.id,
                 ycNetworkId: network?.id,
                 ycStatus: YELLOWCARD_STATUS.PENDING,
-                fromAmount: fromAmount || amount,
+                fromAmount: ngnAmount,
+                feeAmount,
+                feePercent,
+                providerFeePercent,
+                markupPercent,
                 accountName: destination?.accountName,
                 accountNumber: destination?.accountNumber,
                 institutionType: destination?.accountType,
@@ -1691,8 +1759,12 @@ class TransactionService extends DBService<ITransaction> {
      */
     private creditWalletFromCollection = async (transaction: any, detail: any) => {
         const userId = typeof transaction.user === 'object' ? transaction.user._id?.toString() : transaction.user?.toString();
-        // For receive: toCurrency is NGN, fromAmount is the NGN equivalent
+        // detail.fromAmount is the NET NGN amount credited to the user (fee
+        // already deducted). The platform receives the GROSS = net + fee from
+        // the rail and books the fee into FEES_NGN.
         const ngnAmount = detail.fromAmount || transaction.amount;
+        const feeAmount = detail.feeAmount || 0;
+        const grossNgn = Math.round((ngnAmount + feeAmount) * 100) / 100;
 
         try {
             const wallet = await this.walletService.findOne({ user: userId });
@@ -1710,19 +1782,23 @@ class TransactionService extends DBService<ITransaction> {
                 // Credit wallet in the same session as the journal posting.
                 await this.walletService.creditBalance(wallet._id as string, ngnAmount, session);
 
-                // Post journal: YellowCard float decreases as the inbound
-                // collection settles, the user's wallet liability grows.
+                // Post journal: YellowCard float decreases by the gross; the
+                // user's wallet receives the net; the fee lands in FEES_NGN.
                 const userAccountCode = userWalletAccountCode(userId, wallet.currency);
+                const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
+                    { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: grossNgn },
+                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
+                ];
+                if (feeAmount > 0) {
+                    legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
+                }
                 await ledgerService.post({
-                    legs: [
-                        { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: ngnAmount },
-                        { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
-                    ],
+                    legs,
                     source: JOURNAL_SOURCE.YC_COLLECT,
                     reference: transaction.reference,
-                    description: `Collection settled — ${transaction.amount} ${transaction.fromCurrency} → ₦${ngnAmount.toFixed(2)}`,
+                    description: `Collection settled — ${transaction.amount} ${transaction.fromCurrency} → ₦${ngnAmount.toFixed(2)} (fee ₦${feeAmount.toFixed(2)})`,
                     externalRef: { provider: WEBHOOK_PROVIDER.YELLOWCARD, id: transaction.reference },
-                    metadata: { fromAmount: transaction.amount, fromCurrency: transaction.fromCurrency },
+                    metadata: { fromAmount: transaction.amount, fromCurrency: transaction.fromCurrency, feeAmount, grossNgn },
                     session,
                 });
 
@@ -1873,13 +1949,15 @@ class TransactionService extends DBService<ITransaction> {
             // Refund wallet on YellowCard failure
             const walletTx = await findLinkedWalletTx();
             if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.FAILED && walletTx.status !== WALLET_TRANSACTION_STATUS.REVERSED) {
+                const fee = (detail as any)?.feeAmount || 0;
                 await this.refundWallet(
                     walletTx.wallet,
                     walletTx.user as string,
                     walletTx.amount,
                     walletTx._id,
                     walletTx.reference,
-                    `YellowCard payment ${status}`
+                    `YellowCard payment ${status}`,
+                    fee,
                 );
             }
 
@@ -1918,6 +1996,787 @@ class TransactionService extends DBService<ITransaction> {
             event,
             ycStatus: status,
         });
+    };
+
+    // ============================================================================
+    // OGateway — Ghana instant send + receive
+    // ============================================================================
+
+    private generateOGatewaySequenceId = () => {
+        const randomPart = crypto.randomUUID().replace(/-/g, "").slice(0, 22).toUpperCase();
+        return `OG_TX_${randomPart}`;
+    };
+
+    /**
+     * Refund the user's NGN wallet after a failed OGateway payout, reversing the
+     * original OG_SEND posting (debit OG_PAYMENT_INFLIGHT_GHS, credit user wallet).
+     */
+    private refundWalletFromOGateway = async (
+        walletId: any,
+        userId: string,
+        ngnAmount: number,
+        ghsAmount: number,
+        walletTransactionId: any,
+        originalRef: string,
+        reason: string,
+        feeAmount: number = 0,
+    ) => {
+        const session = await mongoose.startSession();
+        session.startTransaction();
+        try {
+            const updated = await this.walletService.creditBalance(walletId as string, ngnAmount, session) as any;
+            const balanceAfter = updated?.balance || 0;
+
+            // Mirror the original posting in reverse: refund covers both the
+            // converted-amount leg (OG_PAYMENT_INFLIGHT) and the fee leg
+            // (FEES_NGN). ngnAmount here is the total wallet debit, so the
+            // legs add up: ghsAmount + feeAmount = ngnAmount.
+            const convertedPortion = ngnAmount - feeAmount;
+            const userAccountCode = userWalletAccountCode(userId, 'NGN');
+            const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
+                { accountCode: ogPaymentInflightCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: convertedPortion },
+                { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
+            ];
+            if (feeAmount > 0) {
+                legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: feeAmount });
+            }
+            await ledgerService.post({
+                legs,
+                source: JOURNAL_SOURCE.REVERSAL,
+                reference: originalRef,
+                description: `Reversal — OGateway send refund (${reason})`,
+                externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: originalRef },
+                metadata: { reverses: originalRef, reason, ghsAmount, ngnAmount, feeAmount },
+                session,
+            });
+
+            await this.walletTransactionService.updateById(walletTransactionId as string, {
+                status: WALLET_TRANSACTION_STATUS.FAILED,
+                failureReason: reason,
+            });
+
+            const reversalRef = this.walletTransactionService.generateReference('REV');
+            await this.walletTransactionService.create({
+                wallet: walletId,
+                user: userId,
+                type: WALLET_TRANSACTION_TYPE.REVERSAL,
+                status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                amount: ngnAmount,
+                reference: reversalRef,
+                balanceBefore: balanceAfter - ngnAmount,
+                balanceAfter,
+                description: `Reversal: ${reason} (${originalRef})`,
+            }, session);
+
+            await session.commitTransaction();
+            logger.info("Wallet refunded for failed OGateway transaction", { walletId, ngnAmount, ghsAmount, reason, originalRef });
+        } catch (refundError: any) {
+            if (session.inTransaction()) await session.abortTransaction();
+            logger.error("CRITICAL: OGateway wallet refund failed", {
+                walletId, userId, ngnAmount, ghsAmount, originalRef, error: refundError?.message,
+            });
+        } finally {
+            session.endSession();
+        }
+    };
+
+    /**
+     * Send NGN → GHS via OGateway (instant payout to GHS MoMo or bank).
+     * Debits user's NGN wallet at the locked rate, posts journal entries,
+     * dispatches the payout to OGateway. Final state lands via the webhook.
+     */
+    public createOGatewayPayoutTransaction = async (
+        params: {
+            amount: number;          // GHS amount the recipient will receive
+            fromAmount?: number;     // NGN debit amount (computed from locked rate)
+            fromCurrency: 'NGN';
+            toCurrency: 'GHS';
+            destination: {
+                accountType: 'momo' | 'bank';
+                accountName: string;
+                accountNumber: string;
+                network?: string;    // MTN / VOD / ATM / ORANGE for MoMo
+                bank?: string;       // Ghana bank code for BANK
+            };
+            senderName?: string;     // appears on the recipient's account; defaults to platform name
+            idempotencyKey?: string;
+            pin: string;
+        },
+        userId: string,
+    ) => {
+        const { amount, destination, idempotencyKey, pin } = params;
+
+        if (!amount || amount <= 0) {
+            throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
+        }
+        if (!pin) {
+            throw errorResponseMessage.payloadIncorrect("Transaction PIN is required");
+        }
+        await this.pinService.verifyPin(userId, pin);
+
+        // Compute NGN debit server-side from the live OGateway rate. We're
+        // BUYING GHS for the recipient, so we pull the NGN→GHS quote — that's
+        // the side of OGateway's buy/sell spread we'll actually be charged at.
+        // getUserFacingRate applies the platform's markup so what we book
+        // matches what the user was quoted. Client-supplied fromAmount is ignored.
+        let providerRate: number;
+        let userRate: number;
+        try {
+            const quoted = await ogatewayService.getUserFacingRate('NGN', 'GHS', 'send');
+            providerRate = quoted.providerRate;
+            userRate = quoted.userRate;
+        } catch (err: any) {
+            logger.error("OGateway rate lookup failed during payout", { error: err?.message });
+            throw errorResponseMessage.createError(400, "Could not retrieve the NGN→GHS rate from OGateway. Please try again.", ErrorSeverity.HIGH);
+        }
+        const ngnAmount = Math.round(amount * userRate * 100) / 100;
+        if (!ngnAmount || ngnAmount <= 0) {
+            throw errorResponseMessage.createError(400, "Could not compute NGN amount from the live OGateway rate", ErrorSeverity.HIGH);
+        }
+
+        // Fee is charged on top of the converted NGN amount so the recipient
+        // still receives the full GHS amount they were promised.
+        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('ogateway', ngnAmount);
+        const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
+        const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
+
+        const wallet = await this.walletService.findOne({ user: userId });
+        if (!wallet) {
+            throw errorResponseMessage.createError(400, "You don't have a wallet yet. Please set up your wallet first.", ErrorSeverity.MEDIUM);
+        }
+        if (wallet.status !== WALLET_STATUS.ACTIVE) {
+            throw errorResponseMessage.createError(400, "Your wallet is not active. Please contact support.", ErrorSeverity.HIGH);
+        }
+        if (wallet.balance < totalDebit) {
+            throw errorResponseMessage.createError(
+                400,
+                `Insufficient wallet balance. You need ₦${totalDebit.toLocaleString()} but your balance is ₦${wallet.balance.toLocaleString()}. Please fund your wallet first.`,
+                ErrorSeverity.MEDIUM,
+            );
+        }
+
+        if (idempotencyKey) {
+            const dup = await this.idempotencyService.validateKey(idempotencyKey, userId);
+            if (dup.isDuplicate && dup.transactionId) {
+                const existing = await this.findById(dup.transactionId);
+                if (existing) {
+                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existing._id });
+                    return { ...existing.toObject(), details: existingDetails ? existingDetails.toObject() : {} };
+                }
+            }
+        }
+
+        const sequenceId = this.generateOGatewaySequenceId();
+
+        // Atomic wallet debit + journal posting.
+        const walletSession = await mongoose.startSession();
+        walletSession.startTransaction();
+
+        let walletTransaction: any;
+        const walletTxRef = this.walletTransactionService.generateReference('TRF');
+        const balanceBefore = wallet.balance;
+        const balanceAfter = balanceBefore - totalDebit;
+
+        try {
+            await this.walletService.debitBalance(wallet._id as string, totalDebit, walletSession);
+
+            // Locked-rate posting: user's NGN wallet drops by totalDebit (the
+            // converted amount + the platform fee). The converted amount sits
+            // in OG_PAYMENT_INFLIGHT_GHS awaiting OGateway's webhook; the fee
+            // lands in FEES_NGN immediately (platform revenue, recognised on
+            // initiation since the user has already paid for it).
+            const userAccountCode = userWalletAccountCode(userId, wallet.currency);
+            const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
+                { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount: totalDebit },
+                { accountCode: ogPaymentInflightCode('GHS'), direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
+            ];
+            if (feeAmount > 0) {
+                legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
+            }
+            await ledgerService.post({
+                legs,
+                source: JOURNAL_SOURCE.OG_SEND,
+                reference: sequenceId,
+                description: `OGateway send — ${amount} GHS to ${destination.accountName}`,
+                externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: sequenceId },
+                metadata: {
+                    destinationAmount: amount,
+                    destinationCurrency: 'GHS',
+                    destination,
+                    feeAmount,
+                    feePercent,
+                    providerFeePercent,
+                    markupPercent,
+                    providerRate,
+                    userRate,
+                },
+                session: walletSession,
+            });
+
+            walletTransaction = await this.walletTransactionService.create({
+                wallet: wallet._id,
+                user: userId,
+                type: WALLET_TRANSACTION_TYPE.TRANSFER,
+                status: WALLET_TRANSACTION_STATUS.PENDING,
+                amount: totalDebit,
+                reference: walletTxRef,
+                balanceBefore,
+                balanceAfter,
+                description: `Transfer to ${destination.accountName} (${amount} GHS)`,
+            }, walletSession);
+
+            await walletSession.commitTransaction();
+        } catch (error) {
+            if (walletSession.inTransaction()) await walletSession.abortTransaction();
+            walletSession.endSession();
+            throw error;
+        } finally {
+            walletSession.endSession();
+        }
+
+        const lockedRate = userRate;
+
+        // Create the local transaction record.
+        let transaction: any;
+        let transactionDetails: any;
+        try {
+            transaction = await this.create({
+                user: userId,
+                reference: sequenceId,
+                amount: Math.round(amount * 100) / 100,
+                fromCurrency: 'NGN',
+                currency: 'GHS',
+                detailType: DETAIL_TYPE.OGATEWAY,
+                status: TRANSACTION_STATUS.PENDING,
+                initiatedAt: Date.now(),
+                lockedRate,
+                lockedRateFromCurrency: 'NGN',
+                lockedRateToCurrency: 'GHS',
+                lockedRateAt: new Date(),
+            });
+        } catch (dbError: any) {
+            logger.error("Failed to create OGateway transaction record, refunding wallet", {
+                error: dbError?.message, sequenceId,
+            });
+            await this.refundWalletFromOGateway(wallet._id, userId, totalDebit, ngnAmount, walletTransaction._id, walletTxRef, "Transaction record creation failed", feeAmount);
+            throw errorResponseMessage.createError(500, `Failed to create transaction: ${dbError?.message || 'Unknown error'}`, ErrorSeverity.CRITICAL);
+        }
+
+        await this.walletTransactionService.updateById(walletTransaction._id as string, {
+            paystackReference: sequenceId,
+        });
+
+        if (idempotencyKey) {
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+        }
+
+        const isMomo = destination.accountType === 'momo';
+        try {
+            transactionDetails = await this.transactionDetailsService.create({
+                transactionId: transaction._id,
+                type: DETAIL_TYPE.OGATEWAY,
+                ogReference: sequenceId,
+                ogChannel: isMomo ? OGATEWAY_CHANNELS.MOMO : OGATEWAY_CHANNELS.BANK,
+                ogNetwork: isMomo ? destination.network : undefined,
+                ogBank: !isMomo ? destination.bank : undefined,
+                ogStatus: OGATEWAY_STATUS.PENDING,
+                fromAmount: totalDebit,
+                feeAmount,
+                feePercent,
+                providerFeePercent,
+                markupPercent,
+                accountName: destination.accountName,
+                accountNumber: destination.accountNumber,
+                institutionType: isMomo ? 'momo' : 'bank',
+                country: 'GH',
+            });
+        } catch (dbError: any) {
+            logger.error("Failed to create OGateway transaction detail", { error: dbError?.message });
+            await this.refundWalletFromOGateway(wallet._id, userId, totalDebit, ngnAmount, walletTransaction._id, walletTxRef, "Transaction detail creation failed", feeAmount);
+            throw errorResponseMessage.createError(500, `Failed to create transaction detail: ${dbError?.message || 'Unknown error'}`, ErrorSeverity.CRITICAL);
+        }
+
+        // Dispatch to OGateway.
+        try {
+            let payoutResponse: any;
+            if (isMomo) {
+                payoutResponse = await ogatewayService.payoutMobileMoney({
+                    reference: sequenceId,
+                    recipient: {
+                        amount,
+                        currency: 'GHS',
+                        network: destination.network!,
+                        accountName: destination.accountName,
+                        accountNumber: destination.accountNumber,
+                    },
+                });
+            } else {
+                payoutResponse = await ogatewayService.payoutBank({
+                    reference: sequenceId,
+                    senderName: params.senderName || 'Solution Pay',
+                    recipient: {
+                        amount,
+                        currency: 'GHS',
+                        bank: destination.bank!,
+                        accountName: destination.accountName,
+                        accountNumber: destination.accountNumber,
+                    },
+                });
+            }
+
+            // OGateway responses for payouts are arrays of one item.
+            const ogTx = Array.isArray(payoutResponse) ? payoutResponse[0] : payoutResponse;
+            const ogStatus = (ogTx?.status || OGATEWAY_STATUS.INITIATED).toLowerCase();
+
+            await this.transactionDetailsService.update(
+                { transactionId: transaction._id },
+                {
+                    ogId: ogTx?.id,
+                    ogStatus,
+                    ogRawPayload: payoutResponse,
+                },
+            );
+
+            // If OGateway returns COMPLETED synchronously, mark complete now;
+            // otherwise stay in PROCESSING and wait for webhook.
+            const finalStatus = ogStatus === OGATEWAY_STATUS.COMPLETED
+                ? TRANSACTION_STATUS.COMPLETED
+                : TRANSACTION_STATUS.PROCESSING;
+            await this.updateById(transaction._id.toString(), {
+                status: finalStatus,
+                ...(finalStatus === TRANSACTION_STATUS.COMPLETED ? { completedAt: new Date() } : {}),
+            });
+
+            if (finalStatus === TRANSACTION_STATUS.COMPLETED) {
+                // Sync: post the final ledger leg + clear wallet-transaction pending.
+                await this.postOGatewayPayoutCompletion(sequenceId, ngnAmount);
+                await this.walletTransactionService.updateById(walletTransaction._id as string, {
+                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                });
+                await this.walletService.adjustLedgerBalance(wallet._id as string, -totalDebit);
+            }
+
+            logger.info("OGateway payout dispatched", {
+                transactionId: transaction._id,
+                sequenceId,
+                ogId: ogTx?.id,
+                ogStatus,
+                finalStatus,
+            });
+
+            return {
+                ...transaction.toObject(),
+                status: finalStatus,
+                details: {
+                    ...transactionDetails.toObject(),
+                    ogId: ogTx?.id,
+                    ogStatus,
+                },
+            };
+        } catch (error: any) {
+            await this.updateById(transaction._id.toString(), { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
+            await this.transactionDetailsService.update(
+                { transactionId: transaction._id },
+                { ogStatus: OGATEWAY_STATUS.FAILED },
+            );
+            await this.refundWalletFromOGateway(wallet._id, userId, totalDebit, ngnAmount, walletTransaction._id, walletTxRef, `OGateway payout dispatch failed: ${error?.message || 'unknown'}`, feeAmount);
+            const ogError = error?.ogError || error?.response?.data || error?.data;
+            const ogMessage = ogError?.message || ogError?.error || error?.message || "OGateway payout failed";
+            throw errorResponseMessage.createError(400, `OGateway: ${ogMessage}`, ErrorSeverity.HIGH);
+        }
+    };
+
+    /**
+     * Receive GHS → NGN via OGateway (instant collection from a GHS MoMo sender).
+     * Creates the local transaction in PENDING; the sender approves on their phone
+     * and OGateway fires a webhook on settlement, at which point we credit the
+     * user's NGN wallet (in handleOGatewayWebhook → creditWalletFromOGatewayCollection).
+     */
+    public createOGatewayCollectionTransaction = async (
+        params: {
+            amount: number;          // GHS amount the sender pays
+            fromAmount?: number;     // NGN equivalent the user receives (locked rate)
+            fromCurrency: 'GHS';
+            toCurrency: 'NGN';
+            sender: {
+                accountName: string;
+                accountNumber: string;
+                network: string;
+                email?: string;
+            };
+            idempotencyKey?: string;
+        },
+        userId: string,
+    ) => {
+        const { amount, sender, idempotencyKey } = params;
+
+        if (!amount || amount <= 0) {
+            throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
+        }
+
+        // Compute the NGN credit server-side from the live OGateway rate. We're
+        // SELLING the GHS the sender pays us, so we pull the GHS→NGN quote —
+        // that's what OGateway will actually pay out to us in NGN. getUserFacingRate
+        // applies the platform markup (downward for receives so the user gets
+        // less NGN, platform keeps the spread). Client-supplied fromAmount is ignored.
+        let providerRate: number;
+        let userRate: number;
+        try {
+            const quoted = await ogatewayService.getUserFacingRate('GHS', 'NGN', 'receive');
+            providerRate = quoted.providerRate;
+            userRate = quoted.userRate;
+        } catch (err: any) {
+            logger.error("OGateway rate lookup failed during collection", { error: err?.message });
+            throw errorResponseMessage.createError(400, "Could not retrieve the GHS→NGN rate from OGateway. Please try again.", ErrorSeverity.HIGH);
+        }
+        const grossNgn = Math.round(amount * userRate * 100) / 100;
+        if (!grossNgn || grossNgn <= 0) {
+            throw errorResponseMessage.createError(400, "Could not compute NGN amount from the live OGateway rate", ErrorSeverity.HIGH);
+        }
+
+        // Fee is netted out of the credit so the user receives `gross − fee`.
+        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('ogateway', grossNgn);
+        const ngnAmount = Math.round((grossNgn - feeAmount) * 100) / 100;
+        if (ngnAmount <= 0) {
+            throw errorResponseMessage.createError(400, "Fee exceeds the converted amount. Please increase the amount.", ErrorSeverity.MEDIUM);
+        }
+        const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
+
+        if (idempotencyKey) {
+            const dup = await this.idempotencyService.validateKey(idempotencyKey, userId);
+            if (dup.isDuplicate && dup.transactionId) {
+                const existing = await this.findById(dup.transactionId);
+                if (existing) {
+                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existing._id });
+                    return { ...existing.toObject(), details: existingDetails ? existingDetails.toObject() : {} };
+                }
+            }
+        }
+
+        const sequenceId = this.generateOGatewaySequenceId();
+        const lockedRate = userRate;
+
+        const transaction = await this.create({
+            user: userId,
+            reference: sequenceId,
+            amount: Math.round(amount * 100) / 100,
+            fromCurrency: 'GHS',
+            currency: 'NGN',
+            detailType: DETAIL_TYPE.OGATEWAY,
+            status: TRANSACTION_STATUS.PENDING,
+            initiatedAt: Date.now(),
+            lockedRate,
+            lockedRateFromCurrency: 'GHS',
+            lockedRateToCurrency: 'NGN',
+            lockedRateAt: new Date(),
+        });
+
+        if (idempotencyKey) {
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+        }
+
+        const transactionDetails = await this.transactionDetailsService.create({
+            transactionId: transaction._id,
+            type: DETAIL_TYPE.OGATEWAY,
+            ogReference: sequenceId,
+            ogChannel: OGATEWAY_CHANNELS.MOMO,
+            ogNetwork: sender.network,
+            ogStatus: OGATEWAY_STATUS.PENDING,
+            fromAmount: ngnAmount,
+            feeAmount,
+            feePercent,
+            providerFeePercent,
+            markupPercent,
+            momoName: sender.accountName,
+            momoNumber: sender.accountNumber,
+            momoNetwork: sender.network,
+            institutionType: 'momo',
+            country: 'GH',
+        });
+
+        try {
+            const response = await ogatewayService.collectMobileMoney({
+                amount,
+                currency: 'GHS',
+                network: sender.network,
+                accountName: sender.accountName,
+                accountNumber: sender.accountNumber,
+                reason: `Collection for user ${userId}`,
+                reference: sequenceId,
+                email: sender.email,
+            });
+
+            const ogStatus = (response?.status || OGATEWAY_STATUS.INITIATED).toLowerCase();
+            await this.transactionDetailsService.update(
+                { transactionId: transaction._id },
+                { ogId: response?.id, ogStatus, ogRawPayload: response },
+            );
+            await this.updateById(transaction._id.toString(), { status: TRANSACTION_STATUS.PROCESSING });
+
+            logger.info("OGateway collection created", {
+                transactionId: transaction._id, sequenceId, ogId: response?.id, ogStatus,
+            });
+
+            return {
+                ...transaction.toObject(),
+                status: TRANSACTION_STATUS.PROCESSING,
+                details: {
+                    ...transactionDetails.toObject(),
+                    ogId: response?.id,
+                    ogStatus,
+                },
+            };
+        } catch (error: any) {
+            await this.updateById(transaction._id.toString(), { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
+            await this.transactionDetailsService.update(
+                { transactionId: transaction._id },
+                { ogStatus: OGATEWAY_STATUS.FAILED },
+            );
+            const ogError = error?.ogError || error?.response?.data || error?.data;
+            const ogMessage = ogError?.message || ogError?.error || error?.message || "OGateway collection failed";
+            throw errorResponseMessage.createError(400, `OGateway: ${ogMessage}`, ErrorSeverity.HIGH);
+        }
+    };
+
+    /**
+     * On payout completion, settle the in-flight float to CASH_OGATEWAY_GHS.
+     * Posted in NGN-equivalent amounts (locked rate already captured on tx record).
+     */
+    private postOGatewayPayoutCompletion = async (reference: string, ngnAmount: number) => {
+        const session = await mongoose.startSession();
+        session.startTransaction();
+        try {
+            await ledgerService.post({
+                legs: [
+                    { accountCode: ogPaymentInflightCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: ngnAmount },
+                    { accountCode: ogCashAccountCode('GHS'), direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
+                ],
+                source: JOURNAL_SOURCE.OG_SEND,
+                reference,
+                description: `OGateway payout settled — float drawn down`,
+                externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: reference },
+                session,
+            });
+            await session.commitTransaction();
+        } catch (error) {
+            if (session.inTransaction()) await session.abortTransaction();
+            logger.error("OGateway payout settlement journal post failed", { reference, error: (error as any)?.message });
+        } finally {
+            session.endSession();
+        }
+    };
+
+    /**
+     * On collection completion, credit the user's NGN wallet at the locked rate
+     * and post the settling journal entries.
+     */
+    private creditWalletFromOGatewayCollection = async (transaction: any, detail: any) => {
+        const userId = typeof transaction.user === 'object' ? transaction.user._id?.toString() : transaction.user?.toString();
+        // detail.fromAmount is the NET amount credited to the user (already
+        // fee-deducted). The platform receives the GROSS = net + fee from the
+        // rail, and books the fee into FEES_NGN.
+        const ngnAmount = detail.fromAmount || transaction.amount;
+        const feeAmount = detail.feeAmount || 0;
+        const grossNgn = Math.round((ngnAmount + feeAmount) * 100) / 100;
+
+        try {
+            const wallet = await this.walletService.findOne({ user: userId });
+            if (!wallet) {
+                logger.error("Wallet not found for OGateway collection credit", { userId });
+                return;
+            }
+            await this.walletService.getOrCreateWallet(userId);
+
+            const session = await mongoose.startSession();
+            session.startTransaction();
+            try {
+                await this.walletService.creditBalance(wallet._id as string, ngnAmount, session);
+
+                const userAccountCode = userWalletAccountCode(userId, wallet.currency);
+                const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
+                    { accountCode: ogCashAccountCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: grossNgn },
+                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
+                ];
+                if (feeAmount > 0) {
+                    legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
+                }
+                await ledgerService.post({
+                    legs,
+                    source: JOURNAL_SOURCE.OG_COLLECT,
+                    reference: transaction.reference,
+                    description: `OGateway collection settled — ${transaction.amount} GHS → ₦${ngnAmount.toFixed(2)} (fee ₦${feeAmount.toFixed(2)})`,
+                    externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: transaction.reference },
+                    metadata: { fromAmount: transaction.amount, fromCurrency: 'GHS', feeAmount, grossNgn },
+                    session,
+                });
+
+                const ref = this.walletTransactionService.generateReference('COL');
+                await this.walletTransactionService.create({
+                    wallet: wallet._id,
+                    user: userId,
+                    type: WALLET_TRANSACTION_TYPE.FUNDING,
+                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                    amount: ngnAmount,
+                    reference: ref,
+                    balanceBefore: wallet.balance,
+                    balanceAfter: wallet.balance + ngnAmount,
+                    description: `Received ${transaction.amount} GHS → ₦${ngnAmount.toLocaleString()}`,
+                    paystackReference: transaction.reference,
+                }, session);
+
+                await this.walletService.adjustLedgerBalance(wallet._id as string, ngnAmount, session);
+                await session.commitTransaction();
+            } catch (sessionError) {
+                if (session.inTransaction()) await session.abortTransaction();
+                throw sessionError;
+            } finally {
+                session.endSession();
+            }
+
+            logger.info("Wallet credited from OGateway collection", {
+                userId, walletId: wallet._id, ngnAmount, ghsAmount: transaction.amount,
+            });
+        } catch (error: any) {
+            logger.error("CRITICAL: Failed to credit wallet from OGateway collection", {
+                userId, transactionId: transaction._id, ngnAmount, error: error?.message,
+            });
+        }
+    };
+
+    /**
+     * Handle an OGateway webhook event. Called by webhook.controller after
+     * the HMAC-SHA512 signature has been verified.
+     *
+     * OGateway payload shape (per docs):
+     *   {
+     *     id, amount, fee, currency, status: 'COMPLETED' | 'FAILED',
+     *     channel, network, customer: { accountName, accountNumber },
+     *     reference_business, provider_message, message, telco_response,
+     *     created_at, updated_at, metadata?, instructions?, virtual_account?
+     *   }
+     */
+    public handleOGatewayWebhook = async (webhookData: any) => {
+        const reference = webhookData?.reference_business;
+        if (!reference) {
+            logger.warn("OGateway webhook missing reference_business", { keys: Object.keys(webhookData || {}) });
+            return;
+        }
+
+        const detail = await this.transactionDetailsService.findOne({ ogReference: reference });
+        if (!detail) {
+            logger.warn("OGateway webhook: no matching transaction detail", { reference });
+            return;
+        }
+
+        const transactionId = detail.transactionId.toString();
+        const transaction = await this.findById(transactionId);
+        if (!transaction) {
+            logger.warn("OGateway webhook: no matching transaction", { transactionId });
+            return;
+        }
+
+        const status = (webhookData?.status || '').toLowerCase();
+
+        await this.transactionDetailsService.update(
+            { _id: detail._id },
+            { ogRawPayload: webhookData, ogStatus: status, ogId: webhookData?.id || detail.ogId },
+        );
+
+        const isSendFlow = transaction.fromCurrency === 'NGN' && transaction.currency === 'GHS';
+        const isReceiveFlow = transaction.fromCurrency === 'GHS' && transaction.currency === 'NGN';
+
+        // ===== Send flow (NGN→GHS payout) =====
+        if (isSendFlow) {
+            const findWalletTx = async () => this.walletTransactionService.findOne({
+                paystackReference: transaction.reference,
+                type: WALLET_TRANSACTION_TYPE.TRANSFER,
+            });
+
+            if (status === OGATEWAY_STATUS.COMPLETED) {
+                if (transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.COMPLETED)) {
+                    await this.updateById(transactionId, {
+                        status: TRANSACTION_STATUS.COMPLETED,
+                        completedAt: new Date(),
+                    });
+                    // detail.fromAmount is the total wallet debit (converted + fee).
+                    // The OG_PAYMENT_INFLIGHT_GHS leg only holds the converted
+                    // portion, so we drain it by `fromAmount - feeAmount`.
+                    const totalDebit = detail.fromAmount || transaction.amount;
+                    const feeAmount = (detail as any).feeAmount || 0;
+                    const convertedNgn = Math.round((totalDebit - feeAmount) * 100) / 100;
+                    await this.postOGatewayPayoutCompletion(transaction.reference, convertedNgn);
+
+                    const walletTx = await findWalletTx();
+                    if (walletTx) {
+                        await this.walletTransactionService.updateById(walletTx._id as string, {
+                            status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                        });
+                        await this.walletService.adjustLedgerBalance(walletTx.wallet as string, -walletTx.amount);
+                    }
+                }
+
+                const user = transaction.user as IUser;
+                if (user?.email) {
+                    try {
+                        await this.notificationService.sendTransactionNotification(user, "payment_completed", {
+                            amount: `${transaction.amount} GHS`,
+                            reference: transaction.reference,
+                            recipient: detail.accountName || "Recipient",
+                            actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
+                        });
+                    } catch (e) {
+                        logger.warn("Failed to send OGateway completion notification", { error: e });
+                    }
+                }
+                return;
+            }
+
+            if (status === OGATEWAY_STATUS.FAILED) {
+                if (transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.FAILED)) {
+                    await this.updateById(transactionId, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
+                }
+                const walletTx = await findWalletTx();
+                if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.FAILED && walletTx.status !== WALLET_TRANSACTION_STATUS.REVERSED) {
+                    const totalDebit = walletTx.amount;
+                    const feeAmount = (detail as any).feeAmount || 0;
+                    const convertedNgn = Math.round((totalDebit - feeAmount) * 100) / 100;
+                    await this.refundWalletFromOGateway(
+                        walletTx.wallet,
+                        walletTx.user as string,
+                        totalDebit,
+                        convertedNgn,
+                        walletTx._id,
+                        walletTx.reference,
+                        webhookData?.provider_message || webhookData?.message || 'OGateway payout failed',
+                        feeAmount,
+                    );
+                }
+                return;
+            }
+        }
+
+        // ===== Receive flow (GHS→NGN collection) =====
+        if (isReceiveFlow) {
+            if (status === OGATEWAY_STATUS.COMPLETED) {
+                if (transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.COMPLETED)) {
+                    await this.updateById(transactionId, {
+                        status: TRANSACTION_STATUS.COMPLETED,
+                        completedAt: new Date(),
+                    });
+                    await this.creditWalletFromOGatewayCollection(transaction, detail);
+                }
+                return;
+            }
+            if (status === OGATEWAY_STATUS.FAILED) {
+                if (transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.FAILED)) {
+                    await this.updateById(transactionId, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
+                }
+                return;
+            }
+        }
+
+        // Intermediate state — just record it.
+        logger.info("OGateway webhook intermediate status", { transactionId, status });
     };
 
     public async searchTransactions(

@@ -18,6 +18,7 @@ export const MODEL_NAME = {
     WEBHOOK_EVENT: "WebhookEventModel",
     RECONCILIATION_REPORT: "ReconciliationReportModel",
     LEDGER_ALERT: "LedgerAlertModel",
+    PLATFORM_SETTINGS: "PlatformSettingsModel",
 }
 
 // ===================== LEDGER / CHART OF ACCOUNTS =====================
@@ -48,6 +49,8 @@ export const JOURNAL_SOURCE = {
     WITHDRAWAL: 'withdrawal',
     YC_SEND: 'yc_send',
     YC_COLLECT: 'yc_collect',
+    OG_SEND: 'og_send',
+    OG_COLLECT: 'og_collect',
     FEE: 'fee',
     REVERSAL: 'reversal',
     MANUAL_ATTRIBUTION: 'manual_attribution',
@@ -86,9 +89,16 @@ export const ycCashAccountCode = (currency: string): string => `CASH_YELLOWCARD_
 export const ycPaymentInflightCode = (currency: string): string => `YC_PAYMENT_INFLIGHT_${currency}`;
 export const ycCollectionInflightCode = (currency: string): string => `YC_COLLECTION_INFLIGHT_${currency}`;
 
+// OGateway account codes (Ghana instant send + receive only, for now).
+export const OG_CURRENCIES = ['GHS'] as const;
+export const ogCashAccountCode = (currency: string): string => `CASH_OGATEWAY_${currency}`;
+export const ogPaymentInflightCode = (currency: string): string => `OGATEWAY_PAYMENT_INFLIGHT_${currency}`;
+export const ogCollectionInflightCode = (currency: string): string => `OGATEWAY_COLLECTION_INFLIGHT_${currency}`;
+
 export const WEBHOOK_PROVIDER = {
     PAYSTACK: 'paystack',
     YELLOWCARD: 'yellowcard',
+    OGATEWAY: 'ogateway',
     SMILE_ID: 'smile_id',
 } as const;
 
@@ -172,6 +182,7 @@ export const DETAIL_TYPE = {
     BANK_TRANSFER: 'bank_transfer',
     MOBILE_MONEY: 'mobile_money',
     YELLOWCARD: 'yellowcard',
+    OGATEWAY: 'ogateway',
 }
 
 export const YELLOWCARD_STATUS = {
@@ -183,6 +194,22 @@ export const YELLOWCARD_STATUS = {
     EXPIRED: 'expired',
     REFUNDED: 'refunded',
 }
+
+// OGateway transaction statuses normalised to lowercase.
+// API returns INITIATED / PENDING / COMPLETED / FAILED.
+export const OGATEWAY_STATUS = {
+    INITIATED: 'initiated',
+    PENDING: 'pending',
+    PROCESSING: 'processing',
+    COMPLETED: 'completed',
+    FAILED: 'failed',
+}
+
+export const OGATEWAY_NETWORKS = ['MTN', 'VOD', 'ATM', 'ORANGE'] as const;
+export const OGATEWAY_CHANNELS = {
+    MOMO: 'MOMO',
+    BANK: 'BANK',
+} as const;
 
 export const ALIPAY_PLATFORM = {
     NIGERIAN: 'nigerian',

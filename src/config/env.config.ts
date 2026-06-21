@@ -77,6 +77,13 @@ interface EnvConfig {
     YELLOWCARD_WEBHOOK_SECRET: string;
     YELLOWCARD_BASE_URL: string;
 
+    /** OGateway payment integration (Ghana instant send + receive) */
+    OGATEWAY_API_KEY: string;
+    OGATEWAY_WEBHOOK_SECRET: string;
+    OGATEWAY_BASE_URL: string;
+    OGATEWAY_CALLBACK_URL: string;
+    OGATEWAY_STALE_AFTER_MINUTES: number;
+
     /** Paystack payment integration (Wallet funding & withdrawals) */
     PAYSTACK_SECRET_KEY: string;
     PAYSTACK_PUBLIC_KEY: string;
@@ -165,6 +172,13 @@ const loadEnvConfig = (): EnvConfig => {
         YELLOWCARD_SECRET_KEY: process.env.YELLOWCARD_SECRET_KEY || process.env.YELLOW_CARD_SECRET_KEY || '',
         YELLOWCARD_WEBHOOK_SECRET: process.env.YELLOWCARD_WEBHOOK_SECRET || '',
         YELLOWCARD_BASE_URL: process.env.YELLOWCARD_BASE_URL || 'https://sandbox.api.yellowcard.io/business',
+
+        // OGateway — Ghana instant send/receive
+        OGATEWAY_API_KEY: process.env.OGATEWAY_API_KEY || '',
+        OGATEWAY_WEBHOOK_SECRET: process.env.OGATEWAY_WEBHOOK_SECRET || '',
+        OGATEWAY_BASE_URL: process.env.OGATEWAY_BASE_URL || 'https://api.ogateway.io',
+        OGATEWAY_CALLBACK_URL: process.env.OGATEWAY_CALLBACK_URL || '',
+        OGATEWAY_STALE_AFTER_MINUTES: parseInt(process.env.OGATEWAY_STALE_AFTER_MINUTES || '15', 10),
 
         // Paystack — wallet funding (DVA) & withdrawals (transfers)
         PAYSTACK_SECRET_KEY: process.env.PAYSTACK_SECRET_KEY || '',

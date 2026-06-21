@@ -9,12 +9,14 @@ import bankAccountDetailsController from "../../controllers/base/protected/bank-
 import verificationController from "../../controllers/base/protected/verification.controller";
 import dashboardController from "../../controllers/base/protected/dashboard.controller";
 import yellowCardTransactionController from "../../controllers/base/protected/yellowcard-transaction.controller";
+import ogatewayTransactionController from "../../controllers/base/protected/ogateway-transaction.controller";
 import walletController from "../../controllers/base/protected/wallet.controller";
 import pinController from "../../controllers/base/protected/pin.controller";
 import adminLedgerController from "../../controllers/base/protected/admin/ledger.controller";
 import adminReconciliationController from "../../controllers/base/protected/admin/reconciliation.controller";
 import adminWebhooksController from "../../controllers/base/protected/admin/webhooks.controller";
 import adminSuspenseController from "../../controllers/base/protected/admin/suspense.controller";
+import adminPlatformSettingsController from "../../controllers/base/protected/admin/platform-settings.controller";
 
 const path = "/protected";
 const protectedRouter = Router();
@@ -37,6 +39,7 @@ protectedRouter.use(`${path}/bank-account-details`, bankAccountDetailsController
 protectedRouter.use(`${path}/verify`, verificationController);
 protectedRouter.use(`${path}/dashboard`, dashboardController);
 protectedRouter.use(`${path}/yellowcard`, yellowCardTransactionController);
+protectedRouter.use(`${path}/ogateway`, ogatewayTransactionController);
 protectedRouter.use(`${path}/wallet`, walletController);
 protectedRouter.use(`${path}/pin`, pinController);
 
@@ -45,5 +48,6 @@ protectedRouter.use(`${path}/admin/ledger`, adminLedgerController);
 protectedRouter.use(`${path}/admin/reconciliation`, adminReconciliationController);
 protectedRouter.use(`${path}/admin/webhooks`, adminWebhooksController);
 protectedRouter.use(`${path}/admin/suspense`, adminSuspenseController);
+protectedRouter.use(`${path}/admin/platform-settings`, adminPlatformSettingsController);
 
 export default protectedRouter;

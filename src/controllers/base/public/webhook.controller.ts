@@ -9,6 +9,7 @@ import config from "../../../config/env.config";
 import UserService from "../../../services/user.service";
 import SmileId from "../../../services/smile-id.service";
 import yellowCardService from "../../../services/yellowcard.service";
+import ogatewayService from "../../../services/ogateway.service";
 import paystackService from "../../../services/paystack.service";
 import WalletService from "../../../services/wallet.service";
 import logger from "../../../utils/logger.utils";
@@ -38,6 +39,7 @@ class WebhookController extends BaseController {
     protected setupRoutes(): void {
         this.router.post("/smile-id-callback", this.smileIdCallback.bind(this));
         this.router.post("/yellowcard-callback", this.yellowCardCallback.bind(this));
+        this.router.post("/ogateway", this.ogatewayCallback.bind(this));
         this.router.post("/paystack-callback", this.paystackCallback.bind(this));
     }
 
@@ -522,6 +524,57 @@ class WebhookController extends BaseController {
      * YellowCard webhook handler.
      * Verifies the webhook signature and delegates processing to the transaction service.
      */
+    /**
+     * OGateway webhook handler — handles collection and payout outcome events.
+     * Signature: HMAC-SHA512 hex over raw body, header `x-ogateway-signature`.
+     * Idempotency keyed on `reference_business` (= our internal sequenceId).
+     */
+    private async ogatewayCallback(req: Request, res: Response, next: NextFunction): Promise<void> {
+        const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+        const signature = (req.headers["x-ogateway-signature"] as string) || undefined;
+        const externalId = req.body?.reference_business || req.body?.id;
+        const eventName = req.body?.channel
+            ? `${(req.body.channel as string).toLowerCase()}.${(req.body.status || 'event').toLowerCase()}`
+            : (req.body?.status || 'event').toLowerCase();
+
+        const signatureValid = ogatewayService.verifyWebhookSignature(rawBody, signature);
+
+        const stored = await webhookEventService.record({
+            provider: WEBHOOK_PROVIDER.OGATEWAY,
+            req,
+            payload: req.body,
+            signature,
+            signatureValid,
+            event: eventName,
+            externalId,
+        });
+        const eventId = stored?._id?.toString();
+
+        if (!signature) {
+            logger.warn("OGateway webhook: missing signature header");
+            if (eventId) await webhookEventService.markFailed(eventId, 'missing signature');
+            res.status(400).json({ error: "Missing signature" });
+            return;
+        }
+        if (!signatureValid) {
+            logger.error("OGateway webhook: invalid signature");
+            if (eventId) await webhookEventService.markFailed(eventId, 'invalid signature');
+            res.status(401).json({ error: "Invalid signature" });
+            return;
+        }
+
+        logger.info("OGateway webhook received", { event: eventName, reference: externalId });
+        res.status(200).json({ received: true });
+
+        try {
+            await this.transactionService.handleOGatewayWebhook(req.body);
+            if (eventId) await webhookEventService.markProcessed(eventId);
+        } catch (error: any) {
+            logger.error("OGateway webhook processing error", { error: error?.message || error });
+            if (eventId) await webhookEventService.markFailed(eventId, error);
+        }
+    }
+
     private async yellowCardCallback(req: Request, res: Response, next: NextFunction): Promise<void> {
         const rawBody = (req as any).rawBody || JSON.stringify(req.body);
         const signature = (req.headers["x-yc-signature"] as string) || (req.headers["x-yellowcard-signature"] as string) || undefined;
