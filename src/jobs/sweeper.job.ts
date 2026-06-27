@@ -8,10 +8,12 @@ import {
     WALLET_TRANSACTION_TYPE,
     WALLET_TRANSACTION_STATUS,
 } from '../common/constant';
+import config from '../config/env.config';
 import logger from '../utils/logger.utils';
 
 const STALE_YC_AFTER_MS = 10 * 60 * 1000; // 10 min
 const STALE_PAYSTACK_AFTER_MS = 15 * 60 * 1000; // 15 min
+const STALE_OG_AFTER_MS = config.OGATEWAY_STALE_AFTER_MINUTES * 60 * 1000;
 const MAX_PER_RUN = 50;
 
 const txService = new TransactionService(['user']);
@@ -80,7 +82,41 @@ async function sweepStalePaystack(): Promise<{ scanned: number; synced: number }
     return { scanned: stale.length, synced };
 }
 
+/**
+ * Find OGateway payouts/collections stuck in PROCESSING and ask OGateway
+ * for the authoritative status, then sync via the existing webhook
+ * handler (so settle/refund/state-machine all reuse one code path).
+ */
+async function sweepStaleOGateway(): Promise<{ scanned: number; synced: number }> {
+    const cutoff = new Date(Date.now() - STALE_OG_AFTER_MS);
+    const stale = await Transaction.find({
+        detailType: DETAIL_TYPE.OGATEWAY,
+        status: { $in: [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] },
+        initiatedAt: { $lte: cutoff },
+    })
+        .limit(MAX_PER_RUN)
+        .sort({ initiatedAt: 1 });
+
+    let synced = 0;
+    for (const tx of stale) {
+        try {
+            await txService.pollOGatewayStatus((tx._id as any).toString());
+            synced += 1;
+        } catch (error) {
+            logger.warn('Sweeper: OGateway poll failed', {
+                transactionId: tx._id,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+    return { scanned: stale.length, synced };
+}
+
 export async function runStaleTransactionSweep(): Promise<void> {
-    const [yc, paystack] = await Promise.all([sweepStaleYC(), sweepStalePaystack()]);
-    logger.info('Sweep complete', { yc, paystack });
+    const [yc, paystack, og] = await Promise.all([
+        sweepStaleYC(),
+        sweepStalePaystack(),
+        sweepStaleOGateway(),
+    ]);
+    logger.info('Sweep complete', { yc, paystack, og });
 }

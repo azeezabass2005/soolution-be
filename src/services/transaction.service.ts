@@ -2779,6 +2779,84 @@ class TransactionService extends DBService<ITransaction> {
         logger.info("OGateway webhook intermediate status", { transactionId, status });
     };
 
+    /**
+     * Pull-side counterpart to the OGateway webhook. The sweeper calls this
+     * for transactions stuck in PROCESSING past the staleness window when
+     * the webhook never arrived. We hit `GET /payments/{ogId}`, build a
+     * webhook-shaped payload from the response, and feed it back through
+     * {@link handleOGatewayWebhook} so settle/refund/state-machine/fee
+     * reversal all go through the same code path — no second implementation
+     * to drift out of sync.
+     */
+    public pollOGatewayStatus = async (
+        transactionId: string,
+    ): Promise<{ transaction?: any; ogStatus: string; message?: string }> => {
+        const transaction = await this.findById(transactionId);
+        if (!transaction) {
+            logger.warn("pollOGatewayStatus: transaction not found", { transactionId });
+            return { ogStatus: "unknown", message: "Transaction not found" };
+        }
+
+        const resultFromCurrentState = async (fallbackStatus: string, message?: string) => {
+            const refreshed = await this.findById(transactionId);
+            const baseTransaction = refreshed || transaction;
+            const refreshedDetail = await this.transactionDetailsService.findOne({
+                transactionId: baseTransaction._id,
+            });
+
+            return {
+                transaction: {
+                    ...baseTransaction.toObject(),
+                    details: refreshedDetail ? refreshedDetail.toObject() : {},
+                },
+                ogStatus: (refreshedDetail as any)?.ogStatus || fallbackStatus,
+                message,
+            };
+        };
+
+        const detail = await this.transactionDetailsService.findOne({ transactionId: transaction._id });
+        if (!detail) {
+            logger.warn("pollOGatewayStatus: detail not found", { transactionId });
+            return resultFromCurrentState(
+                String(transaction.status || "unknown"),
+                "Transaction detail not found",
+            );
+        }
+        const ogId = (detail as any).ogId;
+        const ogReference = (detail as any).ogReference;
+        if (!ogId) {
+            logger.warn("pollOGatewayStatus: no ogId on detail — cannot query OGateway", {
+                transactionId,
+                ogReference,
+            });
+            return resultFromCurrentState(
+                (detail as any).ogStatus || String(transaction.status || "unknown"),
+                "No OGateway transaction id found",
+            );
+        }
+
+        const remote = await ogatewayService.getTransactionStatus(ogId);
+        const remoteStatus = String(remote?.status || '').toLowerCase();
+        if (!remoteStatus) {
+            logger.warn("pollOGatewayStatus: remote returned no status", { transactionId, ogId });
+            return resultFromCurrentState(
+                (detail as any).ogStatus || String(transaction.status || "unknown"),
+                "OGateway returned no status",
+            );
+        }
+
+        const synthetic = {
+            reference_business: remote?.reference_business || ogReference,
+            id: remote?.id || ogId,
+            status: remoteStatus,
+            provider_message: remote?.provider_message,
+            message: remote?.message,
+            ...remote,
+        };
+        await this.handleOGatewayWebhook(synthetic);
+        return resultFromCurrentState(remoteStatus);
+    };
+
     public async searchTransactions(
         searchTerm: string,
         filters: Partial<ITransaction> = {},

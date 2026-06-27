@@ -2,12 +2,14 @@ import BaseController from "../base-controller";
 import TransactionService from "../../../services/transaction.service";
 import ogatewayService from "../../../services/ogateway.service";
 import { Request, Response, NextFunction } from "express";
+import mongoose from "mongoose";
 import {
     validateCreateOGatewayPayout,
     validateCreateOGatewayCollection,
 } from "../../../validators/z-ogateway-transaction";
 import TransactionRateLimitMiddleware from "../../../middlewares/transaction-rate-limit.middleware";
-import { OGATEWAY_NETWORKS } from "../../../common/constant";
+import { DETAIL_TYPE, OGATEWAY_NETWORKS, TRANSACTION_STATUS } from "../../../common/constant";
+import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 
 /**
  * OGateway routes — Ghana instant send + receive only.
@@ -38,6 +40,10 @@ class OGatewayTransactionController extends BaseController {
             validateCreateOGatewayCollection,
             this.createCollection.bind(this),
         );
+
+        // Poll and sync a GHS payout/collection from OGateway. Used by the UI
+        // while webhooks remain the primary source of truth.
+        this.router.post("/poll-status/:transactionId", this.pollStatus.bind(this));
 
         // Static helpers used by the frontend.
         this.router.get("/networks", this.getNetworks.bind(this));
@@ -84,6 +90,63 @@ class OGatewayTransactionController extends BaseController {
                 },
                 201,
             );
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async pollStatus(req: Request, res: Response, next: NextFunction) {
+        try {
+            const user = res.locals.user;
+            const { transactionId } = req.params;
+
+            if (!mongoose.Types.ObjectId.isValid(transactionId)) {
+                return next(errorResponseMessage.createError(
+                    400,
+                    "Invalid transaction id",
+                    ErrorSeverity.MEDIUM,
+                ));
+            }
+
+            const transaction = await this.transactionService.findById(transactionId);
+            if (!transaction) {
+                return next(errorResponseMessage.resourceNotFound("Transaction"));
+            }
+
+            const ownerId = String((transaction.user as any)?._id || transaction.user);
+            if (ownerId !== String(user._id)) {
+                return next(errorResponseMessage.createError(
+                    403,
+                    "You are not allowed to poll this transaction",
+                    ErrorSeverity.HIGH,
+                ));
+            }
+
+            if (transaction.detailType !== DETAIL_TYPE.OGATEWAY) {
+                return next(errorResponseMessage.createError(
+                    400,
+                    "Not an OGateway transaction",
+                    ErrorSeverity.MEDIUM,
+                ));
+            }
+
+            const finalStatuses = [TRANSACTION_STATUS.COMPLETED, TRANSACTION_STATUS.FAILED];
+            if (finalStatuses.includes(transaction.status as any)) {
+                const detail = await this.transactionService.transactionDetailsService.findOne({
+                    transactionId: transaction._id,
+                });
+                return this.sendSuccess(res, {
+                    transaction: {
+                        ...transaction.toObject(),
+                        details: detail ? detail.toObject() : {},
+                    },
+                    ogStatus: detail?.ogStatus || transaction.status,
+                    message: "Transaction is already final.",
+                });
+            }
+
+            const result = await this.transactionService.pollOGatewayStatus(transactionId);
+            return this.sendSuccess(res, result);
         } catch (error) {
             return next(error);
         }

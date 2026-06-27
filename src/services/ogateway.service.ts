@@ -37,13 +37,6 @@ class OGatewayService {
         return { Authorization: config.OGATEWAY_API_KEY };
     }
 
-    /** Test keys (`test_…`) simulate responses; OGateway's sandbox rejects a
-     *  real `accountNumber` on disbursements ("accountNumber not allowed in
-     *  test"), so we strip it in test mode only. Live keys are unaffected. */
-    private isTestMode(): boolean {
-        return (config.OGATEWAY_API_KEY || "").startsWith("test_");
-    }
-
     private async post<T = any>(path: string, body: any, retries = 2): Promise<T> {
         let lastError: any;
         for (let attempt = 0; attempt <= retries; attempt++) {
@@ -136,11 +129,9 @@ class OGatewayService {
         };
         callbackURL?: string;
     }): Promise<any> {
-        const recipient: any = { ...params.recipient };
-        if (this.isTestMode()) delete recipient.accountNumber;
         const body = {
             reference: params.reference,
-            recipients: [recipient],
+            recipients: [params.recipient],
             callbackURL: params.callbackURL || config.OGATEWAY_CALLBACK_URL || undefined,
         };
         const data = await this.post("/disbursements/mobilemoney", body);
@@ -170,12 +161,10 @@ class OGatewayService {
         };
         callbackURL?: string;
     }): Promise<any> {
-        const recipient: any = { ...params.recipient };
-        if (this.isTestMode()) delete recipient.accountNumber;
         const body = {
             reference: params.reference,
             senderName: params.senderName,
-            recipients: [recipient],
+            recipients: [params.recipient],
             callbackURL: params.callbackURL || config.OGATEWAY_CALLBACK_URL || undefined,
         };
         const data = await this.post("/disbursements/bank", body);
@@ -212,6 +201,17 @@ class OGatewayService {
             }
             throw error;
         }
+    }
+
+    /**
+     * Fetch the authoritative status of a previously-created OGateway
+     * payment (disbursement or collection) by its OGateway-assigned `id`
+     * (the UUID returned in the create response, stored as `ogId` on the
+     * detail). Used by the stale-transaction sweeper to recover from
+     * missed webhooks. Endpoint: `GET /payments/{id}`.
+     */
+    public async getTransactionStatus(ogId: string): Promise<any> {
+        return this.get(`/payments/${ogId}`);
     }
 
     /**
