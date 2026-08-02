@@ -42,6 +42,22 @@ export const TransactionSchema = new Schema<ITransaction>(
         },
 
         /**
+         * Opaque token backing the public receipt-verification page.
+         *
+         * Deliberately NOT the reference — references are sequential and
+         * would let anyone enumerate other users' transfers. Generated
+         * lazily the first time a receipt is requested.
+         * @type {string}
+         */
+        receiptToken: {
+            type: String,
+            unique: true,
+            sparse: true,
+            trim: true,
+            index: true,
+        },
+
+        /**
          * Transaction amount
          * @type {number}
          * @required

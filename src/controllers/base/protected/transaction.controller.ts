@@ -10,6 +10,7 @@ import TransactionMiddleware from "../../../middlewares/transaction.middleware";
 import TransactionRateLimitMiddleware from "../../../middlewares/transaction-rate-limit.middleware";
 import ReceiptFileValidationMiddleware from "../../../middlewares/receipt-file-validation.middleware";
 import {MulterMiddleware} from "../../../middlewares/multer.middleware";
+import receiptService from "../../../services/receipt.service";
 
 class TransactionController extends BaseController {
 
@@ -22,6 +23,10 @@ class TransactionController extends BaseController {
     }
 
     protected setupRoutes() {
+        // Mint (or fetch) the opaque token that backs this transaction's
+        // public receipt verification page. Owner-only; see receipt.service.
+        this.router.post("/:id/receipt-token", this.getReceiptToken.bind(this));
+
         // Route to create alipay transaction
         this.router.post("/alipay", MulterMiddleware.single('alipayQrCode'), MulterMiddleware.handleError, TransactionRateLimitMiddleware.checkTransactionRateLimit, validateCreateAlipayTransaction, this.createAlipayTransaction.bind(this));
 
@@ -51,6 +56,20 @@ class TransactionController extends BaseController {
 
         // Route for admin to upload payment receipt for bank transfer
         this.router.patch("/bank-transfer/admin-receipt/:id", RoleMiddleware.isAdmin, MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, this.uploadAdminPaymentReceipt.bind(this));
+    }
+
+    /**
+     * Owner-only. Returns the stable receipt token so the client can embed
+     * a verification link/QR in the generated receipt image.
+     */
+    private async getReceiptToken(req: Request, res: Response, next: NextFunction) {
+        try {
+            const user = res.locals.user;
+            const token = await receiptService.getOrCreateToken(req.params.id, String(user._id));
+            return this.sendSuccess(res, { token });
+        } catch (error) {
+            return next(error);
+        }
     }
 
     private async createAlipayTransaction(req: Request, res: Response, next: NextFunction) {

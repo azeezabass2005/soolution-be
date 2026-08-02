@@ -181,6 +181,8 @@ export interface ITag extends Document {
 export interface ITransaction extends Document {
     user: Schema.Types.ObjectId | string | IUser;
     reference: string;
+    /** Opaque, non-enumerable token backing the public receipt verify page. */
+    receiptToken?: string;
     amount: number;
     currency: string;
     detailType: DetailType;
