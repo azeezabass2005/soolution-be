@@ -387,6 +387,7 @@ class KycApplicationService extends DBService<IKycApplication> {
             try {
                 await this.notificationService.emailService.sendNotificationEmail(email, {
                     title: `📋 New ${label} documents ${wasResubmission ? "resubmitted" : "submitted"}`,
+                    eyebrow: "Admin · Verification",
                     name: "Admin",
                     message: `<strong>${escapeHtml(name)}</strong> (${escapeHtml(user.email)}) has ${wasResubmission ? "resubmitted" : "submitted"} their ${label} application and uploaded ${application.documents.length} document(s). Please review it.`,
                     actionUrl: `${config.FRONTEND_URL}/dashboard/admin/kyc/${application.id}`,
@@ -400,7 +401,8 @@ class KycApplicationService extends DBService<IKycApplication> {
         try {
             await this.notificationService.emailService.sendNotificationEmail(user.email, {
                 title: `✅ ${label} documents received`,
-                name: escapeHtml(user.firstName),
+                eyebrow: "Verification",
+                name: user.firstName,
                 message: `Thank you, we've received your ${label} documents${application.type === "business" ? ` for <strong>${escapeHtml(name)}</strong>` : ""} and will update you within 72 hours.`,
                 actionUrl: `${config.FRONTEND_URL}/kyc`,
                 buttonText: "View Status",
@@ -505,7 +507,8 @@ class KycApplicationService extends DBService<IKycApplication> {
         try {
             await this.notificationService.emailService.sendNotificationEmail(user.email, {
                 title: approved ? `🎉 Your ${label} has been approved` : `Action needed on your ${label} application`,
-                name: escapeHtml(user.firstName),
+                eyebrow: "Verification",
+                name: user.firstName,
                 message: approved
                     ? `Good news! Your ${label} application has been reviewed and approved.`
                     : `We reviewed your ${label} application and need a few changes before we can approve it. You can update your details and resubmit.`,
