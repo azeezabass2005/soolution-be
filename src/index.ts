@@ -1,3 +1,4 @@
+import './polyfills';
 import logger from './utils/logger.utils';
 import App from './app';
 

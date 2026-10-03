@@ -4,6 +4,7 @@ import {
     PUBLICATION_STATUS, TRANSACTION_STATUS, TRANSACTION_TYPE, DETAIL_TYPE, ALIPAY_PLATFORM,
     WALLET_STATUS, WALLET_TRANSACTION_TYPE, WALLET_TRANSACTION_STATUS
 } from "../common/constant";
+import {KycStatus, KycStep, KycType} from "../common/kyc.constants";
 
 export type UserStatus = (typeof USER_STATUS)[keyof typeof USER_STATUS];
 
@@ -372,4 +373,41 @@ export interface IVerification extends Document {
     jobId?: string;
     status?: 'pending' | 'failed' | 'passed';
     reason?: string;
+}
+
+export interface IKycDocument {
+    slot: string;
+    key: string;
+    originalName: string;
+    mimeType: string;
+    size: number;
+    issueDate?: Date;
+    uploadedAt: Date;
+}
+
+export interface IKycReviewEvent {
+    status: KycStatus;
+    note?: string;
+    by?: Schema.Types.ObjectId | string;
+    at: Date;
+}
+
+export interface IKycApplication extends Document {
+    user: Schema.Types.ObjectId | string | IUser;
+    type: KycType;
+    status: KycStatus;
+    /** Name shown to admins: business name or the individual's full name */
+    displayName?: string;
+    completedSteps: KycStep[];
+    general?: Record<string, any>;
+    personal?: Record<string, any>;
+    ubos: Record<string, any>[];
+    directors: Record<string, any>[];
+    questionnaire?: Record<string, any>;
+    documents: IKycDocument[];
+    rejectionReason?: string;
+    submittedAt?: Date;
+    reviewedAt?: Date;
+    reviewedBy?: Schema.Types.ObjectId | string;
+    history: IKycReviewEvent[];
 }

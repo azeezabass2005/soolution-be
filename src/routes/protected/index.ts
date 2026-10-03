@@ -17,6 +17,7 @@ import adminReconciliationController from "../../controllers/base/protected/admi
 import adminWebhooksController from "../../controllers/base/protected/admin/webhooks.controller";
 import adminSuspenseController from "../../controllers/base/protected/admin/suspense.controller";
 import adminPlatformSettingsController from "../../controllers/base/protected/admin/platform-settings.controller";
+import kycController from "../../controllers/base/protected/kyc.controller";
 
 const path = "/protected";
 const protectedRouter = Router();
@@ -49,5 +50,6 @@ protectedRouter.use(`${path}/admin/reconciliation`, adminReconciliationControlle
 protectedRouter.use(`${path}/admin/webhooks`, adminWebhooksController);
 protectedRouter.use(`${path}/admin/suspense`, adminSuspenseController);
 protectedRouter.use(`${path}/admin/platform-settings`, adminPlatformSettingsController);
+protectedRouter.use(`${path}/kyc`, kycController);
 
 export default protectedRouter;

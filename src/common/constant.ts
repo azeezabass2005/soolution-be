@@ -19,6 +19,7 @@ export const MODEL_NAME = {
     RECONCILIATION_REPORT: "ReconciliationReportModel",
     LEDGER_ALERT: "LedgerAlertModel",
     PLATFORM_SETTINGS: "PlatformSettingsModel",
+    KYC_APPLICATION: "KycApplicationModel",
 }
 
 // ===================== LEDGER / CHART OF ACCOUNTS =====================
