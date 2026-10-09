@@ -1,7 +1,7 @@
 import {NextFunction, Request, Response} from "express";
 import BaseController from "../base-controller";
 import HashService from "../../../utils/hash.utils";
-import TokenBuilder from "../../../utils/token.utils";
+import TokenBuilder, {TokenUtils} from "../../../utils/token.utils";
 import errorResponseMessage, {ErrorResponseCode, ErrorSeverity} from "../../../common/messages/error-response-message";
 import {IRefreshTokenPayload, TokenType} from "../../../utils/interface";
 import {ROLE_MAP} from "../../../common/constant";
@@ -183,64 +183,12 @@ class AuthController extends BaseController {
                 throw new Error("Failed to complete user registration");
             }
 
-            // Generate tokens for automatic login
-            const accessToken = this.tokenBuilder.build().createToken(completeUser, {
-                type: TokenType.ACCESS,
-                expiresIn: '1h'
-            });
-
-            const refreshToken = this.tokenBuilder.build().createToken(completeUser, {
-                type: TokenType.REFRESH,
-                expiresIn: '7d'
-            });
+            // Sign the new user in (a persistent session, as before)
+            const { accessToken, refreshToken } = await this.issueSession(req, res, completeUser, true);
 
             // Update last login timestamp
             await this.userService.updateById(completeUser._id as string, {
                 lastLogin: new Date()
-            });
-
-            // Save refresh token to database
-            const decodedRefresh = await this.tokenBuilder
-                .setToken(refreshToken)
-                .build()
-                .verifyToken();
-
-            if(decodedRefresh && decodedRefresh.type === TokenType.REFRESH) {
-                const refreshPayload = decodedRefresh.data as IRefreshTokenPayload;
-                await this.refreshTokenService.saveRefreshToken(
-                    completeUser._id as string,
-                    refreshPayload.tokenId,
-                    req.headers['user-agent'],
-                    req.ip
-                );
-            }
-
-            // Set tokens as httpOnly cookies
-            res.cookie('accessToken', accessToken, {
-                httpOnly: true,  // Secure, not accessible via JS
-                secure: config.NODE_ENV === 'production',
-                sameSite: 'lax',
-                path: "/",
-                maxAge: 60 * 60 * 1000,  // 1 hour
-                domain: config.COOKIE_DOMAIN,
-            });
-
-            res.cookie('refreshToken', refreshToken, {
-                httpOnly: true,
-                secure: config.NODE_ENV === 'production',
-                sameSite: 'lax',
-                path: "/",
-                maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                domain: config.COOKIE_DOMAIN,
-            });
-
-            res.cookie('role', Object.entries(ROLE_MAP).find(([_, v]) => v === completeUser.role)?.[0], {
-                httpOnly: false, // Allow client-side access (if needed)
-                secure: config.NODE_ENV === 'production',
-                sameSite: 'lax',
-                path: "/",
-                maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                domain: config.COOKIE_DOMAIN,
             });
 
             this.sendSuccess(res, {
@@ -265,6 +213,8 @@ class AuthController extends BaseController {
     private async login (req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const { email, password } = req.body;
+            // "Keep me signed in" — otherwise the session ends when the browser closes
+            const rememberMe = req.body?.rememberMe === true;
 
             if (!email || !password) {
                 return next(errorResponseMessage.payloadIncorrect("Email and password are required"));
@@ -302,16 +252,7 @@ class AuthController extends BaseController {
             //     return;
             // }
 
-            // Generate tokens
-            const accessToken = this.tokenBuilder.build().createToken(user, {
-                type: TokenType.ACCESS,
-                expiresIn: '1h'
-            });
-
-            const refreshToken = this.tokenBuilder.build().createToken(user, {
-                type: TokenType.REFRESH,
-                expiresIn: '7d'
-            });
+            const { accessToken, refreshToken } = await this.issueSession(req, res, user, rememberMe);
 
             // Update last login timestamp
             await this.userService.updateById(user._id as string, {
@@ -347,52 +288,6 @@ class AuthController extends BaseController {
                 });
                 // Don't fail login if email fails - authentication is already successful
             }
-
-            // Save refresh token to database
-            const decodedRefresh = await this.tokenBuilder
-                .setToken(refreshToken)
-                .build()
-                .verifyToken();
-
-            if(decodedRefresh && decodedRefresh.type === TokenType.REFRESH) {
-                const refreshPayload = decodedRefresh.data as IRefreshTokenPayload;
-                await this.refreshTokenService.saveRefreshToken(
-                    user._id as string,
-                    refreshPayload.tokenId,
-                    req.headers['user-agent'],
-                    req.ip
-                );
-            }
-
-            res.cookie('accessToken', accessToken, {
-                httpOnly: true,  // Secure, not accessible via JS
-                secure: config.NODE_ENV === 'production',
-                // secure: true,
-                sameSite: 'lax',
-                path: "/",
-                maxAge: 60 * 60 * 1000,  // 1 hour
-                domain: config.COOKIE_DOMAIN,
-            });
-
-            res.cookie('refreshToken', refreshToken, {
-                httpOnly: true,
-                secure: config.NODE_ENV === 'production',
-                // secure: true,
-                sameSite: 'lax',
-                path: "/",
-                maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                domain: config.COOKIE_DOMAIN,
-            });
-
-            res.cookie('role', Object.entries(ROLE_MAP).find(([_, v]) => v === user.role)?.[0], {
-                httpOnly: false, // Allow client-side access (if needed)
-                secure: config.NODE_ENV === 'production',
-                // secure: true,
-                sameSite: 'lax',
-                path: "/",
-                maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                domain: config.COOKIE_DOMAIN,
-            });
 
             this.sendSuccess(res, {
                 accessToken,
@@ -597,52 +492,9 @@ class AuthController extends BaseController {
             // Revoke current refresh token
             await this.refreshTokenService.revokeToken(refreshPayload.tokenId);
 
-            // Generate new tokens
-            const tokenInstance = this.tokenBuilder.build();
-
-            const newAccessToken = tokenInstance.createToken(user, {
-                type: TokenType.ACCESS,
-                expiresIn: '15m'
-            });
-
-            const newRefreshToken = this.tokenBuilder.build().createToken(user, {
-                type: TokenType.REFRESH,
-                expiresIn: '7d'
-            });
-
-            // Save new refresh token
-            const newDecodedRefresh = await this.tokenBuilder
-                .setToken(newRefreshToken)
-                .build()
-                .verifyToken();
-
-
-            await this.refreshTokenService.saveRefreshToken(
-                user._id as string,
-                (newDecodedRefresh.data as IRefreshTokenPayload).tokenId,
-                req.headers['user-agent'],
-                req.ip
-            );
-
-            res.cookie('accessToken', newAccessToken, {
-                httpOnly: true,  // Secure, not accessible via JS
-                secure: config.NODE_ENV === 'production',
-                // secure: true,
-                sameSite: 'lax',
-                path: "/",
-                maxAge: 60 * 60 * 1000,  // 1 hour
-                domain: config.COOKIE_DOMAIN,
-            });
-
-            res.cookie('refreshToken', newRefreshToken, {
-                httpOnly: true,
-                secure: config.NODE_ENV === 'production',
-                // secure: true,
-                sameSite: 'lax',
-                path: "/",
-                maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-                domain: config.COOKIE_DOMAIN,
-            });
+            // Re-issue with the policy chosen at login (tokens from before the option existed stay persistent)
+            const { accessToken: newAccessToken, refreshToken: newRefreshToken } =
+                await this.issueSession(req, res, user, refreshPayload.rememberMe !== false);
 
             this.sendSuccess(res, {
                 accessToken: newAccessToken,
@@ -651,6 +503,60 @@ class AuthController extends BaseController {
         } catch (error) {
             return next(error);
         }
+    }
+
+    /**
+     * Issues an access + refresh token pair, stores the refresh token and sets the auth cookies.
+     *
+     * With `rememberMe` the session survives closing the browser: persistent cookies and a
+     * 30-day refresh token (renewed on each refresh). Without it, the cookies are session
+     * cookies (no expiry, so the browser drops them on close) and the refresh token is capped
+     * at 1 day server-side. The choice is stored in the refresh token so refreshes keep it.
+     * @private
+     */
+    private async issueSession(req: Request, res: Response, user: IUser, rememberMe: boolean) {
+        const refreshDays = rememberMe ? 30 : 1;
+        const accessToken = this.tokenBuilder.build().createToken(user, {
+            type: TokenType.ACCESS,
+            expiresIn: '1h'
+        });
+        const refreshToken = this.tokenBuilder.build().createToken(user, {
+            type: TokenType.REFRESH,
+            expiresIn: `${refreshDays}d`,
+            rememberMe,
+        });
+
+        const decodedRefresh = await this.tokenBuilder.setToken(refreshToken).build().verifyToken();
+        if (decodedRefresh && decodedRefresh.type === TokenType.REFRESH) {
+            await this.refreshTokenService.saveRefreshToken(
+                user._id as string,
+                (decodedRefresh.data as IRefreshTokenPayload).tokenId,
+                req.headers['user-agent'],
+                req.ip,
+                undefined,
+                TokenUtils.getRefreshTokenExpiry(refreshDays)
+            );
+        }
+
+        const base = {
+            secure: config.NODE_ENV === 'production',
+            sameSite: 'lax' as const,
+            path: "/",
+            domain: config.COOKIE_DOMAIN,
+        };
+        // Omitting maxAge makes a session cookie
+        const lifetime = (ms: number) => (rememberMe ? { maxAge: ms } : {});
+        const refreshMs = refreshDays * 24 * 60 * 60 * 1000;
+
+        res.cookie('accessToken', accessToken, { ...base, httpOnly: true, ...lifetime(60 * 60 * 1000) });
+        res.cookie('refreshToken', refreshToken, { ...base, httpOnly: true, ...lifetime(refreshMs) });
+        res.cookie('role', Object.entries(ROLE_MAP).find(([_, v]) => v === user.role)?.[0], {
+            ...base,
+            httpOnly: false, // Readable client-side
+            ...lifetime(refreshMs),
+        });
+
+        return { accessToken, refreshToken };
     }
 
     /**

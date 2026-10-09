@@ -14,12 +14,13 @@ class RefreshTokenService extends DBService<IRefreshToken> {
         tokenId: string,
         userAgent?: string,
         ipAddress?: string,
-        session?: ClientSession
+        session?: ClientSession,
+        expiresAt: Date = TokenUtils.getRefreshTokenExpiry()
     ): Promise<IRefreshToken> {
         return this.save({
             userId: (userId as unknown) as Schema.Types.ObjectId,
             token: tokenId,
-            expiresAt: TokenUtils.getRefreshTokenExpiry(),
+            expiresAt,
             userAgent,
             ipAddress,
             isRevoked: false

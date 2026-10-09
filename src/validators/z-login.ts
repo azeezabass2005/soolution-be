@@ -12,7 +12,8 @@ const ZLogin = z.object({
             const emailRegex = /^[a-zA-Z0-9._+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/;
             return emailRegex.test(email);
         }, "Invalid email format"),
-    password: z.string().optional()
+    password: z.string().optional(),
+    rememberMe: z.boolean().optional(),
 })
 
 const validate = (req: Request, res: Response, next: NextFunction) => {

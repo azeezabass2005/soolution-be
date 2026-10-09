@@ -142,6 +142,18 @@ const uboList = (min: number) => z.array(ZUbo)
     .refine(uniqueIds, "Duplicate beneficial owner")
     .refine((ubos) => ubos.reduce((sum, ubo) => sum + ubo.ownershipPercentage, 0) <= 100, "Total ownership cannot exceed 100%");
 
+/** Allowed rounding gap when shares don't divide evenly (e.g. 33.33% × 3) */
+const OWNERSHIP_TOLERANCE = 0.05;
+
+const totalOwnership = (ubos: { ownershipPercentage: number }[]) =>
+    Math.round(ubos.reduce((sum, ubo) => sum + ubo.ownershipPercentage, 0) * 100) / 100;
+
+/** Completing the UBO step: every shareholder must be listed, so ownership adds up to 100% */
+const uboStepComplete = uboList(1).refine(
+    (ubos) => Math.abs(totalOwnership(ubos) - 100) <= OWNERSHIP_TOLERANCE,
+    (ubos) => ({ message: `Ownership adds up to ${totalOwnership(ubos)}%. List every shareholder so the total is 100%.` }),
+);
+
 const directorList = (min: number) => z.array(ZDirector)
     .min(min, "Add at least one director")
     .max(20, "You can add at most 20 directors")
@@ -173,7 +185,7 @@ export const getStepSchema = (type: KycType, step: KycStep, complete: boolean): 
         case KYC_STEP.PERSONAL:
             return type === "individual" ? (complete ? ZPersonal : ZDraftForm) : null;
         case KYC_STEP.UBOS:
-            return type === "business" ? uboList(complete ? 1 : 0) : null;
+            return type === "business" ? (complete ? uboStepComplete : uboList(0)) : null;
         case KYC_STEP.DIRECTORS:
             return type === "business" ? directorList(complete ? 1 : 0) : null;
         case KYC_STEP.QUESTIONNAIRE:

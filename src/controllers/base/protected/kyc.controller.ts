@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import BaseController from "../base-controller";
 import KycApplicationService from "../../../services/kyc-application.service";
+import kycLimitService from "../../../services/kyc-limit.service";
 import { MulterMiddleware } from "../../../middlewares/multer.middleware";
 import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 import { ROLE_MAP } from "../../../common/constant";
@@ -32,6 +33,8 @@ class KycController extends BaseController {
         this.router.post("/me/documents/:slot", MulterMiddleware.single("file"), MulterMiddleware.handleError, this.uploadDocument.bind(this));
         this.router.delete("/me/documents/:slot", this.removeDocument.bind(this));
         this.router.post("/me/submit", this.submit.bind(this));
+        // Whether an amount needs KYC for the signed-in user (send/receive forms pre-check)
+        this.router.get("/limit", this.checkLimit.bind(this));
 
         // Admin routes
         this.router.get("/", this.requireAdmin, this.listApplications.bind(this));
@@ -112,6 +115,24 @@ class KycController extends BaseController {
                 message: "Application submitted successfully",
                 application: await this.kycService.toClient(application),
             });
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    private async checkLimit(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const amount = Number(req.query.amount);
+            const currency = typeof req.query.currency === "string" ? req.query.currency : "";
+            if (!isFinite(amount) || amount <= 0 || !/^[A-Za-z]{3,4}$/.test(currency)) {
+                return next(errorResponseMessage.payloadIncorrect("A positive amount and a currency code are required"));
+            }
+            // Optional second side of the transaction (e.g. the RMB amount alongside its NGN cost)
+            const altAmount = Number(req.query.altAmount);
+            const altCurrency = typeof req.query.altCurrency === "string" ? req.query.altCurrency : "";
+            const amounts = [{ amount, currency }];
+            if (isFinite(altAmount) && altAmount > 0 && /^[A-Za-z]{3,4}$/.test(altCurrency)) amounts.push({ amount: altAmount, currency: altCurrency });
+            this.sendSuccess(res, await kycLimitService.check(res.locals.userId, amounts));
         } catch (error) {
             next(error);
         }

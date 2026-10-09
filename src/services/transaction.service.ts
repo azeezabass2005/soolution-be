@@ -20,6 +20,7 @@ import AuditLogService from "./audit-log.service";
 import { validateTransactionAmount, getTransactionLimits } from "../config/transaction-limits.config";
 import yellowCardService from "./yellowcard.service";
 import ogatewayService from "./ogateway.service";
+import kycLimitService from "./kyc-limit.service";
 import platformSettingsService from "./platform-settings.service";
 import {
     YELLOWCARD_STATUS,
@@ -149,6 +150,12 @@ class TransactionService extends DBService<ITransaction> {
             );
         }
 
+        // Unverified users may transact below the KYC limit
+        await kycLimitService.assertAllowed(user, [
+            { amount: calculatedFromAmount, currency: fromCurrency },
+            { amount, currency: toCurrency },
+        ]);
+
         // Handle idempotency key if provided
         if (idempotencyKey) {
             const idempotencyResult = await this.idempotencyService.validateKey(idempotencyKey, user);
@@ -275,6 +282,9 @@ class TransactionService extends DBService<ITransaction> {
                 ErrorSeverity.HIGH
             );
         }
+
+        // Unverified users may transact below the KYC limit (valued from the source side; RMB isn't quoted in USD)
+        await kycLimitService.assertAllowed(user, [{ amount: ngnEquivalent, currency: fromCurrency }]);
 
         // Handle idempotency key if provided
         if (idempotencyKey) {
@@ -467,7 +477,12 @@ class TransactionService extends DBService<ITransaction> {
 
             // Validate status transition before updating
             const oldStatus = transaction.status;
-            const newStatus = isKycDone ? TRANSACTION_STATUS.AWAITING_CONFIRMATION : TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION;
+            // Only transactions at or above the KYC limit wait for verification
+            const kycCleared = isKycDone || !(await kycLimitService.check(String(transaction.user), [
+                { amount: existingDetails?.fromAmount ?? updateFields.fromAmount, currency: transaction.fromCurrency },
+                { amount: transaction.amount, currency: transaction.currency },
+            ])).requiresKyc;
+            const newStatus = kycCleared ? TRANSACTION_STATUS.AWAITING_CONFIRMATION : TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION;
             transactionStateMachine.validateTransition(oldStatus, newStatus);
 
             // Update status within transaction
@@ -566,6 +581,8 @@ class TransactionService extends DBService<ITransaction> {
                 logger.error('Failed to send admin notifications, but receipt is uploaded', { error, transactionId });
                 // Don't fail the whole operation if notifications fail
             }
+
+            return { status: newStatus };
         } catch (error) {
             // Abort transaction on error
             await session.abortTransaction();
@@ -797,6 +814,12 @@ class TransactionService extends DBService<ITransaction> {
 
         const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('yellowcard', ngnAmount);
         const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
+
+        // Unverified users may transact below the KYC limit
+        await kycLimitService.assertAllowed(userId, [
+            { amount: totalDebit, currency: fromCurrency },
+            { amount, currency: toCurrency },
+        ]);
         const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
 
         // Check wallet exists and has sufficient balance
@@ -1449,6 +1472,13 @@ class TransactionService extends DBService<ITransaction> {
             throw errorResponseMessage.createError(400, `Could not retrieve the ${fromCurrency}→${toCurrency} rate from YellowCard. Please try again.`, ErrorSeverity.HIGH);
         }
         const grossNgn = Math.round(amount * userRate * 100) / 100;
+
+        // Unverified users may receive below the KYC limit
+        await kycLimitService.assertAllowed(userId, [
+            { amount, currency: fromCurrency },
+            { amount: grossNgn, currency: toCurrency },
+        ]);
+
         const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('yellowcard', grossNgn);
         const ngnAmount = Math.round((grossNgn - feeAmount) * 100) / 100;
         if (ngnAmount <= 0) {
@@ -2138,6 +2168,12 @@ class TransactionService extends DBService<ITransaction> {
         // still receives the full GHS amount they were promised.
         const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('ogateway', ngnAmount);
         const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
+
+        // Unverified users may transact below the KYC limit
+        await kycLimitService.assertAllowed(userId, [
+            { amount: totalDebit, currency: 'NGN' },
+            { amount, currency: 'GHS' },
+        ]);
         const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
 
         const wallet = await this.walletService.findOne({ user: userId });
@@ -2433,6 +2469,12 @@ class TransactionService extends DBService<ITransaction> {
         if (!grossNgn || grossNgn <= 0) {
             throw errorResponseMessage.createError(400, "Could not compute NGN amount from the live OGateway rate", ErrorSeverity.HIGH);
         }
+
+        // Unverified users may receive below the KYC limit
+        await kycLimitService.assertAllowed(userId, [
+            { amount, currency: 'GHS' },
+            { amount: grossNgn, currency: 'NGN' },
+        ]);
 
         // Fee is netted out of the credit so the user receives `gross − fee`.
         const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('ogateway', grossNgn);

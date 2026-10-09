@@ -26,6 +26,8 @@ import NotificationService from "../utils/notification.utils";
 import UserService from "./user.service";
 import config from "../config/env.config";
 import logger from "../utils/logger.utils";
+import Transaction from "../models/transaction.model";
+import { TRANSACTION_STATUS } from "../common/constant";
 
 /** Signed document links are short-lived because the files hold identity documents */
 const DOCUMENT_URL_TTL_SECONDS = 60 * 60;
@@ -94,6 +96,13 @@ class KycApplicationService extends DBService<IKycApplication> {
             }));
 
         return [...definitions, ...uboDefinitions];
+    }
+
+    /** Source-of-funds slots still needed for these owners */
+    private sourceOfFundsSlots(ubos: Record<string, any>[]): Set<string> {
+        return new Set(
+            ubos.filter((ubo) => ubo.kind === "individual" && ubo.isPep).map((ubo) => `${UBO_SOURCE_OF_FUNDS_PREFIX}${ubo.id}`)
+        );
     }
 
     private getMissingDocuments(application: IKycApplication): KycDocumentDefinition[] {
@@ -242,13 +251,9 @@ class KycApplicationService extends DBService<IKycApplication> {
         if (complete) completedSteps.add(step); else completedSteps.delete(step);
         update.completedSteps = KYC_STEPS[application.type].filter((s) => completedSteps.has(s));
 
-        // Remove source-of-funds files for UBOs that were deleted or are no longer PEPs
+        // Remove source-of-funds files for owners that were deleted or are no longer PEPs
         if (step === KYC_STEP.UBOS) {
-            const stillRequired = new Set(
-                (parsed.data as any[])
-                    .filter((ubo) => ubo.kind === "individual" && ubo.isPep)
-                    .map((ubo) => `${UBO_SOURCE_OF_FUNDS_PREFIX}${ubo.id}`)
-            );
+            const stillRequired = this.sourceOfFundsSlots(update.ubos);
             const [keep, drop] = this.partitionDocuments(application.documents, (document) =>
                 !document.slot.startsWith(UBO_SOURCE_OF_FUNDS_PREFIX) || stillRequired.has(document.slot));
             if (drop.length) {
@@ -492,6 +497,11 @@ class KycApplicationService extends DBService<IKycApplication> {
         const applicant = application.user as IUser;
         if (status === KYC_STATUS.APPROVED) {
             await this.userService.updateById(String(applicant._id), { isKYCDone: true, isKYCRejected: false });
+            // Release transactions that were waiting on verification (as a Smile ID pass does)
+            await Transaction.updateMany(
+                { user: applicant._id, status: TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION },
+                { $set: { status: TRANSACTION_STATUS.AWAITING_CONFIRMATION } },
+            );
         }
 
         if (status !== KYC_STATUS.UNDER_REVIEW) {

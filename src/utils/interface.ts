@@ -32,8 +32,12 @@ export enum TokenType {
 export interface ITokenOptions {
     type?: TokenType;
     expiresIn?: string;
+    /** Refresh tokens only: whether the session should survive closing the browser */
+    rememberMe?: boolean;
 }
 
 export interface IRefreshTokenPayload extends ITokenPayload {
     tokenId: string;
+    /** Absent on tokens issued before "keep me signed in" existed; treated as true */
+    rememberMe?: boolean;
 }

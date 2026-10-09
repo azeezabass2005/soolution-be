@@ -233,6 +233,7 @@ export const KYC_DOCUMENTS: Record<KycType, KycDocumentDefinition[]> = {
 /** Document slot for a PEP UBO's source-of-funds evidence */
 export const UBO_SOURCE_OF_FUNDS_PREFIX = "ubo_source_of_funds_";
 
+
 export const KYC_DOCUMENT_UPLOAD = {
     maxFileSize: 10 * 1024 * 1024, // 10MB
     allowedMimeTypes: ["image/jpeg", "image/png", "image/webp", "application/pdf"],

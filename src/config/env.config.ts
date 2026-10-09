@@ -61,6 +61,8 @@ interface EnvConfig {
     ADMIN_EMAILS: string;
     ADMIN_PHONE_NUMBERS: string;
     FRONTEND_URL: string;
+    /** Transactions below this USD value don't require KYC */
+    KYC_FREE_LIMIT_USD: number;
 
     /** KYC related environment variables  */
     SMILE_ID_PARTNER_ID: string;
@@ -161,6 +163,7 @@ const loadEnvConfig = (): EnvConfig => {
         ADMIN_EMAILS: process.env.ADMIN_EMAILS || 'azeezabass2005@gmail.com',
         ADMIN_PHONE_NUMBERS: process.env.ADMIN_PHONE_NUMBERS || "+2349160649124",
         FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
+        KYC_FREE_LIMIT_USD: Number(process.env.KYC_FREE_LIMIT_USD) > 0 ? Number(process.env.KYC_FREE_LIMIT_USD) : 5000,
         SMILE_ID_PARTNER_ID: process.env.SMILE_ID_PARTNER_ID || '',
         SMILE_ID_API_KEY: process.env.SMILE_ID_API_KEY || '',
         SMILE_ID_AUTH_TOKEN: process.env.SMILE_ID_AUTH_TOKEN || '',

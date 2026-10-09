@@ -42,8 +42,8 @@ export class TokenUtils {
         return this.generateRandomToken(32);
     }
 
-    static getRefreshTokenExpiry(): Date {
-        return this.addDaysToDate(7);
+    static getRefreshTokenExpiry(days: number = 7): Date {
+        return this.addDaysToDate(days);
     }
 }
 
@@ -74,7 +74,7 @@ class Token {
             expiresIn: '168h'
         }
     ): string {
-        const { type = TokenType.ACCESS, expiresIn = '1h' } = options;
+        const { type = TokenType.ACCESS, expiresIn = '1h', rememberMe } = options;
 
         const payload: ITokenPayload = {
             userId: user?._id as string,
@@ -87,7 +87,8 @@ class Token {
         if (type === TokenType.REFRESH) {
             const refreshPayload: IRefreshTokenPayload = {
                 ...payload,
-                tokenId: TokenUtils.generateRefreshTokenId()
+                tokenId: TokenUtils.generateRefreshTokenId(),
+                ...(rememberMe !== undefined ? { rememberMe } : {}),
             };
             return Jwt.sign(
                 {

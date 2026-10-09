@@ -134,17 +134,18 @@ class TransactionController extends BaseController {
                 next(errorResponseMessage.payloadIncorrect("Your payment receipt is required"));
                 return;
             }
-            await this.transactionService.uploadUserPaymentReceipt(
+            const { status } = await this.transactionService.uploadUserPaymentReceipt(
                 req.params.id!, 
                 req.file as Express.Multer.File, 
-                res.locals?.user?.isVerified,
+                res.locals?.user?.isKYCDone === true,
                 res.locals?.user?._id?.toString(),
                 req.ip,
                 req.headers['user-agent']
             );
 
             return this.sendSuccess(res, {
-                message: "Payment receipt uploaded successfully"
+                message: "Payment receipt uploaded successfully",
+                status
             })
 
         } catch (error: any) {
