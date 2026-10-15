@@ -1,6 +1,7 @@
 import { Schema, model, Model } from 'mongoose';
 import { IUser } from './interface';
 import { MODEL_NAME, ROLE_MAP } from '../common/constant';
+import { USER_TIER, USER_TIERS } from '../common/tier.constants';
 
 /**
  * Mongoose schema for User model
@@ -46,6 +47,28 @@ export const UserSchema = new Schema<IUser>(
          * @default false
          */
         isVerified: { type: Boolean, default: false },
+
+        /**
+         * Account tier: 1 Individual (default, no KYC), 2 Business, 3 Institution.
+         * Decides the daily transaction limit.
+         * @type {number}
+         * @default 1
+         */
+        tier: { type: Number, enum: USER_TIERS, default: USER_TIER.INDIVIDUAL, index: true },
+
+        /**
+         * Tier changes: approvals and admin overrides
+         */
+        tierHistory: {
+            type: [{
+                _id: false,
+                tier: { type: Number, enum: USER_TIERS, required: true },
+                reason: { type: String, required: true },
+                by: { type: Schema.Types.ObjectId, ref: MODEL_NAME.USER },
+                at: { type: Date, default: Date.now },
+            }],
+            default: undefined,
+        },
 
         /**
          * KYC verification status
@@ -126,10 +149,10 @@ export const UserSchema = new Schema<IUser>(
         /**
          * Purpose of account usage
          * @type {string}
-         * @enum ['business', 'spending']
+         * @enum ['business', 'personal', 'travel', 'investment', 'savings', 'others'] ('spending' on older accounts)
          * @optional
          */
-        purpose: { type: String, enum: ['business', 'spending'] },
+        purpose: { type: String, enum: ['business', 'personal', 'travel', 'investment', 'savings', 'others', 'spending'] },
 
         /**
          * Type of business if purpose is business
@@ -152,7 +175,7 @@ export const UserSchema = new Schema<IUser>(
          * @enum ['friends', 'ads', 'others']
          * @optional
          */
-        hearAboutUs: { type: String, enum: ['friends', 'ads', 'referrals', 'events', 'youtube', 'instagram', 'x-twitter', 'facebook', 'tiktok', 'google', 'others'] },
+        hearAboutUs: { type: String, enum: ['friends', 'ads', 'search-engines', 'social-media', 'referrals', 'events', 'youtube', 'instagram', 'x-twitter', 'facebook', 'tiktok', 'google', 'others'] },
 
         /**
          * Free-text specification when hearAboutUs is 'others'

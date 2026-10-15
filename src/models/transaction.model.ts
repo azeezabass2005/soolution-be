@@ -169,6 +169,8 @@ export const TransactionSchema = new Schema<ITransaction>(
         // rate was applied. Journal entries that span currencies must use this
         // locked rate, never the live rate table.
         lockedRate: { type: Number },
+        /** USD value at creation; counts towards the user's daily tier limit */
+        usdValue: { type: Number },
         lockedRateFromCurrency: { type: String, uppercase: true, trim: true },
         lockedRateToCurrency: { type: String, uppercase: true, trim: true },
         lockedRateAt: { type: Date },

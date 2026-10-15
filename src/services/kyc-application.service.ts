@@ -7,12 +7,14 @@ import errorResponseMessage, { ErrorResponseCode, ErrorSeverity } from "../commo
 import {
     KYC_ADMIN_TRANSITIONS,
     KYC_DOCUMENT_UPLOAD,
-    KYC_DOCUMENTS,
     KYC_EDITABLE_STATUSES,
+    KYC_MAX_TIER,
     KYC_QUESTIONS,
     KYC_STATUS,
     KYC_STEP,
-    KYC_STEPS,
+    KYC_TYPE,
+    getKycDocuments,
+    getKycSteps,
     KycDocumentDefinition,
     KycStatus,
     KycStep,
@@ -28,6 +30,8 @@ import config from "../config/env.config";
 import logger from "../utils/logger.utils";
 import Transaction from "../models/transaction.model";
 import { TRANSACTION_STATUS } from "../common/constant";
+import { TIER_NAME, USER_TIER, UserTier, isUserTier } from "../common/tier.constants";
+import platformSettingsService from "./platform-settings.service";
 
 /** Signed document links are short-lived because the files hold identity documents */
 const DOCUMENT_URL_TTL_SECONDS = 60 * 60;
@@ -59,6 +63,18 @@ const validationError = (error: z.ZodError) => {
 const badRequest = (message: string) =>
     errorResponseMessage.createError(ErrorResponseCode.BAD_REQUEST, message, ErrorSeverity.LOW);
 
+/** Tier an application is for (applications from before tiers: full KYB = 3, KYC = 2) */
+export const applicationTier = (application: Pick<IKycApplication, "type" | "tier">): UserTier =>
+    isUserTier(application.tier) && application.tier > USER_TIER.INDIVIDUAL
+        ? application.tier
+        : application.type === "business" ? USER_TIER.INSTITUTION : USER_TIER.BUSINESS;
+
+const stepsOf = (application: Pick<IKycApplication, "type" | "tier">) => getKycSteps(application.type, applicationTier(application));
+
+const userTier = (user: Pick<IUser, "tier">): UserTier => isUserTier(user.tier) ? user.tier : USER_TIER.INDIVIDUAL;
+
+const formatUsd = (value: number) => `$${value.toLocaleString("en-US")}`;
+
 class KycApplicationService extends DBService<IKycApplication> {
     private uploadService: FileUploadService;
     private notificationService: NotificationService;
@@ -76,7 +92,7 @@ class KycApplicationService extends DBService<IKycApplication> {
      * evidence for every individual UBO declared as a PEP.
      */
     public getRequiredDocuments(application: IKycApplication): KycDocumentDefinition[] {
-        const definitions = KYC_DOCUMENTS[application.type].map((definition) => {
+        const definitions = getKycDocuments(application.type, applicationTier(application)).map((definition) => {
             if (definition.slot === "id_back" && application.personal?.idType === "passport") {
                 return { ...definition, required: false };
             }
@@ -149,7 +165,7 @@ class KycApplicationService extends DBService<IKycApplication> {
      */
     public async toClient(application: IKycApplication) {
         const plain: any = (application as any).toJSON ? (application as any).toJSON() : application;
-        const steps = KYC_STEPS[application.type];
+        const steps = stepsOf(application);
 
         const documents = await Promise.all((plain.documents || []).map(async (document: IKycDocument) => {
             let url: string | null = null;
@@ -164,6 +180,7 @@ class KycApplicationService extends DBService<IKycApplication> {
 
         return {
             ...plain,
+            tier: applicationTier(application),
             documents,
             progress: Math.round((application.completedSteps.filter((step) => steps.includes(step)).length / steps.length) * 100),
             config: {
@@ -175,18 +192,87 @@ class KycApplicationService extends DBService<IKycApplication> {
     }
 
     /**
-     * Starts an application, or switches the type of a draft that has no saved data yet
+     * Starts (or changes) the user's upgrade application.
+     *  - No application yet: creates one for the requested tier.
+     *  - Draft/rejected: changes its tier (data is kept) or type (data is discarded).
+     *  - Approved: starts an upgrade to a higher tier. Same type reuses the approved
+     *    details; a different type archives them (with their documents) and starts fresh.
      */
-    public async start(userId: string, type: KycType) {
-        const existing = await this.findOne({ user: userId });
-
-        if (!existing) {
-            return this.create({ user: userId, type, status: KYC_STATUS.DRAFT });
+    public async start(user: IUser, type: KycType, tier: UserTier) {
+        if (tier > KYC_MAX_TIER[type]) {
+            throw badRequest(`Tier ${tier} (${TIER_NAME[tier]}) is for registered businesses. Please apply as a business.`);
         }
 
-        if (existing.type === type) return existing;
+        const currentTier = userTier(user);
+        const existing = await this.findOne({ user: user._id });
+
+        if (existing && existing.status !== KYC_STATUS.APPROVED && existing.type === type && applicationTier(existing) === tier) {
+            return existing;
+        }
+        if (existing && [KYC_STATUS.SUBMITTED, KYC_STATUS.UNDER_REVIEW].includes(existing.status as any)) {
+            throw badRequest("Your application is being reviewed. You can change it once we've responded.");
+        }
+        if (tier <= currentTier) {
+            throw badRequest(`You're already on Tier ${currentTier} (${TIER_NAME[currentTier]}). Choose a higher tier to upgrade.`);
+        }
+
+        if (!existing) {
+            return this.create({ user: user._id, type, tier, status: KYC_STATUS.DRAFT, ...this.prefillFromProfile(user, type) });
+        }
+
+        if (existing.status === KYC_STATUS.APPROVED) {
+            const history = { status: KYC_STATUS.DRAFT, note: `Upgrade to Tier ${tier} (${TIER_NAME[tier]}) started`, by: user._id, at: new Date() };
+
+            if (existing.type === type) {
+                // Keep the approved details; new steps and documents still need completing
+                const steps = getKycSteps(type, tier);
+                return this.updateById(existing.id, {
+                    $set: {
+                        tier,
+                        status: KYC_STATUS.DRAFT,
+                        completedSteps: existing.completedSteps.filter((step) => steps.includes(step) && step !== KYC_STEP.DOCUMENTS),
+                    },
+                    $unset: { rejectionReason: 1 },
+                    $push: { history },
+                });
+            }
+
+            const plain: any = existing.toObject();
+            const snapshot = {
+                type: plain.type,
+                tier: applicationTier(existing),
+                displayName: plain.displayName,
+                general: plain.general,
+                personal: plain.personal,
+                ubos: plain.ubos,
+                directors: plain.directors,
+                questionnaire: plain.questionnaire,
+                documents: plain.documents,
+                submittedAt: plain.submittedAt,
+                reviewedAt: plain.reviewedAt,
+                reviewedBy: plain.reviewedBy,
+                archivedAt: new Date(),
+            };
+            return this.updateById(existing.id, {
+                $set: { ...this.emptyApplicationData(), ...this.prefillFromProfile(user, type), type, tier, status: KYC_STATUS.DRAFT },
+                $unset: { displayName: 1, rejectionReason: 1, submittedAt: 1, reviewedAt: 1, reviewedBy: 1 },
+                $push: { archive: snapshot, history },
+            });
+        }
 
         this.assertEditable(existing);
+
+        if (existing.type === type) {
+            // Same details, different requirements: documents must be checked again
+            const steps = getKycSteps(type, tier);
+            return this.updateById(existing.id, {
+                $set: {
+                    tier,
+                    completedSteps: existing.completedSteps.filter((step) => steps.includes(step) && step !== KYC_STEP.DOCUMENTS),
+                },
+            });
+        }
+
         if (existing.status !== KYC_STATUS.DRAFT) {
             throw badRequest("You cannot change the application type after a review");
         }
@@ -196,18 +282,49 @@ class KycApplicationService extends DBService<IKycApplication> {
             await this.uploadService.deleteFile(document.key);
         }
         return this.updateById(existing.id, {
-            $set: {
-                type,
-                completedSteps: [],
-                general: {},
-                personal: {},
-                ubos: [],
-                directors: [],
-                questionnaire: {},
-                documents: [],
-            },
+            $set: { ...this.emptyApplicationData(), ...this.prefillFromProfile(user, type), type, tier },
             $unset: { displayName: 1 },
         });
+    }
+
+    /**
+     * Starts a new application from what the user gave at sign-up, so they
+     * don't type their name, email and phone twice. Everything stays editable.
+     */
+    private prefillFromProfile(user: IUser, type: KycType) {
+        const country = user.countryOfResidence || undefined;
+        const address = country ? { country } : {};
+        const fullName = [user.firstName, user.lastName].filter(Boolean).join(" ");
+
+        if (type === KYC_TYPE.BUSINESS) {
+            return { general: this.compact({ applicantName: fullName || undefined, applicantEmail: user.email, address }) };
+        }
+        return {
+            personal: this.compact({
+                firstName: user.firstName,
+                lastName: user.lastName,
+                email: user.email,
+                phoneNumber: user.phoneNumber,
+                nationality: user.countryOfOrigin,
+                address,
+            }),
+        };
+    }
+
+    private compact(values: Record<string, unknown>) {
+        return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+    }
+
+    private emptyApplicationData() {
+        return {
+            completedSteps: [],
+            general: {},
+            personal: {},
+            ubos: [],
+            directors: [],
+            questionnaire: {},
+            documents: [],
+        };
     }
 
     /**
@@ -218,8 +335,8 @@ class KycApplicationService extends DBService<IKycApplication> {
         const application = await this.getOwnApplication(userId);
         this.assertEditable(application);
 
-        if (!KYC_STEPS[application.type].includes(step)) {
-            throw badRequest(`"${step}" is not a step of a ${application.type} application`);
+        if (!stepsOf(application).includes(step)) {
+            throw badRequest(`"${step}" is not a step of this application`);
         }
 
         const schema = getStepSchema(application.type, step, complete)!;
@@ -249,7 +366,7 @@ class KycApplicationService extends DBService<IKycApplication> {
 
         const completedSteps = new Set(application.completedSteps);
         if (complete) completedSteps.add(step); else completedSteps.delete(step);
-        update.completedSteps = KYC_STEPS[application.type].filter((s) => completedSteps.has(s));
+        update.completedSteps = stepsOf(application).filter((s) => completedSteps.has(s));
 
         // Remove source-of-funds files for owners that were deleted or are no longer PEPs
         if (step === KYC_STEP.UBOS) {
@@ -345,7 +462,12 @@ class KycApplicationService extends DBService<IKycApplication> {
         const application = await this.getOwnApplication(String(user._id));
         this.assertEditable(application);
 
-        for (const step of KYC_STEPS[application.type]) {
+        const currentTier = userTier(user);
+        if (applicationTier(application) <= currentTier) {
+            throw badRequest(`You're already on Tier ${currentTier}. Choose a higher tier to upgrade.`);
+        }
+
+        for (const step of stepsOf(application)) {
             if (step === KYC_STEP.DOCUMENTS) continue;
             const parsed = getStepSchema(application.type, step, true)!.safeParse(this.getStepData(application, step));
             if (!parsed.success) {
@@ -373,7 +495,7 @@ class KycApplicationService extends DBService<IKycApplication> {
             $set: {
                 status: KYC_STATUS.SUBMITTED,
                 submittedAt: new Date(),
-                completedSteps: KYC_STEPS[application.type],
+                completedSteps: stepsOf(application),
             },
             $unset: { rejectionReason: 1 },
             $push: { history: { status: KYC_STATUS.SUBMITTED, by: user._id, at: new Date() } },
@@ -394,7 +516,7 @@ class KycApplicationService extends DBService<IKycApplication> {
                     title: `📋 New ${label} documents ${wasResubmission ? "resubmitted" : "submitted"}`,
                     eyebrow: "Admin · Verification",
                     name: "Admin",
-                    message: `<strong>${escapeHtml(name)}</strong> (${escapeHtml(user.email)}) has ${wasResubmission ? "resubmitted" : "submitted"} their ${label} application and uploaded ${application.documents.length} document(s). Please review it.`,
+                    message: `<strong>${escapeHtml(name)}</strong> (${escapeHtml(user.email)}) has ${wasResubmission ? "resubmitted" : "submitted"} their ${label} application for <strong>Tier ${applicationTier(application)} (${TIER_NAME[applicationTier(application)]})</strong> and uploaded ${application.documents.length} document(s). Please review it.`,
                     actionUrl: `${config.FRONTEND_URL}/dashboard/admin/kyc/${application.id}`,
                     buttonText: "Review Application",
                 });
@@ -420,8 +542,9 @@ class KycApplicationService extends DBService<IKycApplication> {
     /**
      * Admin listing with status/type filters, search and per-status counts
      */
-    public async adminList(params: { status?: string; type?: string; search?: string; page?: number; limit?: number }) {
+    public async adminList(params: { status?: string; type?: string; tier?: number; search?: string; page?: number; limit?: number }) {
         const query: FilterQuery<IKycApplication> = {};
+        if (params.tier && isUserTier(params.tier)) query.tier = params.tier;
         if (params.status && Object.values(KYC_STATUS).includes(params.status as KycStatus)) query.status = params.status;
         if (params.type && (params.type === "individual" || params.type === "business")) query.type = params.type;
 
@@ -438,7 +561,7 @@ class KycApplicationService extends DBService<IKycApplication> {
             page: params.page || 1,
             limit: Math.min(params.limit || 20, 100),
             sort: { updatedAt: -1 },
-            select: ["user", "type", "status", "displayName", "completedSteps", "submittedAt", "reviewedAt", "createdAt", "updatedAt"],
+            select: ["user", "type", "tier", "status", "displayName", "completedSteps", "submittedAt", "reviewedAt", "createdAt", "updatedAt"],
             populate: ["user"],
         });
 
@@ -449,10 +572,11 @@ class KycApplicationService extends DBService<IKycApplication> {
         const data = result.data.map((application: any) => {
             const plain = application.toJSON();
             const user = plain.user;
-            const steps = KYC_STEPS[plain.type as KycType];
+            const steps = stepsOf(plain);
             return {
                 ...plain,
-                user: user ? { id: user.id, firstName: user.firstName, lastName: user.lastName, email: user.email } : null,
+                tier: applicationTier(plain),
+                user: user ? { id: user.id, firstName: user.firstName, lastName: user.lastName, email: user.email, tier: userTier(user) } : null,
                 progress: Math.round((plain.completedSteps.filter((s: KycStep) => steps.includes(s)).length / steps.length) * 100),
             };
         });
@@ -466,7 +590,7 @@ class KycApplicationService extends DBService<IKycApplication> {
         const client: any = await this.toClient(application);
 
         const pickUser = (u: any) => u && typeof u === "object" && u.email
-            ? { id: u.id ?? String(u._id), firstName: u.firstName, lastName: u.lastName, email: u.email, phoneNumber: u.phoneNumber, whatsappNumber: u.whatsappNumber, countryOfResidence: u.countryOfResidence }
+            ? { id: u.id ?? String(u._id), firstName: u.firstName, lastName: u.lastName, email: u.email, phoneNumber: u.phoneNumber, whatsappNumber: u.whatsappNumber, countryOfResidence: u.countryOfResidence, tier: userTier(u) }
             : u;
         client.user = pickUser(client.user);
         client.reviewedBy = pickUser(client.reviewedBy);
@@ -475,7 +599,7 @@ class KycApplicationService extends DBService<IKycApplication> {
     }
 
     /**
-     * Admin decision; approving also marks the user as KYC verified
+     * Admin decision; approving raises the user to the application's tier
      */
     public async adminReview(admin: IUser, id: string, status: KycStatus, note?: string) {
         const application = await this.findById(id, { populate: ["user"] });
@@ -496,7 +620,15 @@ class KycApplicationService extends DBService<IKycApplication> {
 
         const applicant = application.user as IUser;
         if (status === KYC_STATUS.APPROVED) {
-            await this.userService.updateById(String(applicant._id), { isKYCDone: true, isKYCRejected: false });
+            const tier = applicationTier(application);
+            await this.userService.updateById(String(applicant._id), {
+                isKYCDone: true,
+                isKYCRejected: false,
+                ...(tier > userTier(applicant) ? {
+                    tier,
+                    $push: { tierHistory: { tier, reason: `${application.type === "business" ? "KYB" : "KYC"} application approved`, by: admin._id, at: new Date() } },
+                } : {}),
+            } as any);
             // Release transactions that were waiting on verification (as a Smile ID pass does)
             await Transaction.updateMany(
                 { user: applicant._id, status: TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION },
@@ -514,13 +646,16 @@ class KycApplicationService extends DBService<IKycApplication> {
     private async sendDecisionEmail(user: IUser, application: IKycApplication, status: KycStatus, note?: string) {
         const label = application.type === "business" ? "KYB" : "KYC";
         const approved = status === KYC_STATUS.APPROVED;
+        const tier = applicationTier(application);
+        const limit = await platformSettingsService.getTierDailyLimitUsd(tier).catch(() => undefined);
+        const limitText = limit === null ? "with no daily limit" : limit ? `with a daily limit of ${formatUsd(limit)}` : "with a higher daily limit";
         try {
             await this.notificationService.emailService.sendNotificationEmail(user.email, {
                 title: approved ? `🎉 Your ${label} has been approved` : `Action needed on your ${label} application`,
                 eyebrow: "Verification",
                 name: user.firstName,
                 message: approved
-                    ? `Good news! Your ${label} application has been reviewed and approved.`
+                    ? `Good news! Your ${label} application has been approved and your account is now on <strong>Tier ${tier} (${TIER_NAME[tier]})</strong>, ${limitText}.`
                     : `We reviewed your ${label} application and need a few changes before we can approve it. You can update your details and resubmit.`,
                 additionalInfo: !approved && note ? `<strong>Reason:</strong> ${escapeHtml(note)}` : undefined,
                 actionUrl: approved ? `${config.FRONTEND_URL}/dashboard/user` : `${config.FRONTEND_URL}/kyc`,

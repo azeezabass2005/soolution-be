@@ -1,12 +1,14 @@
 import { Request, Response, NextFunction } from "express";
 import BaseController from "../base-controller";
 import KycApplicationService from "../../../services/kyc-application.service";
-import kycLimitService from "../../../services/kyc-limit.service";
+import transactionLimitService from "../../../services/transaction-limit.service";
+import platformSettingsService from "../../../services/platform-settings.service";
+import { TIER_NAME, USER_TIERS } from "../../../common/tier.constants";
 import { MulterMiddleware } from "../../../middlewares/multer.middleware";
 import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 import { ROLE_MAP } from "../../../common/constant";
 import { KYC_STEP, KycStep } from "../../../common/kyc.constants";
-import { ZKycReview, ZKycStart } from "../../../validators/z-kyc";
+import { ZKycReview, ZKycStart, ZTierOverride } from "../../../validators/z-kyc";
 import zodErrorHandler from "../../../validators/zod.error";
 
 /**
@@ -33,11 +35,15 @@ class KycController extends BaseController {
         this.router.post("/me/documents/:slot", MulterMiddleware.single("file"), MulterMiddleware.handleError, this.uploadDocument.bind(this));
         this.router.delete("/me/documents/:slot", this.removeDocument.bind(this));
         this.router.post("/me/submit", this.submit.bind(this));
-        // Whether an amount needs KYC for the signed-in user (send/receive forms pre-check)
+        // The signed-in user's tier, today's usage and every tier's limit
+        this.router.get("/tier", this.getMyTier.bind(this));
+        // Whether an amount fits today's remaining limit (send/receive forms pre-check)
         this.router.get("/limit", this.checkLimit.bind(this));
 
         // Admin routes
         this.router.get("/", this.requireAdmin, this.listApplications.bind(this));
+        this.router.get("/users/:userId/tier", this.requireAdmin, this.getUserTier.bind(this));
+        this.router.patch("/users/:userId/tier", this.requireAdmin, this.overrideUserTier.bind(this));
         this.router.get("/:id", this.requireAdmin, this.getApplication.bind(this));
         this.router.patch("/:id/status", this.requireAdmin, this.reviewApplication.bind(this));
     }
@@ -60,8 +66,8 @@ class KycController extends BaseController {
 
     private async startApplication(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const { type } = ZKycStart.parse(req.body);
-            const application = await this.kycService.start(res.locals.userId, type);
+            const { type, tier } = ZKycStart.parse(req.body);
+            const application = await this.kycService.start(res.locals.user, type, tier);
             this.sendSuccess(res, { application: await this.kycService.toClient(application) }, 201);
         } catch (error) {
             zodErrorHandlerOr(error, next);
@@ -132,18 +138,67 @@ class KycController extends BaseController {
             const altCurrency = typeof req.query.altCurrency === "string" ? req.query.altCurrency : "";
             const amounts = [{ amount, currency }];
             if (isFinite(altAmount) && altAmount > 0 && /^[A-Za-z]{3,4}$/.test(altCurrency)) amounts.push({ amount: altAmount, currency: altCurrency });
-            this.sendSuccess(res, await kycLimitService.check(res.locals.userId, amounts));
+            this.sendSuccess(res, await transactionLimitService.check(res.locals.userId, amounts));
         } catch (error) {
             next(error);
         }
     }
 
+    private async tierOverview(userId: string) {
+        const [status, limits] = await Promise.all([
+            transactionLimitService.getStatus(userId),
+            platformSettingsService.getTierDailyLimits(),
+        ]);
+        return {
+            ...status,
+            tiers: USER_TIERS.map((tier) => ({ tier, name: TIER_NAME[tier], limitUsd: limits[tier] })),
+        };
+    }
+
+    private async getMyTier(_req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            this.sendSuccess(res, await this.tierOverview(res.locals.userId));
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    private async getUserTier(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const user = await this.userService.findById(req.params.userId);
+            if (!user) return next(errorResponseMessage.resourceNotFound("User"));
+            this.sendSuccess(res, {
+                ...(await this.tierOverview(String(user._id))),
+                tierHistory: (user.tierHistory || []).slice().reverse(),
+            });
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    /** Admin override, e.g. to restore or restrict an account; recorded in the user's tier history */
+    private async overrideUserTier(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const { tier, reason } = ZTierOverride.parse(req.body);
+            const user = await this.userService.findById(req.params.userId);
+            if (!user) return next(errorResponseMessage.resourceNotFound("User"));
+            await this.userService.updateById(String(user._id), {
+                tier,
+                $push: { tierHistory: { tier, reason: `Set by admin: ${reason}`, by: res.locals.user._id, at: new Date() } },
+            } as any);
+            this.sendSuccess(res, { message: `Moved to Tier ${tier} (${TIER_NAME[tier]})`, ...(await this.tierOverview(String(user._id))) });
+        } catch (error) {
+            zodErrorHandlerOr(error, next);
+        }
+    }
+
     private async listApplications(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const { status, type, search, page, limit } = req.query;
+            const { status, type, tier, search, page, limit } = req.query;
             const result = await this.kycService.adminList({
                 status: status as string | undefined,
                 type: type as string | undefined,
+                tier: tier ? Number(tier) : undefined,
                 search: search as string | undefined,
                 page: page ? parseInt(page as string, 10) || 1 : 1,
                 limit: limit ? parseInt(limit as string, 10) || 20 : 20,

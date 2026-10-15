@@ -1,5 +1,6 @@
 import BaseController from "../base-controller";
 import TransactionService from "../../../services/transaction.service";
+import beneficiaryService from "../../../services/beneficiary.service";
 import {Request, Response, NextFunction} from "express";
 import {DetailType, ITransaction, ITransactionDetail} from "../../../models/interface";
 import errorResponseMessage from "../../../common/messages/error-response-message";
@@ -12,6 +13,7 @@ import ReceiptFileValidationMiddleware from "../../../middlewares/receipt-file-v
 import {MulterMiddleware} from "../../../middlewares/multer.middleware";
 import receiptService from "../../../services/receipt.service";
 
+import transactionLimitService from "../../../services/transaction-limit.service";
 class TransactionController extends BaseController {
 
     private transactionService: TransactionService;
@@ -81,18 +83,33 @@ class TransactionController extends BaseController {
 
             const user = res.locals.user;
 
-            if(!req.file) {
+            // A saved beneficiary supplies the recipient and its stored QR code
+            const beneficiaryId = (req.body as any)?.beneficiaryId;
+            let savedQrCodeUrl: string | undefined;
+            if (beneficiaryId) {
+                const beneficiary = await beneficiaryService.getOwned(String(user._id), String(beneficiaryId));
+                if (beneficiary.currency !== "RMB" || beneficiary.kind !== transactionData.paymentMethod || !beneficiary.qrCodeUrl) {
+                    next(errorResponseMessage.payloadIncorrect("This beneficiary can't receive this payment method"));
+                    return;
+                }
+                transactionData.alipayNo = beneficiary.alipayNo;
+                transactionData.alipayName = beneficiary.alipayName;
+                if (beneficiary.kind === "alipay") (transactionData as any).platform = beneficiary.alipayType;
+                savedQrCodeUrl = beneficiary.qrCodeUrl;
+            }
+
+            if(!req.file && !savedQrCodeUrl) {
                 next(errorResponseMessage.payloadIncorrect("Alipay Qrcode"));
                 return;
             }
 
-            const transaction = await this.transactionService.createAlipayTransaction(
+            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createAlipayTransaction(
                 { ...transactionData, idempotencyKey },
-                req.file as Express.Multer.File,
+                req.file ?? { qrCodeUrl: savedQrCodeUrl! },
                 user._id!,
                 req.ip,
                 req.headers['user-agent']
-            )
+            ))
 
             return this.sendSuccess(res, {
                 transaction,
@@ -112,12 +129,12 @@ class TransactionController extends BaseController {
 
             const user = res.locals.user;
 
-            const transaction = await this.transactionService.createBankTransferTransaction(
+            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createBankTransferTransaction(
                 { ...transactionData, idempotencyKey },
                 user._id!,
                 req.ip,
                 req.headers['user-agent']
-            )
+            ))
 
             return this.sendSuccess(res, {
                 transaction,
@@ -137,7 +154,6 @@ class TransactionController extends BaseController {
             const { status } = await this.transactionService.uploadUserPaymentReceipt(
                 req.params.id!, 
                 req.file as Express.Multer.File, 
-                res.locals?.user?.isKYCDone === true,
                 res.locals?.user?._id?.toString(),
                 req.ip,
                 req.headers['user-agent']

@@ -1,3 +1,5 @@
+import { USER_TIER, UserTier } from "./tier.constants";
+
 /**
  * KYC (individual) / KYB (business) application definitions.
  * This is the single source of truth for steps, questions and required documents;
@@ -41,10 +43,22 @@ export const KYC_STEP = {
 
 export type KycStep = (typeof KYC_STEP)[keyof typeof KYC_STEP];
 
-/** Ordered data steps per application type (the final review step is not stored) */
-export const KYC_STEPS: Record<KycType, KycStep[]> = {
-    business: [KYC_STEP.GENERAL, KYC_STEP.UBOS, KYC_STEP.DIRECTORS, KYC_STEP.QUESTIONNAIRE, KYC_STEP.DOCUMENTS],
-    individual: [KYC_STEP.PERSONAL, KYC_STEP.QUESTIONNAIRE, KYC_STEP.DOCUMENTS],
+/**
+ * Ordered data steps per application type and tier (the final review step is not stored).
+ *   Tier 2 (HNIs, SMEs): identity, owners and documents only; no compliance Q&A or directors.
+ *   Tier 3 (institutions, business only): the full KYB.
+ */
+export const getKycSteps = (type: KycType, tier: UserTier): KycStep[] => {
+    if (type === KYC_TYPE.INDIVIDUAL) return [KYC_STEP.PERSONAL, KYC_STEP.DOCUMENTS];
+    return tier >= USER_TIER.INSTITUTION
+        ? [KYC_STEP.GENERAL, KYC_STEP.UBOS, KYC_STEP.DIRECTORS, KYC_STEP.QUESTIONNAIRE, KYC_STEP.DOCUMENTS]
+        : [KYC_STEP.GENERAL, KYC_STEP.UBOS, KYC_STEP.DOCUMENTS];
+};
+
+/** Tiers each application type can apply for: individuals up to Tier 2, businesses up to Tier 3 */
+export const KYC_MAX_TIER: Record<KycType, UserTier> = {
+    individual: USER_TIER.BUSINESS,
+    business: USER_TIER.INSTITUTION,
 };
 
 export const BUSINESS_TYPES = [
@@ -162,14 +176,33 @@ export interface KycDocumentDefinition {
     requiresIssueDate: boolean;
 }
 
-export const KYC_DOCUMENTS: Record<KycType, KycDocumentDefinition[]> = {
+const CERTIFICATE_OF_INCORPORATION: KycDocumentDefinition = {
+    slot: "certificate_of_incorporation",
+    label: "Certificate of incorporation",
+    required: true,
+    requiresIssueDate: true,
+};
+
+const BUSINESS_PROOF_OF_ADDRESS: KycDocumentDefinition = {
+    slot: "proof_of_address",
+    label: "Proof of address for office address (Legal entity)",
+    description: "Utility bill / rent agreement / bank statement issued within 3 months",
+    required: true,
+    requiresIssueDate: true,
+};
+
+const DIRECTOR_ID: KycDocumentDefinition = {
+    slot: "director_id",
+    label: "Government-issued ID of a director or owner",
+    description: "Passport, national ID or driver's license of the person who runs the business",
+    required: true,
+    requiresIssueDate: false,
+};
+
+/** Documents for the full KYB (Tier 3) and individual KYC */
+const KYC_DOCUMENTS: Record<KycType, KycDocumentDefinition[]> = {
     business: [
-        {
-            slot: "certificate_of_incorporation",
-            label: "Certificate of incorporation",
-            required: true,
-            requiresIssueDate: true,
-        },
+        CERTIFICATE_OF_INCORPORATION,
         {
             slot: "memorandum_articles",
             label: "Memorandum/Articles of Association",
@@ -190,13 +223,8 @@ export const KYC_DOCUMENTS: Record<KycType, KycDocumentDefinition[]> = {
             required: true,
             requiresIssueDate: true,
         },
-        {
-            slot: "proof_of_address",
-            label: "Proof of address for office address (Legal entity)",
-            description: "Utility bill / rent agreement / bank statement issued within 3 months",
-            required: true,
-            requiresIssueDate: true,
-        },
+        BUSINESS_PROOF_OF_ADDRESS,
+        { ...DIRECTOR_ID, required: false },
     ],
     individual: [
         {
@@ -228,6 +256,18 @@ export const KYC_DOCUMENTS: Record<KycType, KycDocumentDefinition[]> = {
             requiresIssueDate: false,
         },
     ],
+};
+
+/** Tier 2 businesses (SMEs) only need their registration, address and an owner's ID */
+const BUSINESS_LITE_DOCUMENTS: KycDocumentDefinition[] = [
+    { ...CERTIFICATE_OF_INCORPORATION, label: "Certificate of incorporation / business registration" },
+    BUSINESS_PROOF_OF_ADDRESS,
+    DIRECTOR_ID,
+];
+
+export const getKycDocuments = (type: KycType, tier: UserTier): KycDocumentDefinition[] => {
+    if (type === KYC_TYPE.INDIVIDUAL) return KYC_DOCUMENTS.individual;
+    return tier >= USER_TIER.INSTITUTION ? KYC_DOCUMENTS.business : BUSINESS_LITE_DOCUMENTS;
 };
 
 /** Document slot for a PEP UBO's source-of-funds evidence */

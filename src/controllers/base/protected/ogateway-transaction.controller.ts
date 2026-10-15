@@ -11,6 +11,7 @@ import TransactionRateLimitMiddleware from "../../../middlewares/transaction-rat
 import { DETAIL_TYPE, OGATEWAY_NETWORKS, TRANSACTION_STATUS } from "../../../common/constant";
 import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 
+import transactionLimitService from "../../../services/transaction-limit.service";
 /**
  * OGateway routes — Ghana instant send + receive only.
  * YellowCard continues to handle every other currency.
@@ -56,10 +57,10 @@ class OGatewayTransactionController extends BaseController {
             const user = res.locals.user;
             const idempotencyKey =
                 req.body.idempotencyKey || (req.headers["idempotency-key"] as string);
-            const transaction = await this.transactionService.createOGatewayPayoutTransaction(
+            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createOGatewayPayoutTransaction(
                 { ...req.body, idempotencyKey },
                 user._id!,
-            );
+            ));
             return this.sendSuccess(
                 res,
                 {
@@ -78,10 +79,10 @@ class OGatewayTransactionController extends BaseController {
             const user = res.locals.user;
             const idempotencyKey =
                 req.body.idempotencyKey || (req.headers["idempotency-key"] as string);
-            const transaction = await this.transactionService.createOGatewayCollectionTransaction(
+            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createOGatewayCollectionTransaction(
                 { ...req.body, idempotencyKey },
                 user._id!,
-            );
+            ));
             return this.sendSuccess(
                 res,
                 {

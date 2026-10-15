@@ -20,6 +20,8 @@ export const MODEL_NAME = {
     LEDGER_ALERT: "LedgerAlertModel",
     PLATFORM_SETTINGS: "PlatformSettingsModel",
     KYC_APPLICATION: "KycApplicationModel",
+    TRANSACTION_LIMIT_LOCK: "TransactionLimitLockModel",
+    BENEFICIARY: "BeneficiaryModel",
 }
 
 // ===================== LEDGER / CHART OF ACCOUNTS =====================

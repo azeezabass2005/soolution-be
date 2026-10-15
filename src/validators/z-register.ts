@@ -30,35 +30,41 @@ const ZRegister = z.object({
     // whatsappNumber: z.string().min(11, "Whatsapp Number must be at least 11 digits"),
 })
 
+export const SIGNUP_PURPOSES = ['business', 'personal', 'travel', 'investment', 'savings', 'others'] as const;
+export const HEAR_ABOUT_US_OPTIONS = ['friends', 'ads', 'search-engines', 'social-media', 'referrals', 'events', 'youtube', 'instagram', 'x-twitter', 'facebook', 'tiktok', 'google', 'others'] as const;
+
+/**
+ * The second sign-up step. It only asks what's needed to open a Tier 1 account;
+ * identity and business details (nationality, industry, volumes) are collected
+ * by the KYC / KYB application when the user upgrades their tier. The older
+ * fields are still accepted so earlier clients keep working.
+ */
 const ZPostRegister = z.object({
-    phoneNumber: z.string().min(11, "Phone Number must be at least 11 digits"),
-    countryOfOrigin: z.string().min(2, "Country of origin is required"),
-    countryOfResidence: z.string().min(2, "Country of residence is required"),
-    purpose: z.enum(['business', 'personal', 'travel', 'investment', 'savings', 'others' ], {
-        errorMap: () => ({message: "Please select a valid purpose'"})
+    phoneNumber: z.string().trim().min(11, "Phone Number must be at least 11 digits").max(20, "Phone Number is too long"),
+    countryOfResidence: z.string().trim().min(2, "Country of residence is required").max(56),
+    purpose: z.enum(SIGNUP_PURPOSES, {
+        errorMap: () => ({message: "Please select a valid purpose"})
     }),
-    typeOfBusiness: z.enum(['creators', 'retail-sales', 'software', 'services', 'entertainment', 'media', 'payments', 'others']).optional(),
-    monthlyVolume: z.string().optional(),
-    hearAboutUs: z.enum(['friends', 'ads', 'search-engines', 'social-media', 'referrals', 'events', 'youtube', 'instagram', 'x-twitter', 'facebook', 'tiktok', 'google', 'others'], {
+    hearAboutUs: z.enum(HEAR_ABOUT_US_OPTIONS, {
         errorMap: () => ({message: "Please select a valid option for how you heard about us"})
-    })
+    }),
+    hearAboutUsOther: z.string().trim().max(200, "Please keep this under 200 characters").optional(),
+    countryOfOrigin: z.string().trim().min(2).max(56).optional(),
+    typeOfBusiness: z.enum(['creators', 'retail-sales', 'software', 'services', 'entertainment', 'media', 'payments', 'others']).optional(),
+    monthlyVolume: z.string().trim().max(60).optional(),
 })
     .superRefine((data, ctx) => {
-        if (data.purpose === "business" && !data.typeOfBusiness) {
+        if (data.hearAboutUs === "others" && !data.hearAboutUsOther) {
             ctx.addIssue({
                 code: "custom",
-                message: "Type of business is required when purpose is 'Business'",
-                path: ["typeOfBusiness"]
-            })
-        }
-        if (data.purpose === "business" && !data.monthlyVolume) {
-            ctx.addIssue({
-                code: "custom",
-                message: "Monthly Revenue Range is required when purpose is 'Business'",
-                path: ["monthlyVolume"]
+                message: "Please tell us how you heard about us",
+                path: ["hearAboutUsOther"]
             })
         }
     })
+
+/** The validated sign-up fields only (unknown keys such as role or tier are dropped) */
+export const parsePostRegistration = (body: unknown) => ZPostRegister.parse(body);
 
 const ZUpdateUser = z.object({
     status: z.enum(['active', 'inactive', 'deactivated', 'suspended'], {

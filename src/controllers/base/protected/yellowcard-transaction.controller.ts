@@ -6,6 +6,7 @@ import { Request, Response, NextFunction } from "express";
 import { validateCreateYellowCardTransaction } from "../../../validators/z-yellowcard-transaction";
 import TransactionRateLimitMiddleware from "../../../middlewares/transaction-rate-limit.middleware";
 
+import transactionLimitService from "../../../services/transaction-limit.service";
 class YellowCardTransactionController extends BaseController {
 
     private transactionService: TransactionService;
@@ -67,12 +68,12 @@ class YellowCardTransactionController extends BaseController {
 
             const idempotencyKey = req.body.idempotencyKey || req.headers["idempotency-key"] as string;
 
-            const transaction = await this.transactionService.createYellowCardTransaction(
+            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createYellowCardTransaction(
                 { ...req.body, idempotencyKey },
                 user._id!,
                 req.ip,
                 req.headers["user-agent"]
-            );
+            ));
 
             return this.sendSuccess(res, {
                 transaction,
@@ -231,10 +232,10 @@ class YellowCardTransactionController extends BaseController {
             const user = res.locals.user;
             const idempotencyKey = req.body.idempotencyKey || req.headers["idempotency-key"] as string;
 
-            const transaction = await this.transactionService.createYellowCardCollectionTransaction(
+            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createYellowCardCollectionTransaction(
                 { ...req.body, idempotencyKey },
                 user._id!,
-            );
+            ));
 
             return this.sendSuccess(res, {
                 transaction,

@@ -3,6 +3,7 @@ import paginate from "mongoose-paginate-v2";
 import { IKycApplication } from "./interface";
 import { MODEL_NAME } from "../common/constant";
 import { KYC_STATUS, KYC_TYPE } from "../common/kyc.constants";
+import { UPGRADE_TIERS } from "../common/tier.constants";
 
 const KycDocumentSchema = new Schema(
     {
@@ -48,6 +49,20 @@ export const KycApplicationSchema = new Schema<IKycApplication>(
          * @required
          */
         type: { type: String, enum: Object.values(KYC_TYPE), required: true },
+
+        /**
+         * Tier this application upgrades the user to: 2 (Business) or 3 (Institution).
+         * Decides which steps and documents are required.
+         * @type {number}
+         * @required
+         */
+        tier: { type: Number, enum: UPGRADE_TIERS, required: true, index: true },
+
+        /**
+         * Earlier approved applications that an upgrade of a different type replaced,
+         * kept (with their documents) for the compliance record
+         */
+        archive: { type: [Schema.Types.Mixed], default: undefined },
 
         /**
          * Current status of the application

@@ -2,6 +2,7 @@ import DBService from "../utils/db.utils";
 import { IPlatformSettings } from "../models/interface";
 import PlatformSettings from "../models/platform-settings.model";
 import logger from "../utils/logger.utils";
+import { DEFAULT_TIER_DAILY_LIMIT_USD, USER_TIER, UserTier } from "../common/tier.constants";
 
 export type ProviderKey = 'ogateway' | 'yellowcard';
 export type RateDirection = 'send' | 'receive';
@@ -19,6 +20,7 @@ export type RateDirection = 'send' | 'receive';
  */
 class PlatformSettingsService extends DBService<IPlatformSettings> {
     private cache: { value: IPlatformSettings; fetchedAt: number } | null = null;
+    private loading: Promise<IPlatformSettings> | null = null;
     private readonly TTL_MS = 30_000;
 
     constructor() {
@@ -33,10 +35,22 @@ class PlatformSettingsService extends DBService<IPlatformSettings> {
         if (this.cache && Date.now() - this.cache.fetchedAt < this.TTL_MS) {
             return this.cache.value;
         }
+        // Concurrent callers share one load, so they can't both try to seed the singleton
+        this.loading ??= this.load().finally(() => { this.loading = null; });
+        return this.loading;
+    }
+
+    private async load(): Promise<IPlatformSettings> {
         let doc = await this.findOne({ kind: 'singleton' }) as IPlatformSettings | null;
         if (!doc) {
-            doc = await this.create({ kind: 'singleton' } as Partial<IPlatformSettings>) as IPlatformSettings;
-            logger.info("PlatformSettings: seeded defaults", { id: (doc as any)?._id });
+            try {
+                doc = await this.create({ kind: 'singleton' } as Partial<IPlatformSettings>) as IPlatformSettings;
+                logger.info("PlatformSettings: seeded defaults", { id: (doc as any)?._id });
+            } catch (error) {
+                // Another instance seeded it first
+                doc = await this.findOne({ kind: 'singleton' }) as IPlatformSettings | null;
+                if (!doc) throw error;
+            }
         }
         this.cache = { value: doc, fetchedAt: Date.now() };
         return doc;
@@ -50,6 +64,7 @@ class PlatformSettingsService extends DBService<IPlatformSettings> {
             rateMarkupPercent: number;
             additionalFeePercent: number;
             providerBaseFeePercent: Partial<{ ogateway: number; yellowcard: number }>;
+            tierDailyLimitUsd: Partial<{ tier1: number; tier2: number }>;
         }>,
         adminUserId: string,
     ): Promise<IPlatformSettings> {
@@ -67,12 +82,20 @@ class PlatformSettingsService extends DBService<IPlatformSettings> {
                     : current.providerBaseFeePercent.yellowcard,
             };
         }
+        if (patch.tierDailyLimitUsd) {
+            const limits = this.tierLimits(current);
+            update.tierDailyLimitUsd = {
+                tier1: patch.tierDailyLimitUsd.tier1 ?? limits.tier1,
+                tier2: patch.tierDailyLimitUsd.tier2 ?? limits.tier2,
+            };
+        }
         update.updatedBy = adminUserId;
 
         const before = {
             rateMarkupPercent: current.rateMarkupPercent,
             additionalFeePercent: current.additionalFeePercent,
             providerBaseFeePercent: current.providerBaseFeePercent,
+            tierDailyLimitUsd: this.tierLimits(current),
         };
 
         const updated = await this.updateById(String(current._id), update);
@@ -85,10 +108,31 @@ class PlatformSettingsService extends DBService<IPlatformSettings> {
                 rateMarkupPercent: updated.rateMarkupPercent,
                 additionalFeePercent: updated.additionalFeePercent,
                 providerBaseFeePercent: updated.providerBaseFeePercent,
+                tierDailyLimitUsd: updated.tierDailyLimitUsd,
             },
         });
 
         return updated;
+    }
+
+    private tierLimits(settings: IPlatformSettings) {
+        return {
+            tier1: settings.tierDailyLimitUsd?.tier1 ?? DEFAULT_TIER_DAILY_LIMIT_USD.tier1,
+            tier2: settings.tierDailyLimitUsd?.tier2 ?? DEFAULT_TIER_DAILY_LIMIT_USD.tier2,
+        };
+    }
+
+    /** Daily limit in USD for a tier; null means unlimited (Tier 3) */
+    public async getTierDailyLimitUsd(tier: UserTier): Promise<number | null> {
+        if (tier >= USER_TIER.INSTITUTION) return null;
+        const limits = this.tierLimits(await this.getSettings());
+        return tier === USER_TIER.BUSINESS ? limits.tier2 : limits.tier1;
+    }
+
+    /** All tiers' daily limits (null = unlimited), for display */
+    public async getTierDailyLimits(): Promise<Record<UserTier, number | null>> {
+        const limits = this.tierLimits(await this.getSettings());
+        return { 1: limits.tier1, 2: limits.tier2, 3: null };
     }
 
     /**

@@ -20,7 +20,7 @@ import AuditLogService from "./audit-log.service";
 import { validateTransactionAmount, getTransactionLimits } from "../config/transaction-limits.config";
 import yellowCardService from "./yellowcard.service";
 import ogatewayService from "./ogateway.service";
-import kycLimitService from "./kyc-limit.service";
+import transactionLimitService from "./transaction-limit.service";
 import platformSettingsService from "./platform-settings.service";
 import {
     YELLOWCARD_STATUS,
@@ -150,8 +150,8 @@ class TransactionService extends DBService<ITransaction> {
             );
         }
 
-        // Unverified users may transact below the KYC limit
-        await kycLimitService.assertAllowed(user, [
+        // Daily tier limit (throws when this would exceed today's limit)
+        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(user, [
             { amount: calculatedFromAmount, currency: fromCurrency },
             { amount, currency: toCurrency },
         ]);
@@ -178,6 +178,7 @@ class TransactionService extends DBService<ITransaction> {
         }
 
         const transaction = await this.create({
+            usdValue: txUsdValue ?? undefined,
             user,
             reference: this.generateBankTransferTransactionReference(toCurrency),
             amount: Math.round(amount * 100) / 100, // Round to 2 decimal places
@@ -247,7 +248,7 @@ class TransactionService extends DBService<ITransaction> {
         return { ...transaction.toObject(), details: { ...transactionDetails.toObject() } } 
     }
 
-    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string; pin?: string }>, alipayQrCode: Express.Multer.File, user: string, ipAddress?: string, userAgent?: string) =>  {
+    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string; pin?: string }>, alipayQrCode: Express.Multer.File | { qrCodeUrl: string }, user: string, ipAddress?: string, userAgent?: string) =>  {
         const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod, idempotencyKey, pin } = transactionData;
 
         if (!fromCurrency) {
@@ -283,8 +284,8 @@ class TransactionService extends DBService<ITransaction> {
             );
         }
 
-        // Unverified users may transact below the KYC limit (valued from the source side; RMB isn't quoted in USD)
-        await kycLimitService.assertAllowed(user, [{ amount: ngnEquivalent, currency: fromCurrency }]);
+        // Daily tier limit, valued from the source side (RMB isn't quoted in USD)
+        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(user, [{ amount: ngnEquivalent, currency: fromCurrency }]);
 
         // Handle idempotency key if provided
         if (idempotencyKey) {
@@ -306,17 +307,25 @@ class TransactionService extends DBService<ITransaction> {
         if(!bankAccountDetails) {
             throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
         }
-        const uploadResult = await this.receiptUploadService.uploadFile(alipayQrCode as Express.Multer.File, {
-            folder: 'qrcodes/',
-            customFilename: `alipay_qrcode_${Date.now()}`,
-            makePublic: true,
-        });
-        if(!uploadResult.success) {
-            logger.error("Alipay QRCode upload to R2 failed", { error: uploadResult.error });
-            throw errorResponseMessage.unableToComplete("Alipay Qrcode upload failed");
+        // A saved beneficiary's QR code is reused; a new one is uploaded
+        let qrCodeUrl: string;
+        if ("qrCodeUrl" in alipayQrCode) {
+            qrCodeUrl = alipayQrCode.qrCodeUrl;
+        } else {
+            const uploadResult = await this.receiptUploadService.uploadFile(alipayQrCode, {
+                folder: 'qrcodes/',
+                customFilename: `alipay_qrcode_${Date.now()}`,
+                makePublic: true,
+            });
+            if(!uploadResult.success) {
+                logger.error("Alipay QRCode upload to R2 failed", { error: uploadResult.error });
+                throw errorResponseMessage.unableToComplete("Alipay Qrcode upload failed");
+            }
+            qrCodeUrl = uploadResult.file?.url!;
         }
 
         const transaction = await this.create({
+            usdValue: txUsdValue ?? undefined,
             user,
             reference: this.generateTransactionReference(),
             amount: Math.round(amount * 100) / 100, // Round to 2 decimal places
@@ -337,7 +346,7 @@ class TransactionService extends DBService<ITransaction> {
             type: paymentMethod || DETAIL_TYPE.ALIPAY,
             alipayNo,
             alipayName,
-            qrCodeUrl: uploadResult.file?.url!,
+            qrCodeUrl,
             bankAccountDetails: bankAccountDetails.toObject(),
             ...(paymentMethod === 'alipay' ? { platform: platform } : {}),
         })
@@ -379,7 +388,7 @@ class TransactionService extends DBService<ITransaction> {
         return { ...transaction.toObject(), details: { ...transactionDetails.toObject() } } 
     }
 
-    public uploadUserPaymentReceipt = async (transactionId: string, receipt: Express.Multer.File, isKycDone: boolean, userId?: string, ipAddress?: string, userAgent?: string) => {
+    public uploadUserPaymentReceipt = async (transactionId: string, receipt: Express.Multer.File, userId?: string, ipAddress?: string, userAgent?: string) => {
         // Use MongoDB transaction for atomic operations
         const session = await mongoose.startSession();
         session.startTransaction();
@@ -477,12 +486,8 @@ class TransactionService extends DBService<ITransaction> {
 
             // Validate status transition before updating
             const oldStatus = transaction.status;
-            // Only transactions at or above the KYC limit wait for verification
-            const kycCleared = isKycDone || !(await kycLimitService.check(String(transaction.user), [
-                { amount: existingDetails?.fromAmount ?? updateFields.fromAmount, currency: transaction.fromCurrency },
-                { amount: transaction.amount, currency: transaction.currency },
-            ])).requiresKyc;
-            const newStatus = kycCleared ? TRANSACTION_STATUS.AWAITING_CONFIRMATION : TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION;
+            // Limits are enforced when the transaction is created, so a paid transaction goes straight to review
+            const newStatus = TRANSACTION_STATUS.AWAITING_CONFIRMATION;
             transactionStateMachine.validateTransition(oldStatus, newStatus);
 
             // Update status within transaction
@@ -815,8 +820,8 @@ class TransactionService extends DBService<ITransaction> {
         const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('yellowcard', ngnAmount);
         const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
 
-        // Unverified users may transact below the KYC limit
-        await kycLimitService.assertAllowed(userId, [
+        // Daily tier limit (throws when this would exceed today's limit)
+        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(userId, [
             { amount: totalDebit, currency: fromCurrency },
             { amount, currency: toCurrency },
         ]);
@@ -974,6 +979,7 @@ class TransactionService extends DBService<ITransaction> {
         let transactionDetails: any;
         try {
             transaction = await this.create({
+                usdValue: txUsdValue ?? undefined,
                 user: userId,
                 reference: sequenceId,
                 amount: Math.round(amount * 100) / 100,
@@ -1473,8 +1479,8 @@ class TransactionService extends DBService<ITransaction> {
         }
         const grossNgn = Math.round(amount * userRate * 100) / 100;
 
-        // Unverified users may receive below the KYC limit
-        await kycLimitService.assertAllowed(userId, [
+        // Daily tier limit (throws when this would exceed today's limit)
+        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(userId, [
             { amount, currency: fromCurrency },
             { amount: grossNgn, currency: toCurrency },
         ]);
@@ -1556,6 +1562,7 @@ class TransactionService extends DBService<ITransaction> {
         let transactionDetails: any;
         try {
             transaction = await this.create({
+                usdValue: txUsdValue ?? undefined,
                 user: userId,
                 reference: sequenceId,
                 amount: Math.round(amount * 100) / 100,
@@ -2169,8 +2176,8 @@ class TransactionService extends DBService<ITransaction> {
         const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('ogateway', ngnAmount);
         const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
 
-        // Unverified users may transact below the KYC limit
-        await kycLimitService.assertAllowed(userId, [
+        // Daily tier limit (throws when this would exceed today's limit)
+        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(userId, [
             { amount: totalDebit, currency: 'NGN' },
             { amount, currency: 'GHS' },
         ]);
@@ -2277,6 +2284,7 @@ class TransactionService extends DBService<ITransaction> {
         let transactionDetails: any;
         try {
             transaction = await this.create({
+                usdValue: txUsdValue ?? undefined,
                 user: userId,
                 reference: sequenceId,
                 amount: Math.round(amount * 100) / 100,
@@ -2470,8 +2478,8 @@ class TransactionService extends DBService<ITransaction> {
             throw errorResponseMessage.createError(400, "Could not compute NGN amount from the live OGateway rate", ErrorSeverity.HIGH);
         }
 
-        // Unverified users may receive below the KYC limit
-        await kycLimitService.assertAllowed(userId, [
+        // Daily tier limit (throws when this would exceed today's limit)
+        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(userId, [
             { amount, currency: 'GHS' },
             { amount: grossNgn, currency: 'NGN' },
         ]);
@@ -2499,6 +2507,7 @@ class TransactionService extends DBService<ITransaction> {
         const lockedRate = userRate;
 
         const transaction = await this.create({
+            usdValue: txUsdValue ?? undefined,
             user: userId,
             reference: sequenceId,
             amount: Math.round(amount * 100) / 100,

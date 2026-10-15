@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import TokenBuilder from "../utils/token.utils";
+import { TokenType } from "../utils/interface";
 import UserService from "../services/user.service";
 
 class AuthMiddleware {
@@ -39,7 +40,16 @@ class AuthMiddleware {
 
             // Validate and parse token
             const token = this.parseToken(tokenString);
-            const { data, iat, exp }: any = await token.verifyToken();
+            const { data, type, iat, exp }: any = await token.verifyToken();
+
+            // Only access tokens open a session (not refresh, reset or registration tokens)
+            if (type && type !== TokenType.ACCESS) {
+                res.status(401).json({
+                    success: false,
+                    message: "Unauthorized: Invalid token type"
+                });
+                return;
+            }
 
             // Validate token contents
             if (!data?.email || !data?.userId) {

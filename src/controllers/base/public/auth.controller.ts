@@ -8,6 +8,7 @@ import {ROLE_MAP} from "../../../common/constant";
 import RefreshTokenService from "../../../services/refresh.service";
 import authMiddleware from "../../../middlewares/auth.middleware";
 import {loginValidate, postRegisterValidate, registerValidate, validateResetTransactionPin} from "../../../validators";
+import {parsePostRegistration} from "../../../validators/z-register";
 import {IUser} from "../../../models/interface";
 import config from "../../../config/env.config";
 import NotificationService from "../../../utils/notification.utils";
@@ -143,7 +144,8 @@ class AuthController extends BaseController {
 
             this.sendSuccess(res, {
                 message: "Registration successful. Please verify your email.",
-                userId: user._id
+                userId: user._id,
+                registrationToken: this.createRegistrationToken(user)
             }, 201);
         } catch (error) {
             return next(error);
@@ -156,16 +158,29 @@ class AuthController extends BaseController {
      */
     private async completeRegistration (req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const { userId } = req.query;
-            if(!userId) {
-                return next(errorResponseMessage.createError(
-                    ErrorResponseCode.BAD_REQUEST,
-                    "User Id is required to complete registration",
-                    ErrorSeverity.HIGH
-                ))
+            // The token issued at sign-up (or at sign-in while sign-up is unfinished) proves who is completing it
+            const registrationToken = req.body?.registrationToken || req.headers['x-registration-token'];
+            if (!registrationToken || typeof registrationToken !== 'string') {
+                return next(errorResponseMessage.unauthorized("Your sign-up session has expired. Please sign in to continue."));
             }
 
-            const userExists = await this.userService.findById(userId as string);
+            let tokenUserId: string | undefined;
+            try {
+                const decoded = await this.tokenBuilder.setToken(registrationToken).build().verifyToken();
+                if (decoded.type === TokenType.REGISTRATION) tokenUserId = decoded.data?.userId;
+            } catch {
+                tokenUserId = undefined;
+            }
+            if (!tokenUserId) {
+                return next(errorResponseMessage.unauthorized("Your sign-up session has expired. Please sign in to continue."));
+            }
+
+            const { userId } = req.query;
+            if (userId && String(userId) !== String(tokenUserId)) {
+                return next(errorResponseMessage.unauthorized("This sign-up session belongs to a different account."));
+            }
+
+            const userExists = await this.userService.findById(tokenUserId);
 
             if(!userExists) {
                 return next(errorResponseMessage.createError(
@@ -175,9 +190,18 @@ class AuthController extends BaseController {
                 ))
             }
 
-            const registrationCompleteionData: Partial<IUser> = req.body;
+            if (userExists.isCompleted) {
+                return next(errorResponseMessage.createError(
+                    ErrorResponseCode.RESOURCE_ALREADY_EXISTS,
+                    "Your registration is already complete. Please sign in.",
+                    ErrorSeverity.LOW
+                ));
+            }
 
-            const completeUser = await this.userService.updateById(userId as string, {...registrationCompleteionData, isCompleted: true})
+            // Only the validated sign-up fields; never role, tier or verification flags from the request
+            const registrationCompletionData = parsePostRegistration(req.body);
+
+            const completeUser = await this.userService.updateById(tokenUserId, {...registrationCompletionData, isCompleted: true})
 
             if(!completeUser) {
                 throw new Error("Failed to complete user registration");
@@ -198,12 +222,21 @@ class AuthController extends BaseController {
                 user: {
                     id: completeUser._id,
                     email: completeUser.email,
-                    role: Object.entries(ROLE_MAP).find(([_, v]) => v === completeUser.role)?.[0]
+                    role: Object.entries(ROLE_MAP).find(([_, v]) => v === completeUser.role)?.[0],
+                    purpose: completeUser.purpose
                 }
             })
         } catch(error) {
             return next(error)
         }
+    }
+
+    /** A short-lived token that only lets this user finish sign-up */
+    private createRegistrationToken(user: IUser): string {
+        return this.tokenBuilder.build().createToken(user, {
+            type: TokenType.REGISTRATION,
+            expiresIn: '2h'
+        });
     }
 
     /**
@@ -242,7 +275,8 @@ class AuthController extends BaseController {
                 return this.sendSuccess(res, {
                     message: "Registration not completed. Redirecting to completion step",
                     not_completed: true,
-                    userId: user._id
+                    userId: user._id,
+                    registrationToken: this.createRegistrationToken(user)
                 });
             }
 

@@ -200,6 +200,13 @@ export const getStepSchema = (type: KycType, step: KycStep, complete: boolean): 
 
 export const ZKycStart = z.object({
     type: z.enum(["individual", "business"], { errorMap: () => ({ message: "Choose individual or business" }) }),
+    /** Tier to upgrade to; older clients that only send a type get the tier they used to apply for */
+    tier: z.union([z.literal(2), z.literal(3)], { errorMap: () => ({ message: "Choose Tier 2 or Tier 3" }) }).optional(),
+}).transform((data) => ({ ...data, tier: data.tier ?? (data.type === "business" ? 3 : 2) as 2 | 3 }));
+
+export const ZTierOverride = z.object({
+    tier: z.union([z.literal(1), z.literal(2), z.literal(3)], { errorMap: () => ({ message: "Tier must be 1, 2 or 3" }) }),
+    reason: z.string({ required_error: "Please give a reason" }).trim().min(3, "Please give a reason").max(500),
 });
 
 export const ZKycReview = z.object({

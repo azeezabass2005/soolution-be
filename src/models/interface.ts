@@ -1,4 +1,5 @@
 import mongoose, {Document, Schema} from 'mongoose';
+import { UserTier } from "../common/tier.constants";
 import {
     USER_STATUS,
     PUBLICATION_STATUS, TRANSACTION_STATUS, TRANSACTION_TYPE, DETAIL_TYPE, ALIPAY_PLATFORM,
@@ -39,13 +40,16 @@ export interface IUser extends Document {
     whatsappNumber: string;
     countryOfOrigin?: string;
     countryOfResidence?: string;
-    purpose?: 'business' | 'spending';
+    purpose?: 'business' | 'personal' | 'travel' | 'investment' | 'savings' | 'others' | 'spending';
     typeOfBusiness?: 'creators' | 'retail-sales' | 'software' | 'services' | 'entertainment' | 'media' | 'payments' | 'others';
     monthlyVolume?: string;
-    hearAboutUs?: 'friends' | 'ads' | 'referrals' | 'events' | 'youtube' | 'instagram' | 'x-twitter' | 'facebook' | 'tiktok' | 'google' | 'others';
+    hearAboutUs?: 'friends' | 'ads' | 'search-engines' | 'social-media' | 'referrals' | 'events' | 'youtube' | 'instagram' | 'x-twitter' | 'facebook' | 'tiktok' | 'google' | 'others';
     hearAboutUsOther?: string;
 
     // KYC related fields
+    /** Account tier (1 Individual, 2 Business, 3 Institution); sets the daily limit */
+    tier: UserTier;
+    tierHistory?: { tier: UserTier; reason: string; by?: Schema.Types.ObjectId | string; at: Date }[];
     isKYCDone?: boolean;
     isKYCRejected?: boolean;
     kycRejectionReason?: string;
@@ -85,6 +89,8 @@ export interface IExchangeRate extends Document {
  */
 export interface IPlatformSettings extends Document {
     kind: 'singleton';
+    /** Daily transaction limits in USD per tier (Tier 3 is unlimited) */
+    tierDailyLimitUsd: { tier1: number; tier2: number };
     rateMarkupPercent: number;
     additionalFeePercent: number;
     providerBaseFeePercent: {
@@ -199,6 +205,8 @@ export interface ITransaction extends Document {
     // FX snapshot — captured at transaction creation so reports can replay
     // the exact rate used, independent of live exchange-rate changes.
     lockedRate?: number;
+    /** USD value at creation; counts towards the user's daily tier limit */
+    usdValue?: number;
     lockedRateFromCurrency?: string;
     lockedRateToCurrency?: string;
     lockedRateAt?: Date;
@@ -277,6 +285,26 @@ export interface IYellowCardRate {
     locale: string;
     country: string;
     currency: string;
+}
+
+export interface IBeneficiary extends Document {
+    user: mongoose.Types.ObjectId | string;
+    currency: string;
+    kind: 'bank' | 'momo' | 'alipay' | 'wechat';
+    nickname?: string;
+    bankName?: string;
+    accountNumber?: string;
+    accountName?: string;
+    momoNetwork?: string;
+    momoNumber?: string;
+    momoName?: string;
+    alipayType?: string;
+    alipayNo?: string;
+    alipayName?: string;
+    qrCodeUrl?: string;
+    lastUsedAt?: Date;
+    createdAt?: Date;
+    updatedAt?: Date;
 }
 
 export interface IBankAccountDetails extends Document {
@@ -395,6 +423,10 @@ export interface IKycReviewEvent {
 export interface IKycApplication extends Document {
     user: Schema.Types.ObjectId | string | IUser;
     type: KycType;
+    /** Tier this application upgrades the user to (decides its steps and documents) */
+    tier: UserTier;
+    /** Earlier approved applications replaced by an upgrade of a different type */
+    archive?: Record<string, any>[];
     status: KycStatus;
     /** Name shown to admins: business name or the individual's full name */
     displayName?: string;

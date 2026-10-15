@@ -1,0 +1,37 @@
+/**
+ * Account tiers. Every user starts on Tier 1 (no verification) and can apply
+ * to upgrade; each tier has a daily transaction limit in USD.
+ * Limits are admin-editable in platform settings; these are the defaults.
+ */
+
+export const USER_TIER = {
+    INDIVIDUAL: 1,
+    BUSINESS: 2,
+    INSTITUTION: 3,
+} as const;
+
+export type UserTier = (typeof USER_TIER)[keyof typeof USER_TIER];
+
+export const USER_TIERS: UserTier[] = [USER_TIER.INDIVIDUAL, USER_TIER.BUSINESS, USER_TIER.INSTITUTION];
+
+/** Tiers a user can apply for (Tier 1 needs no application) */
+export const UPGRADE_TIERS: UserTier[] = [USER_TIER.BUSINESS, USER_TIER.INSTITUTION];
+
+export const TIER_NAME: Record<UserTier, string> = {
+    1: "Individual",
+    2: "Business",
+    3: "Institution",
+};
+
+/** Default daily limits in USD; Tier 3 is unlimited */
+export const DEFAULT_TIER_DAILY_LIMIT_USD = {
+    tier1: 2_000,
+    tier2: 100_000,
+};
+
+/**
+ * The daily limit resets at midnight Lagos time (WAT, UTC+1, no daylight saving)
+ */
+export const LIMIT_DAY_UTC_OFFSET_HOURS = 1;
+
+export const isUserTier = (value: unknown): value is UserTier => USER_TIERS.includes(value as UserTier);

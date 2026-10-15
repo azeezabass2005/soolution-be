@@ -23,7 +23,9 @@ export enum TokenType {
     VERIFY = 'verify',
     REFRESH = 'refresh',
     RESET = 'reset',
-    RESET_PIN = 'reset_pin'
+    RESET_PIN = 'reset_pin',
+    /** Lets a newly registered user finish sign-up; not a session */
+    REGISTRATION = 'registration'
 }
 
 /**

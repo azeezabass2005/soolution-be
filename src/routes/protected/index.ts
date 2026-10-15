@@ -18,6 +18,7 @@ import adminWebhooksController from "../../controllers/base/protected/admin/webh
 import adminSuspenseController from "../../controllers/base/protected/admin/suspense.controller";
 import adminPlatformSettingsController from "../../controllers/base/protected/admin/platform-settings.controller";
 import kycController from "../../controllers/base/protected/kyc.controller";
+import beneficiaryController from "../../controllers/base/protected/beneficiary.controller";
 
 const path = "/protected";
 const protectedRouter = Router();
@@ -43,6 +44,7 @@ protectedRouter.use(`${path}/yellowcard`, yellowCardTransactionController);
 protectedRouter.use(`${path}/ogateway`, ogatewayTransactionController);
 protectedRouter.use(`${path}/wallet`, walletController);
 protectedRouter.use(`${path}/pin`, pinController);
+protectedRouter.use(`${path}/beneficiaries`, beneficiaryController);
 
 // Admin-only routes (each controller applies RoleMiddleware.isAdmin internally)
 protectedRouter.use(`${path}/admin/ledger`, adminLedgerController);
