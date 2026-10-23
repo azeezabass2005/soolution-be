@@ -56,6 +56,7 @@ class App {
                 'https://soolution.co',
                 'https://www.soolution.co',
                 'https://www.solutionpay.co',
+                'https://staging.solutionpay.co',
                 'https://trycloudflared.com',
                 'https://df0c-102-89-83-98.ngrok-free.app'
             ],
