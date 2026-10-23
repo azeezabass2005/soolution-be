@@ -70,7 +70,22 @@ export const WalletTransactionSchema = new Schema<IWalletTransaction>(
         reversedTransactionId: {
             type: Schema.Types.ObjectId,
             ref: MODEL_NAME.WALLET_TRANSACTION
-        }
+        },
+
+        currency: { type: String, uppercase: true, trim: true },
+
+        // Exchanges
+        counterCurrency: { type: String, uppercase: true, trim: true },
+        counterAmount: { type: Number, min: 0 },
+        rate: { type: Number, min: 0 },
+        fxQuoteId: { type: Schema.Types.ObjectId, ref: MODEL_NAME.FX_QUOTE },
+
+        // Sends paid from this wallet
+        sendNgnAmount: { type: Number, min: 0 },
+        sendNgnFee: { type: Number, min: 0 },
+        sendFee: { type: Number, min: 0 },
+        providerAccountCode: { type: String },
+        transactionId: { type: Schema.Types.ObjectId, ref: MODEL_NAME.TRANSACTION, index: true }
     },
     {
         toObject: { virtuals: true },

@@ -16,6 +16,7 @@ import {
     userWalletAccountCode,
 } from "../common/constant";
 import { WALLET_LIMITS } from "../config/wallet-limits.config";
+import { BASE_WALLET_CURRENCY, WALLET_CURRENCIES, WalletCurrency, isWalletCurrency } from "../common/wallet.constants";
 import config from "../config/env.config";
 import mongoose from "mongoose";
 import logger from "../utils/logger.utils";
@@ -40,25 +41,66 @@ class WalletService extends DBService<IWallet> {
     // ===================== WALLET MANAGEMENT =====================
 
     /**
-     * Get or create a wallet for a user. Also ensures the user's per-currency
-     * ledger account (USER_WALLET_NGN:{userId}) exists so subsequent journal
-     * postings have a target account ready.
+     * Get or create one of a user's wallets (NGN unless another currency is
+     * given). Also ensures the wallet's ledger account
+     * (USER_WALLET_{CUR}:{userId}) exists so postings have a target ready.
      */
-    async getOrCreateWallet(userId: string): Promise<IWallet> {
-        let wallet = await this.findOne({ user: userId });
+    async getOrCreateWallet(userId: string, currency: WalletCurrency = BASE_WALLET_CURRENCY): Promise<IWallet> {
+        let wallet = await this.findOne({ user: userId, currency });
         if (!wallet) {
-            wallet = await this.save({
-                user: userId,
-                currency: WALLET_LIMITS.CURRENCY,
-                balance: 0,
-                ledgerBalance: 0,
-                status: WALLET_STATUS.ACTIVE,
-                isPinSet: false,
-                isDVAProvisioned: false,
-                pinAttempts: 0,
-            });
+            try {
+                wallet = await this.save({
+                    user: userId,
+                    currency,
+                    balance: 0,
+                    ledgerBalance: 0,
+                    status: WALLET_STATUS.ACTIVE,
+                    isPinSet: false,
+                    isDVAProvisioned: false,
+                    pinAttempts: 0,
+                });
+            } catch (error: any) {
+                // Two requests raced to create it; the unique index kept one
+                if (error?.code !== 11000) throw error;
+                wallet = await this.findOne({ user: userId, currency });
+                if (!wallet) throw error;
+            }
         }
         await this.ensureUserLedgerAccount(userId, wallet);
+        return wallet;
+    }
+
+    /** The user's NGN wallet if it exists (funding, withdrawals and NGN sends use it) */
+    async findBaseWallet(userId: string): Promise<IWallet | null> {
+        return this.findOne({ user: userId, currency: BASE_WALLET_CURRENCY });
+    }
+
+    /** All of a user's wallets, NGN first then in the order they were opened */
+    async listWallets(userId: string) {
+        await this.getOrCreateWallet(userId);
+        const wallets = await this.Model.find({ user: userId })
+            .select("currency balance ledgerBalance status isDVAProvisioned dvaBankName dvaAccountNumber dvaAccountName createdAt")
+            .sort({ createdAt: 1 })
+            .lean();
+        return wallets.sort((a, b) => Number(b.currency === BASE_WALLET_CURRENCY) - Number(a.currency === BASE_WALLET_CURRENCY));
+    }
+
+    /** Open a wallet in another currency */
+    async createWallet(userId: string, currency: unknown): Promise<IWallet> {
+        const code = typeof currency === "string" ? currency.trim().toUpperCase() : currency;
+        if (!isWalletCurrency(code)) {
+            throw errorResponseMessage.createError(400, "Choose a currency we support for wallets", ErrorSeverity.LOW, {
+                supported: WALLET_CURRENCIES,
+            });
+        }
+        const existing = await this.findOne({ user: userId, currency: code });
+        if (existing) {
+            throw errorResponseMessage.createError(409, `You already have a ${code} wallet`, ErrorSeverity.LOW, {
+                walletId: String(existing._id),
+            });
+        }
+        const wallet = await this.getOrCreateWallet(userId, code);
+        logger.info("Wallet opened", { userId, currency: code });
         return wallet;
     }
 
@@ -76,7 +118,7 @@ class WalletService extends DBService<IWallet> {
             code,
             type: ACCOUNT_TYPE.LIABILITY,
             currency: wallet.currency,
-            name: `User wallet — ${userId}`,
+            name: `User wallet ${wallet.currency} — ${userId}`,
             ownerUser: userId,
             ownerWallet: wallet._id,
             balance: 0,
@@ -160,7 +202,7 @@ class WalletService extends DBService<IWallet> {
         const user = await User.findById(userId).select('+transactionPinHash');
         if (!user || user.isTransactionPinSet) return;
 
-        const wallet = await this.Model.findOne({ user: userId }).select('+pinHash');
+        const wallet = await this.Model.findOne({ user: userId, currency: BASE_WALLET_CURRENCY }).select('+pinHash');
         if (!wallet || !wallet.isPinSet || !wallet.pinHash) return;
 
         await User.updateOne(
@@ -290,6 +332,7 @@ class WalletService extends DBService<IWallet> {
                 balanceBefore,
                 balanceAfter,
                 description: `Wallet funding via bank transfer`,
+                currency: wallet.currency,
                 paystackReference,
             }, session);
 
@@ -424,7 +467,7 @@ class WalletService extends DBService<IWallet> {
             );
         }
 
-        const wallet = await this.findOne({ user: userId });
+        const wallet = await this.findBaseWallet(userId);
         if (!wallet) throw errorResponseMessage.resourceNotFound("Wallet");
 
         if (wallet.status !== WALLET_STATUS.ACTIVE) {
@@ -486,6 +529,7 @@ class WalletService extends DBService<IWallet> {
                 balanceBefore,
                 balanceAfter,
                 description: `Withdrawal to ${accountName} (${accountNumber})`,
+                currency: wallet.currency,
                 paystackReference: reference,
                 recipientBankCode: bankCode,
                 recipientAccountNumber: accountNumber,
@@ -749,6 +793,7 @@ class WalletService extends DBService<IWallet> {
                 balanceBefore: wallet.balance - walletTx.amount,
                 balanceAfter: wallet.balance,
                 description: `Reversal of failed withdrawal (${walletTx.reference})`,
+                currency: wallet.currency,
                 reversedTransactionId: walletTx._id,
             }, session);
 
@@ -918,9 +963,14 @@ class WalletService extends DBService<IWallet> {
     /**
      * Get paginated wallet transaction history
      */
-    async getTransactionHistory(userId: string, options: { page: number; limit: number; type?: string }) {
+    async getTransactionHistory(userId: string, options: { page: number; limit: number; type?: string; currency?: string }) {
         const query: any = { user: userId };
         if (options.type) query.type = options.type;
+        if (options.currency) {
+            const wallet = await this.findOne({ user: userId, currency: options.currency.toUpperCase() });
+            // An unopened wallet has no history
+            query.wallet = wallet?._id ?? null;
+        }
 
         return this.walletTransactionService.paginate(query, {
             page: options.page,

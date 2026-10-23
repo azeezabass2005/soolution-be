@@ -1,3 +1,4 @@
+import { WalletCurrency } from "../common/wallet.constants";
 import mongoose, {Document, Schema} from 'mongoose';
 import { UserTier } from "../common/tier.constants";
 import {
@@ -197,6 +198,7 @@ export interface ITransaction extends Document {
     initiatedAt: Date;
     completedAt?: Date;
     failedAt?: Date;
+    cancelReason?: string;
     details?: ITransactionDetail;
 
     // New Fields
@@ -267,6 +269,12 @@ export interface ITransactionDetail extends Document {
     feePercent?: number;           // total % the user paid (providerBase + additional)
     providerFeePercent?: number;   // what the rail itself charged
     markupPercent?: number;        // % spread applied to the FX rate at the time
+
+    // Which wallet paid for a send. fromAmount/feeAmount stay in NGN because
+    // the provider side of the ledger is booked in NGN.
+    fundingCurrency?: string;      // NGN, or the destination currency's wallet
+    fundingAmount?: number;        // total taken from that wallet (incl. fee)
+    fundingFee?: number;           // fee part, in the wallet's currency
 }
 
 export interface IYellowCardChannel {
@@ -347,7 +355,7 @@ export interface IBankAccountDetails extends Document {
 
 export interface IWallet extends Document {
     user: Schema.Types.ObjectId | string;
-    currency: 'NGN';
+    currency: WalletCurrency;
     balance: number;
     ledgerBalance: number;
     status: WalletStatus;
@@ -394,6 +402,24 @@ export interface IWalletTransaction extends Document {
     // Failure/reversal info
     failureReason?: string;
     reversedTransactionId?: Schema.Types.ObjectId | string;
+
+    /** The wallet's currency (rows created before multi-currency wallets are NGN) */
+    currency?: string;
+
+    // Exchanges: the other side of the conversion
+    counterCurrency?: string;
+    counterAmount?: number;
+    /** NGN per 1 unit of the other currency, as quoted */
+    rate?: number;
+    fxQuoteId?: Schema.Types.ObjectId | string;
+
+    // Sends paid from this wallet: the NGN figures posted to the provider
+    // side of the ledger, so a refund reverses exactly what was booked
+    sendNgnAmount?: number;
+    sendNgnFee?: number;
+    sendFee?: number;
+    providerAccountCode?: string;
+    transactionId?: Schema.Types.ObjectId | string;
 }
 
 export interface IVerification extends Document {

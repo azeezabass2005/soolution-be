@@ -12,7 +12,8 @@ import DatabaseService from "./config/db.config";
 import ResponseErrorHandler from "./middlewares/error.middleware";
 import NotificationService from './utils/notification.utils';
 import { bootstrapSystemAccounts } from './services/account.bootstrap';
-import { migrateUserTiers } from './services/tier.bootstrap';
+import { migrateUserTiers, releaseLegacyKycHolds } from './services/tier.bootstrap';
+import { ensureBaseWallets } from './services/wallet.bootstrap';
 import { registerJobs } from './jobs';
 
 
@@ -117,9 +118,18 @@ class App {
                 error: error instanceof Error ? error.message : String(error),
             });
         }
+        // Every user has an NGN wallet (idempotent)
+        try {
+            await ensureBaseWallets();
+        } catch (error) {
+            logger.error('Failed to open NGN wallets', {
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
         // Accounts created before tiers get one (idempotent)
         try {
             await migrateUserTiers();
+            await releaseLegacyKycHolds();
         } catch (error) {
             logger.error('Failed to migrate account tiers', {
                 error: error instanceof Error ? error.message : String(error),

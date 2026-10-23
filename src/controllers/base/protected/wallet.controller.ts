@@ -3,6 +3,8 @@ import WalletService from "../../../services/wallet.service";
 import { Request, Response, NextFunction } from "express";
 import { validateSetPin, validateChangePin, validateInitiateWithdrawal, validateResolveAccount } from "../../../validators/z-wallet";
 import logger from "../../../utils/logger.utils";
+import fxExchangeService from "../../../services/fx-exchange.service";
+import { WALLET_CURRENCIES } from "../../../common/wallet.constants";
 
 class WalletController extends BaseController {
     private walletService: WalletService;
@@ -17,8 +19,17 @@ class WalletController extends BaseController {
         // Get or create wallet (+ provision DVA on first access)
         this.router.get("/", this.getWallet.bind(this));
 
-        // Quick balance check
+        // Quick balance check (NGN wallet)
         this.router.get("/balance", this.getBalance.bind(this));
+
+        // Multi-currency wallets
+        this.router.get("/list", this.listWallets.bind(this));
+        this.router.get("/currencies", this.listCurrencies.bind(this));
+        this.router.post("/create", this.createWallet.bind(this));
+
+        // Exchange between wallets: lock a rate, then exchange with the PIN
+        this.router.post("/exchange/quote", this.quoteExchange.bind(this));
+        this.router.post("/exchange", this.exchange.bind(this));
 
         // PIN management
         this.router.post("/pin/set", validateSetPin, this.setPin.bind(this));
@@ -61,6 +72,53 @@ class WalletController extends BaseController {
             }
 
             return this.sendSuccess(res, { wallet });
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async listWallets(req: Request, res: Response, next: NextFunction) {
+        try {
+            const wallets = await this.walletService.listWallets(String(res.locals.user._id));
+            return this.sendSuccess(res, { wallets });
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async listCurrencies(_req: Request, res: Response, next: NextFunction) {
+        try {
+            return this.sendSuccess(res, { currencies: WALLET_CURRENCIES });
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async createWallet(req: Request, res: Response, next: NextFunction) {
+        try {
+            const wallet = await this.walletService.createWallet(String(res.locals.user._id), req.body?.currency);
+            return this.sendSuccess(res, {
+                wallet: { _id: wallet._id, currency: wallet.currency, balance: wallet.balance, ledgerBalance: wallet.ledgerBalance, status: wallet.status, createdAt: (wallet as any).createdAt },
+                message: `${wallet.currency} wallet created`,
+            }, 201);
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async quoteExchange(req: Request, res: Response, next: NextFunction) {
+        try {
+            const quote = await fxExchangeService.quote(String(res.locals.user._id), req.body ?? {});
+            return this.sendSuccess(res, { quote });
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async exchange(req: Request, res: Response, next: NextFunction) {
+        try {
+            const result = await fxExchangeService.execute(String(res.locals.user._id), req.body?.quoteId, req.body?.pin);
+            return this.sendSuccess(res, { ...result, message: "Exchange complete" });
         } catch (error) {
             return next(error);
         }
@@ -144,12 +202,13 @@ class WalletController extends BaseController {
     private async getTransactionHistory(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            const { page, limit, type } = req.query;
+            const { page, limit, type, currency } = req.query;
 
             const transactions = await this.walletService.getTransactionHistory(user._id!, {
                 page: parseInt(page as string) || 1,
                 limit: parseInt(limit as string) || 10,
                 type: type as string | undefined,
+                currency: typeof currency === "string" && currency ? currency : undefined,
             });
 
             return this.sendSuccess(res, transactions);

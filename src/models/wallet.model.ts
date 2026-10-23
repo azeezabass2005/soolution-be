@@ -1,6 +1,7 @@
 import { model, Model, Schema } from "mongoose";
 import { IWallet, WalletStatus } from "./interface";
 import { MODEL_NAME, WALLET_STATUS } from "../common/constant";
+import { BASE_WALLET_CURRENCY, WALLET_CURRENCIES } from "../common/wallet.constants";
 
 const WALLET_STATUSES = Object.values(WALLET_STATUS);
 
@@ -15,8 +16,8 @@ export const WalletSchema = new Schema<IWallet>(
         currency: {
             type: String,
             required: true,
-            default: 'NGN',
-            enum: ['NGN']
+            default: BASE_WALLET_CURRENCY,
+            enum: WALLET_CURRENCIES
         },
         balance: {
             type: Number,
@@ -37,7 +38,7 @@ export const WalletSchema = new Schema<IWallet>(
             default: WALLET_STATUS.ACTIVE
         },
 
-        // Paystack customer & DVA
+        // Paystack customer & DVA (NGN wallet only)
         paystackCustomerCode: { type: String },
         paystackCustomerId: { type: Number },
         dvaBankName: { type: String },
@@ -64,6 +65,8 @@ export const WalletSchema = new Schema<IWallet>(
 // Unique: one wallet per user per currency
 WalletSchema.index({ user: 1, currency: 1 }, { unique: true });
 WalletSchema.index({ paystackCustomerCode: 1 });
+// A wallet's first funding is the anchor for cross-wallet statements
+WalletSchema.index({ user: 1, createdAt: 1 });
 
 // Virtual: check if PIN is currently locked
 WalletSchema.virtual('isLocked').get(function () {

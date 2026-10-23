@@ -22,6 +22,7 @@ export const MODEL_NAME = {
     KYC_APPLICATION: "KycApplicationModel",
     TRANSACTION_LIMIT_LOCK: "TransactionLimitLockModel",
     BENEFICIARY: "BeneficiaryModel",
+    FX_QUOTE: "FxQuoteModel",
 }
 
 // ===================== LEDGER / CHART OF ACCOUNTS =====================
@@ -58,6 +59,7 @@ export const JOURNAL_SOURCE = {
     REVERSAL: 'reversal',
     MANUAL_ATTRIBUTION: 'manual_attribution',
     FX: 'fx',
+    MANUAL_PAYOUT: 'manual_payout',
 } as const;
 
 // Fixed system account codes. Per-user wallet accounts use the dynamic
@@ -230,6 +232,7 @@ export const WALLET_TRANSACTION_TYPE = {
     WITHDRAWAL: 'withdrawal',
     TRANSFER: 'transfer',
     REVERSAL: 'reversal',
+    EXCHANGE: 'exchange',
 }
 
 export const WALLET_TRANSACTION_STATUS = {

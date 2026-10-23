@@ -13,6 +13,7 @@ import {IUser} from "../../../models/interface";
 import config from "../../../config/env.config";
 import NotificationService from "../../../utils/notification.utils";
 import PinService from "../../../services/pin.service";
+import WalletService from "../../../services/wallet.service";
 
 /**
  * Controller handling authentication-related operations
@@ -108,6 +109,17 @@ class AuthController extends BaseController {
                 password: hashedPassword.password,
                 isVerified: false
             });
+
+            // Every account starts with an NGN wallet. If this fails, the wallet
+            // is created on first visit (and by the startup backfill), so don't block sign-up.
+            try {
+                await new WalletService().getOrCreateWallet(String(user._id));
+            } catch (error) {
+                this.logger.error('Failed to create NGN wallet at sign-up', {
+                    userId: user._id,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
 
             // Generate verification token
             // const verificationToken = this.tokenBuilder.build().createVerifyToken({

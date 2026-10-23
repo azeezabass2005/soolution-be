@@ -97,7 +97,7 @@ class AdminSuspenseController extends BaseController {
                 throw errorResponseMessage.payloadIncorrect('Entry has already been attributed');
             }
 
-            const wallet = await Wallet.findOne({ user: userId }).session(session);
+            const wallet = await Wallet.findOne({ user: userId, currency: 'NGN' }).session(session);
             if (!wallet) throw errorResponseMessage.resourceNotFound('Wallet for user');
             if (wallet.status !== WALLET_STATUS.ACTIVE) {
                 throw errorResponseMessage.payloadIncorrect('Target wallet is not active');

@@ -40,6 +40,8 @@ import {
 } from "../common/constant";
 import WalletService from "./wallet.service";
 import WalletTransactionService from "./wallet-transaction.service";
+import walletSendService from "./wallet-send.service";
+import { MANUAL_PAYOUT_CURRENCIES } from "../common/wallet.constants";
 import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
 
@@ -96,6 +98,10 @@ class TransactionService extends DBService<ITransaction> {
         userAgent?: string
     ) => {
         const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName, idempotencyKey, fromAmount, transactionType, pin } = transactionData;
+        // A send paid from the destination currency's wallet: ops pays out directly
+        const fromWallet = transactionType === 'send' && toCurrency
+            ? this.resolveManualWallet((transactionData as any).walletCurrency, toCurrency)
+            : null;
 
         if (!toCurrency) {
             throw errorResponseMessage.payloadIncorrect("Target currency (toCurrency) is required");
@@ -155,6 +161,7 @@ class TransactionService extends DBService<ITransaction> {
             { amount: calculatedFromAmount, currency: fromCurrency },
             { amount, currency: toCurrency },
         ]);
+        if (fromWallet) await walletSendService.assertCanPay(user, fromWallet, Math.round(amount * 100) / 100);
 
         // Handle idempotency key if provided
         if (idempotencyKey) {
@@ -172,8 +179,8 @@ class TransactionService extends DBService<ITransaction> {
             }
         }
 
-        const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
-        if(!bankAccountDetails) {
+        const bankAccountDetails = fromWallet ? null : await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
+        if(!fromWallet && !bankAccountDetails) {
             throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
         }
 
@@ -198,7 +205,8 @@ class TransactionService extends DBService<ITransaction> {
             transactionId: transaction._id,
             type: paymentMethod || DETAIL_TYPE.BANK_TRANSFER,
             institutionType,
-            bankAccountDetails: bankAccountDetails.toObject(),
+            ...(bankAccountDetails ? { bankAccountDetails: bankAccountDetails.toObject() } : {}),
+            ...(fromWallet ? { fundingCurrency: fromWallet, fundingAmount: transaction.amount, fundingFee: 0 } : {}),
             fromAmount: calculatedFromAmount, // Amount in source currency (what user sends)
             ...(institutionType === 'bank' ? {
                 bankName,
@@ -210,6 +218,10 @@ class TransactionService extends DBService<ITransaction> {
                 momoName,
             }),
         })
+
+        if (fromWallet) {
+            await this.holdManualPayoutFromWallet(transaction, user, `Payment to ${institutionType === 'bank' ? accountName : momoName || 'recipient'}`);
+        }
 
         // Send transaction initiated email to user
         try {
@@ -245,11 +257,85 @@ class TransactionService extends DBService<ITransaction> {
             // Don't fail transaction creation if email fails
         }
 
-        return { ...transaction.toObject(), details: { ...transactionDetails.toObject() } } 
+        const created = fromWallet ? await this.findById(transaction._id.toString()) : transaction;
+        return { ...(created ?? transaction).toObject(), details: { ...transactionDetails.toObject() } }
     }
 
-    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string; pin?: string }>, alipayQrCode: Express.Multer.File | { qrCodeUrl: string }, user: string, ipAddress?: string, userAgent?: string) =>  {
+    /** null = pay by bank transfer (the default); otherwise the wallet currency, which must match the payout */
+    private resolveManualWallet(requested: unknown, payoutCurrency: string): string | null {
+        if (requested === undefined || requested === null || requested === "") return null;
+        const currency = String(requested).toUpperCase();
+        if (currency !== payoutCurrency || !(MANUAL_PAYOUT_CURRENCIES as readonly string[]).includes(currency)) {
+            throw errorResponseMessage.createError(400, `${payoutCurrency} payments can be paid from your ${payoutCurrency} wallet or by bank transfer`, ErrorSeverity.LOW);
+        }
+        return currency;
+    }
+
+    /**
+     * Take a manual send from the matching wallet and hand it straight to ops
+     * (no bank transfer or receipt). If the hold fails (e.g. the balance was
+     * spent meanwhile) the transaction is cancelled and the error rethrown.
+     */
+    private holdManualPayoutFromWallet = async (transaction: any, userId: string, description: string) => {
+        const session = await mongoose.startSession();
+        session.startTransaction();
+        try {
+            await walletSendService.holdForManualPayout({
+                userId,
+                currency: transaction.currency,
+                amount: transaction.amount,
+                transactionId: String(transaction._id),
+                reference: transaction.reference,
+                description,
+            }, session);
+            await Transaction.updateOne({ _id: transaction._id }, { $set: { status: TRANSACTION_STATUS.AWAITING_CONFIRMATION } }, { session });
+            await session.commitTransaction();
+        } catch (error) {
+            if (session.inTransaction()) await session.abortTransaction();
+            await Transaction.updateOne({ _id: transaction._id }, { $set: { status: TRANSACTION_STATUS.CANCELLED, cancelReason: "Wallet payment could not be taken" } });
+            throw error;
+        } finally {
+            session.endSession();
+        }
+    };
+
+    /**
+     * Admin rejects a manual send that hasn't been paid out. Money taken from a
+     * wallet goes back to it; bank-transfer payments are refunded by ops as before.
+     */
+    public rejectManualTransaction = async (transactionId: string, reason: string, adminId?: string, ipAddress?: string, userAgent?: string) => {
+        const trimmed = typeof reason === "string" ? reason.trim() : "";
+        if (!trimmed) throw errorResponseMessage.payloadIncorrect("Give a reason for rejecting this payment");
+
+        const transaction = await this.findById(transactionId);
+        if (!transaction) throw errorResponseMessage.resourceNotFound("Transaction");
+        const manualTypes: string[] = [DETAIL_TYPE.ALIPAY, DETAIL_TYPE.WECHAT, DETAIL_TYPE.BANK_TRANSFER, DETAIL_TYPE.MOBILE_MONEY];
+        if (!manualTypes.includes(transaction.detailType as string)) {
+            throw errorResponseMessage.createError(400, "Only manual payments can be rejected here", ErrorSeverity.LOW);
+        }
+        transactionStateMachine.validateTransition(transaction.status, TRANSACTION_STATUS.CANCELLED);
+
+        const oldStatus = transaction.status;
+        const updated = await Transaction.findOneAndUpdate(
+            { _id: transactionId, status: oldStatus },
+            { $set: { status: TRANSACTION_STATUS.CANCELLED, cancelReason: trimmed, failedAt: new Date() } },
+            { new: true }
+        );
+        if (!updated) throw errorResponseMessage.createError(409, "This payment changed while you were reviewing it. Refresh and try again.", ErrorSeverity.LOW);
+
+        const refunded = await walletSendService.refundManualPayout(transactionId, trimmed);
+        if (adminId) {
+            this.auditLogService.logStatusChange(transactionId, adminId, oldStatus, TRANSACTION_STATUS.CANCELLED, ipAddress, userAgent)
+                .catch((error: any) => logger.warn('Failed to log rejection', { transactionId, error: error?.message }));
+        }
+        logger.info("Manual transaction rejected", { transactionId, refunded, reason: trimmed });
+        return { transaction: updated, refundedToWallet: refunded };
+    };
+
+    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string; pin?: string; walletCurrency?: string }>, alipayQrCode: Express.Multer.File | { qrCodeUrl: string }, user: string, ipAddress?: string, userAgent?: string) =>  {
         const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod, idempotencyKey, pin } = transactionData;
+        // Paid from the RMB wallet: no bank transfer or receipt, ops pays out directly
+        const fromWallet = this.resolveManualWallet(transactionData.walletCurrency, "RMB");
 
         if (!fromCurrency) {
             throw errorResponseMessage.payloadIncorrect("Source currency (fromCurrency) is required");
@@ -286,6 +372,7 @@ class TransactionService extends DBService<ITransaction> {
 
         // Daily tier limit, valued from the source side (RMB isn't quoted in USD)
         const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(user, [{ amount: ngnEquivalent, currency: fromCurrency }]);
+        if (fromWallet) await walletSendService.assertCanPay(user, "RMB", Math.round(amount * 100) / 100);
 
         // Handle idempotency key if provided
         if (idempotencyKey) {
@@ -303,8 +390,9 @@ class TransactionService extends DBService<ITransaction> {
             }
         }
 
-        const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
-        if(!bankAccountDetails) {
+        // Bank details are only shown when the user pays by bank transfer
+        const bankAccountDetails = fromWallet ? null : await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
+        if(!fromWallet && !bankAccountDetails) {
             throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
         }
         // A saved beneficiary's QR code is reused; a new one is uploaded
@@ -347,9 +435,14 @@ class TransactionService extends DBService<ITransaction> {
             alipayNo,
             alipayName,
             qrCodeUrl,
-            bankAccountDetails: bankAccountDetails.toObject(),
+            ...(bankAccountDetails ? { bankAccountDetails: bankAccountDetails.toObject() } : {}),
+            ...(fromWallet ? { fundingCurrency: "RMB", fundingAmount: transaction.amount, fundingFee: 0 } : {}),
             ...(paymentMethod === 'alipay' ? { platform: platform } : {}),
         })
+
+        if (fromWallet) {
+            await this.holdManualPayoutFromWallet(transaction, user, `Alipay payment to ${alipayName || 'recipient'}`);
+        }
 
         // Send transaction initiated email to user
         try {
@@ -385,7 +478,8 @@ class TransactionService extends DBService<ITransaction> {
             // Don't fail transaction creation if email fails
         }
 
-        return { ...transaction.toObject(), details: { ...transactionDetails.toObject() } } 
+        const created = fromWallet ? await this.findById(transaction._id.toString()) : transaction;
+        return { ...(created ?? transaction).toObject(), details: { ...transactionDetails.toObject() } }
     }
 
     public uploadUserPaymentReceipt = async (transactionId: string, receipt: Express.Multer.File, userId?: string, ipAddress?: string, userAgent?: string) => {
@@ -659,6 +753,12 @@ class TransactionService extends DBService<ITransaction> {
 
         await this.transactionDetailsService.update({ transactionId }, { payOutReceiptUrl: uploadResult.file?.url });
         await this.updateById(transactionId, { status: TRANSACTION_STATUS.COMPLETED });
+        // Paid from a wallet: the held money leaves the platform's FX position
+        try {
+            await walletSendService.completeManualPayout(transactionId);
+        } catch (error: any) {
+            logger.error("CRITICAL: manual payout settlement posting failed", { transactionId, error: error?.message });
+        }
 
         // Log status change and receipt upload
         if (userId) {
@@ -782,12 +882,15 @@ class TransactionService extends DBService<ITransaction> {
             };
             idempotencyKey?: string;
             pin?: string;
+            /** Pay from the NGN wallet (default) or the destination currency's wallet */
+            walletCurrency?: string;
         },
         userId: string,
         ipAddress?: string,
         userAgent?: string
     ) => {
         const { amount, fromCurrency, toCurrency, sender, destination, idempotencyKey, pin } = params;
+        const walletCurrency = walletSendService.resolveWalletCurrency(params.walletCurrency, toCurrency);
 
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
@@ -827,21 +930,12 @@ class TransactionService extends DBService<ITransaction> {
         ]);
         const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
 
-        // Check wallet exists and has sufficient balance
-        const wallet = await this.walletService.findOne({ user: userId });
-        if (!wallet) {
-            throw errorResponseMessage.createError(400, "You don't have a wallet yet. Please set up your wallet first.", ErrorSeverity.MEDIUM);
-        }
-        if (wallet.status !== WALLET_STATUS.ACTIVE) {
-            throw errorResponseMessage.createError(400, "Your wallet is not active. Please contact support.", ErrorSeverity.HIGH);
-        }
-        if (wallet.balance < totalDebit) {
-            throw errorResponseMessage.createError(
-                400,
-                `Insufficient wallet balance. You need ₦${totalDebit.toLocaleString()} but your balance is ₦${wallet.balance.toLocaleString()}. Please fund your wallet first.`,
-                ErrorSeverity.MEDIUM
-            );
-        }
+        // Check the paying wallet exists and has enough before calling YellowCard
+        await walletSendService.assertCanPay(
+            userId,
+            walletCurrency,
+            walletCurrency === 'NGN' ? totalDebit : Math.round((amount + walletSendService.walletFeeFor(amount, feePercent)) * 100) / 100,
+        );
 
         // Handle idempotency
         if (idempotencyKey) {
@@ -909,66 +1003,28 @@ class TransactionService extends DBService<ITransaction> {
         const sequenceId = this.generateYellowCardSequenceId();
 
         // ========== ATOMIC WALLET DEBIT ==========
-        // Debit wallet balance before creating the transaction
-        const walletSession = await mongoose.startSession();
-        walletSession.startTransaction();
-
-        let walletTransaction: any;
-        const walletTxRef = this.walletTransactionService.generateReference('TRF');
-        const balanceBefore = wallet.balance;
-        const balanceAfter = balanceBefore - totalDebit;
-
-        try {
-            // Atomic balance debit with balance guard
-            await this.walletService.debitBalance(wallet._id as string, totalDebit, walletSession);
-
-            // Post journal: user's NGN wallet drops by totalDebit (converted +
-            // fee). The converted portion sits at YC awaiting payout; the fee
-            // lands in FEES_NGN as platform revenue, recognised on initiation.
-            const userAccountCode = userWalletAccountCode(userId, wallet.currency);
-            const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
-                { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount: totalDebit },
-                { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
-            ];
-            if (feeAmount > 0) {
-                legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
-            }
-            await ledgerService.post({
-                legs,
-                source: JOURNAL_SOURCE.YC_SEND,
-                reference: sequenceId,
-                description: `YellowCard send — ${amount} ${toCurrency} to ${destination.accountName}`,
-                externalRef: { provider: WEBHOOK_PROVIDER.YELLOWCARD, id: sequenceId },
-                metadata: {
-                    destinationAmount: amount, destinationCurrency: toCurrency, destCountry,
-                    feeAmount, feePercent, providerFeePercent, markupPercent, providerRate, userRate,
-                },
-                session: walletSession,
-            });
-
-            // Create wallet transaction record
-            walletTransaction = await this.walletTransactionService.create({
-                wallet: wallet._id,
-                user: userId,
-                type: WALLET_TRANSACTION_TYPE.TRANSFER,
-                status: WALLET_TRANSACTION_STATUS.PENDING,
-                amount: totalDebit,
-                reference: walletTxRef,
-                balanceBefore,
-                balanceAfter,
-                description: `Transfer to ${destination.accountName} (${amount} ${toCurrency})`,
-            }, walletSession);
-
-            await walletSession.commitTransaction();
-        } catch (error: any) {
-            if (walletSession.inTransaction()) {
-                await walletSession.abortTransaction();
-            }
-            walletSession.endSession();
-            throw error;
-        } finally {
-            walletSession.endSession();
-        }
+        // The NGN figures are what the provider side of the ledger books; the
+        // paying wallet (NGN, or the destination currency) is debited in its own currency.
+        const { wallet, walletTransaction, walletDebit, walletFee } = await walletSendService.charge({
+            userId,
+            walletCurrency,
+            destinationCurrency: toCurrency,
+            destinationAmount: amount,
+            ngnAmount,
+            ngnFee: feeAmount,
+            feePercent,
+            providerAccountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN,
+            source: JOURNAL_SOURCE.YC_SEND,
+            reference: sequenceId,
+            description: `YellowCard send — ${amount} ${toCurrency} to ${destination.accountName}`,
+            externalRef: { provider: WEBHOOK_PROVIDER.YELLOWCARD, id: sequenceId },
+            metadata: {
+                destinationAmount: amount, destinationCurrency: toCurrency, destCountry,
+                feeAmount, feePercent, providerFeePercent, markupPercent, providerRate, userRate,
+            },
+            walletTxDescription: `Transfer to ${destination.accountName} (${amount} ${toCurrency})`,
+        });
+        const walletTxRef = walletTransaction.reference;
 
         // Capture the locked FX rate so reports can replay the exact rate used.
         // lockedRate = userRate (markup already applied above).
@@ -1010,6 +1066,7 @@ class TransactionService extends DBService<ITransaction> {
         // Link wallet transaction to the YellowCard transaction
         await this.walletTransactionService.updateById(walletTransaction._id as string, {
             paystackReference: sequenceId, // reuse field to link to YC transaction
+            transactionId: transaction._id,
         });
 
         if (idempotencyKey) {
@@ -1028,6 +1085,9 @@ class TransactionService extends DBService<ITransaction> {
                 fromAmount: totalDebit,
                 feeAmount,
                 feePercent,
+                fundingCurrency: walletCurrency,
+                fundingAmount: walletDebit,
+                fundingFee: walletFee,
                 providerFeePercent,
                 markupPercent,
                 accountName: destination.accountName,
@@ -1098,7 +1158,8 @@ class TransactionService extends DBService<ITransaction> {
                     sequenceId,
                     channelId: channel.id,
                     ycPaymentId: paymentResponse?.id,
-                    walletDebit: ngnAmount,
+                    walletCurrency,
+                    walletDebit,
                 });
 
                 return {
@@ -1150,7 +1211,8 @@ class TransactionService extends DBService<ITransaction> {
             sequenceId,
             ycError,
             errorMessage: lastError?.message,
-            refundedAmount: totalDebit,
+            refundedAmount: walletDebit,
+            walletCurrency,
         });
 
         const ycMessage = ycError?.message || ycError?.code || lastError?.message || "YellowCard payment failed";
@@ -1162,81 +1224,28 @@ class TransactionService extends DBService<ITransaction> {
     };
 
     /**
-     * Refund wallet balance when a YellowCard transaction fails. Credits back
-     * the debited amount, posts a balanced reversal journal entry, and creates
-     * a reversal wallet-transaction record.
+     * Refund a failed YellowCard send to the wallet that paid for it. The
+     * amounts come from the wallet transaction; `feeAmount` only matters for
+     * rows created before multi-currency wallets. Never throws: a failed
+     * refund is logged as CRITICAL for manual intervention.
      */
     private refundWallet = async (
-        walletId: any,
-        userId: string,
-        amount: number,
+        _walletId: any,
+        _userId: string,
+        _amount: number,
         walletTransactionId: any,
         originalRef: string,
         reason: string,
         feeAmount: number = 0,
     ) => {
-        const session = await mongoose.startSession();
-        session.startTransaction();
         try {
-            // Credit back the balance (in the same session as the journal post).
-            const updated = await this.walletService.creditBalance(walletId as string, amount, session) as any;
-            const balanceAfter = updated?.balance || 0;
-
-            // Reverse the original YC_SEND posting: pull funds back from
-            // YC_FLOAT_NGN (converted portion) and FEES_NGN (fee portion)
-            // into the user's wallet liability.
-            const convertedPortion = amount - feeAmount;
-            const userAccountCode = userWalletAccountCode(userId, 'NGN');
-            const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
-                { accountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: convertedPortion },
-                { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount },
-            ];
-            if (feeAmount > 0) {
-                legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: feeAmount });
-            }
-            await ledgerService.post({
-                legs,
-                source: JOURNAL_SOURCE.REVERSAL,
-                reference: originalRef,
-                description: `Reversal — YC send refund (${reason})`,
+            await walletSendService.refund(String(walletTransactionId), reason, {
+                feeAmount,
+                providerAccountCode: SYSTEM_ACCOUNT_CODES.YC_FLOAT_NGN,
                 externalRef: { provider: WEBHOOK_PROVIDER.YELLOWCARD, id: originalRef },
-                metadata: { reverses: originalRef, reason, feeAmount },
-                session,
-            });
-
-            // Mark original wallet transaction as failed
-            await this.walletTransactionService.updateById(walletTransactionId as string, {
-                status: WALLET_TRANSACTION_STATUS.FAILED,
-                failureReason: reason,
-            });
-
-            // Create reversal record
-            const reversalRef = this.walletTransactionService.generateReference('REV');
-            await this.walletTransactionService.create({
-                wallet: walletId,
-                user: userId,
-                type: WALLET_TRANSACTION_TYPE.REVERSAL,
-                status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
-                amount,
-                reference: reversalRef,
-                balanceBefore: balanceAfter - amount,
-                balanceAfter,
-                description: `Reversal: ${reason} (${originalRef})`,
-            }, session);
-
-            await session.commitTransaction();
-            logger.info("Wallet refunded for failed YellowCard transaction", {
-                walletId, amount, reason, originalRef,
             });
         } catch (refundError: any) {
-            if (session.inTransaction()) await session.abortTransaction();
-            // Critical: refund failed — log for manual intervention
-            logger.error("CRITICAL: Wallet refund failed", {
-                walletId, userId, amount, originalRef,
-                error: refundError?.message,
-            });
-        } finally {
-            session.endSession();
+            logger.error("CRITICAL: Wallet refund failed", { walletTransactionId, originalRef, error: refundError?.message });
         }
     };
 
@@ -1804,7 +1813,7 @@ class TransactionService extends DBService<ITransaction> {
         const grossNgn = Math.round((ngnAmount + feeAmount) * 100) / 100;
 
         try {
-            const wallet = await this.walletService.findOne({ user: userId });
+            const wallet = await this.walletService.findBaseWallet(userId);
             if (!wallet) {
                 logger.error("Wallet not found for collection credit", { userId });
                 return;
@@ -2045,75 +2054,28 @@ class TransactionService extends DBService<ITransaction> {
     };
 
     /**
-     * Refund the user's NGN wallet after a failed OGateway payout, reversing the
-     * original OG_SEND posting (debit OG_PAYMENT_INFLIGHT_GHS, credit user wallet).
+     * Refund a failed OGateway payout to the wallet that paid for it (see
+     * refundWallet). `feeAmount` only matters for rows created before
+     * multi-currency wallets.
      */
     private refundWalletFromOGateway = async (
-        walletId: any,
-        userId: string,
-        ngnAmount: number,
-        ghsAmount: number,
+        _walletId: any,
+        _userId: string,
+        _ngnAmount: number,
+        _ghsAmount: number,
         walletTransactionId: any,
         originalRef: string,
         reason: string,
         feeAmount: number = 0,
     ) => {
-        const session = await mongoose.startSession();
-        session.startTransaction();
         try {
-            const updated = await this.walletService.creditBalance(walletId as string, ngnAmount, session) as any;
-            const balanceAfter = updated?.balance || 0;
-
-            // Mirror the original posting in reverse: refund covers both the
-            // converted-amount leg (OG_PAYMENT_INFLIGHT) and the fee leg
-            // (FEES_NGN). ngnAmount here is the total wallet debit, so the
-            // legs add up: ghsAmount + feeAmount = ngnAmount.
-            const convertedPortion = ngnAmount - feeAmount;
-            const userAccountCode = userWalletAccountCode(userId, 'NGN');
-            const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
-                { accountCode: ogPaymentInflightCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: convertedPortion },
-                { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
-            ];
-            if (feeAmount > 0) {
-                legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: feeAmount });
-            }
-            await ledgerService.post({
-                legs,
-                source: JOURNAL_SOURCE.REVERSAL,
-                reference: originalRef,
-                description: `Reversal — OGateway send refund (${reason})`,
+            await walletSendService.refund(String(walletTransactionId), reason, {
+                feeAmount,
+                providerAccountCode: ogPaymentInflightCode('GHS'),
                 externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: originalRef },
-                metadata: { reverses: originalRef, reason, ghsAmount, ngnAmount, feeAmount },
-                session,
             });
-
-            await this.walletTransactionService.updateById(walletTransactionId as string, {
-                status: WALLET_TRANSACTION_STATUS.FAILED,
-                failureReason: reason,
-            });
-
-            const reversalRef = this.walletTransactionService.generateReference('REV');
-            await this.walletTransactionService.create({
-                wallet: walletId,
-                user: userId,
-                type: WALLET_TRANSACTION_TYPE.REVERSAL,
-                status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
-                amount: ngnAmount,
-                reference: reversalRef,
-                balanceBefore: balanceAfter - ngnAmount,
-                balanceAfter,
-                description: `Reversal: ${reason} (${originalRef})`,
-            }, session);
-
-            await session.commitTransaction();
-            logger.info("Wallet refunded for failed OGateway transaction", { walletId, ngnAmount, ghsAmount, reason, originalRef });
         } catch (refundError: any) {
-            if (session.inTransaction()) await session.abortTransaction();
-            logger.error("CRITICAL: OGateway wallet refund failed", {
-                walletId, userId, ngnAmount, ghsAmount, originalRef, error: refundError?.message,
-            });
-        } finally {
-            session.endSession();
+            logger.error("CRITICAL: OGateway wallet refund failed", { walletTransactionId, originalRef, error: refundError?.message });
         }
     };
 
@@ -2138,10 +2100,13 @@ class TransactionService extends DBService<ITransaction> {
             senderName?: string;     // appears on the recipient's account; defaults to platform name
             idempotencyKey?: string;
             pin: string;
+            /** Pay from the NGN wallet (default) or the GHS wallet */
+            walletCurrency?: string;
         },
         userId: string,
     ) => {
         const { amount, destination, idempotencyKey, pin } = params;
+        const walletCurrency = walletSendService.resolveWalletCurrency(params.walletCurrency, 'GHS');
 
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
@@ -2183,20 +2148,11 @@ class TransactionService extends DBService<ITransaction> {
         ]);
         const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
 
-        const wallet = await this.walletService.findOne({ user: userId });
-        if (!wallet) {
-            throw errorResponseMessage.createError(400, "You don't have a wallet yet. Please set up your wallet first.", ErrorSeverity.MEDIUM);
-        }
-        if (wallet.status !== WALLET_STATUS.ACTIVE) {
-            throw errorResponseMessage.createError(400, "Your wallet is not active. Please contact support.", ErrorSeverity.HIGH);
-        }
-        if (wallet.balance < totalDebit) {
-            throw errorResponseMessage.createError(
-                400,
-                `Insufficient wallet balance. You need ₦${totalDebit.toLocaleString()} but your balance is ₦${wallet.balance.toLocaleString()}. Please fund your wallet first.`,
-                ErrorSeverity.MEDIUM,
-            );
-        }
+        await walletSendService.assertCanPay(
+            userId,
+            walletCurrency,
+            walletCurrency === 'NGN' ? totalDebit : Math.round((amount + walletSendService.walletFeeFor(amount, feePercent)) * 100) / 100,
+        );
 
         if (idempotencyKey) {
             const dup = await this.idempotencyService.validateKey(idempotencyKey, userId);
@@ -2211,71 +2167,36 @@ class TransactionService extends DBService<ITransaction> {
 
         const sequenceId = this.generateOGatewaySequenceId();
 
-        // Atomic wallet debit + journal posting.
-        const walletSession = await mongoose.startSession();
-        walletSession.startTransaction();
-
-        let walletTransaction: any;
-        const walletTxRef = this.walletTransactionService.generateReference('TRF');
-        const balanceBefore = wallet.balance;
-        const balanceAfter = balanceBefore - totalDebit;
-
-        try {
-            await this.walletService.debitBalance(wallet._id as string, totalDebit, walletSession);
-
-            // Locked-rate posting: user's NGN wallet drops by totalDebit (the
-            // converted amount + the platform fee). The converted amount sits
-            // in OG_PAYMENT_INFLIGHT_GHS awaiting OGateway's webhook; the fee
-            // lands in FEES_NGN immediately (platform revenue, recognised on
-            // initiation since the user has already paid for it).
-            const userAccountCode = userWalletAccountCode(userId, wallet.currency);
-            const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
-                { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount: totalDebit },
-                { accountCode: ogPaymentInflightCode('GHS'), direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
-            ];
-            if (feeAmount > 0) {
-                legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
-            }
-            await ledgerService.post({
-                legs,
-                source: JOURNAL_SOURCE.OG_SEND,
-                reference: sequenceId,
-                description: `OGateway send — ${amount} GHS to ${destination.accountName}`,
-                externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: sequenceId },
-                metadata: {
-                    destinationAmount: amount,
-                    destinationCurrency: 'GHS',
-                    destination,
-                    feeAmount,
-                    feePercent,
-                    providerFeePercent,
-                    markupPercent,
-                    providerRate,
-                    userRate,
-                },
-                session: walletSession,
-            });
-
-            walletTransaction = await this.walletTransactionService.create({
-                wallet: wallet._id,
-                user: userId,
-                type: WALLET_TRANSACTION_TYPE.TRANSFER,
-                status: WALLET_TRANSACTION_STATUS.PENDING,
-                amount: totalDebit,
-                reference: walletTxRef,
-                balanceBefore,
-                balanceAfter,
-                description: `Transfer to ${destination.accountName} (${amount} GHS)`,
-            }, walletSession);
-
-            await walletSession.commitTransaction();
-        } catch (error) {
-            if (walletSession.inTransaction()) await walletSession.abortTransaction();
-            walletSession.endSession();
-            throw error;
-        } finally {
-            walletSession.endSession();
-        }
+        // Atomic wallet debit + journal posting. The converted amount sits in
+        // OG_PAYMENT_INFLIGHT_GHS (booked in NGN) awaiting OGateway's webhook;
+        // the fee lands in FEES_NGN on initiation.
+        const { wallet, walletTransaction, walletDebit, walletFee } = await walletSendService.charge({
+            userId,
+            walletCurrency,
+            destinationCurrency: 'GHS',
+            destinationAmount: amount,
+            ngnAmount,
+            ngnFee: feeAmount,
+            feePercent,
+            providerAccountCode: ogPaymentInflightCode('GHS'),
+            source: JOURNAL_SOURCE.OG_SEND,
+            reference: sequenceId,
+            description: `OGateway send — ${amount} GHS to ${destination.accountName}`,
+            externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: sequenceId },
+            metadata: {
+                destinationAmount: amount,
+                destinationCurrency: 'GHS',
+                destination,
+                feeAmount,
+                feePercent,
+                providerFeePercent,
+                markupPercent,
+                providerRate,
+                userRate,
+            },
+            walletTxDescription: `Transfer to ${destination.accountName} (${amount} GHS)`,
+        });
+        const walletTxRef = walletTransaction.reference;
 
         const lockedRate = userRate;
 
@@ -2308,6 +2229,7 @@ class TransactionService extends DBService<ITransaction> {
 
         await this.walletTransactionService.updateById(walletTransaction._id as string, {
             paystackReference: sequenceId,
+            transactionId: transaction._id,
         });
 
         if (idempotencyKey) {
@@ -2327,6 +2249,9 @@ class TransactionService extends DBService<ITransaction> {
                 fromAmount: totalDebit,
                 feeAmount,
                 feePercent,
+                fundingCurrency: walletCurrency,
+                fundingAmount: walletDebit,
+                fundingFee: walletFee,
                 providerFeePercent,
                 markupPercent,
                 accountName: destination.accountName,
@@ -2397,7 +2322,7 @@ class TransactionService extends DBService<ITransaction> {
                 await this.walletTransactionService.updateById(walletTransaction._id as string, {
                     status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
                 });
-                await this.walletService.adjustLedgerBalance(wallet._id as string, -totalDebit);
+                await this.walletService.adjustLedgerBalance(wallet._id as string, -walletDebit);
             }
 
             logger.info("OGateway payout dispatched", {
@@ -2631,7 +2556,7 @@ class TransactionService extends DBService<ITransaction> {
         const grossNgn = Math.round((ngnAmount + feeAmount) * 100) / 100;
 
         try {
-            const wallet = await this.walletService.findOne({ user: userId });
+            const wallet = await this.walletService.findBaseWallet(userId);
             if (!wallet) {
                 logger.error("Wallet not found for OGateway collection credit", { userId });
                 return;

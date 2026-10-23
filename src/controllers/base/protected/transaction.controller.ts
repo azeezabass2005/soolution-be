@@ -29,6 +29,9 @@ class TransactionController extends BaseController {
         // public receipt verification page. Owner-only; see receipt.service.
         this.router.post("/:id/receipt-token", this.getReceiptToken.bind(this));
 
+        // Admin: reject a manual payment that hasn't been paid out (wallet payments are refunded)
+        this.router.patch("/:id/reject", RoleMiddleware.isAdmin, this.rejectTransaction.bind(this));
+
         // Route to create alipay transaction
         this.router.post("/alipay", MulterMiddleware.single('alipayQrCode'), MulterMiddleware.handleError, TransactionRateLimitMiddleware.checkTransactionRateLimit, validateCreateAlipayTransaction, this.createAlipayTransaction.bind(this));
 
@@ -113,7 +116,9 @@ class TransactionController extends BaseController {
 
             return this.sendSuccess(res, {
                 transaction,
-                message: 'Transaction initiated successfully, please proceed to pay into the provided account number.'
+                message: (transaction as any)?.details?.fundingCurrency
+                    ? 'Payment submitted. We\'ll pay your recipient and send you a receipt.'
+                    : 'Transaction initiated successfully, please proceed to pay into the provided account number.'
             })
         } catch (error: any) {
             return next(error);
@@ -138,8 +143,28 @@ class TransactionController extends BaseController {
 
             return this.sendSuccess(res, {
                 transaction,
-                message: 'Transaction initiated successfully, please proceed to pay into the provided account number.'
+                message: (transaction as any)?.details?.fundingCurrency
+                    ? 'Payment submitted. We\'ll pay your recipient and send you a receipt.'
+                    : 'Transaction initiated successfully, please proceed to pay into the provided account number.'
             })
+        } catch (error: any) {
+            return next(error);
+        }
+    }
+
+    private async rejectTransaction(req: Request, res: Response, next: NextFunction) {
+        try {
+            const result = await this.transactionService.rejectManualTransaction(
+                req.params.id,
+                req.body?.reason,
+                String(res.locals.user?._id),
+                req.ip,
+                req.headers['user-agent']
+            );
+            return this.sendSuccess(res, {
+                ...result,
+                message: result.refundedToWallet ? 'Payment rejected and refunded to the user\'s wallet' : 'Payment rejected',
+            });
         } catch (error: any) {
             return next(error);
         }

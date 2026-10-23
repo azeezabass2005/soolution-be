@@ -164,6 +164,9 @@ export const TransactionSchema = new Schema<ITransaction>(
             type: Date
         },
 
+        /** Why an admin rejected (cancelled) the transaction, shown to the user */
+        cancelReason: { type: String, trim: true, maxlength: 500 },
+
         // ===================== FX SNAPSHOT =====================
         // Captured at transaction-creation time so reports always know which
         // rate was applied. Journal entries that span currencies must use this

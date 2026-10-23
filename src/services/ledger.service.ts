@@ -23,6 +23,12 @@ export interface PostOptions {
     reference: string;
     description: string;
     currency?: string; // overrides per-leg account currency mismatch check; defaults to first leg account currency
+    /**
+     * Balance debits and credits separately within each account currency
+     * (multi-currency wallet postings). Without it, legs are summed across
+     * currencies, as the NGN-equivalent provider postings expect.
+     */
+    perCurrency?: boolean;
     externalRef?: { provider: string; id: string };
     metadata?: Record<string, any>;
     postedBy?: string;
@@ -129,6 +135,25 @@ class LedgerService {
                     `Ledger account ${code} is frozen — posting refused`,
                     ErrorSeverity.HIGH
                 );
+            }
+        }
+
+        // Invariant 3 (multi-currency postings): each currency balances on its own.
+        if (opts.perCurrency) {
+            const net = new Map<string, number>();
+            for (const leg of legs) {
+                const currency = byCode.get(leg.accountCode)!.currency;
+                const signed = leg.direction === JOURNAL_DIRECTION.DEBIT ? leg.amount : -leg.amount;
+                net.set(currency, (net.get(currency) ?? 0) + signed);
+            }
+            for (const [currency, amount] of net) {
+                if (Math.abs(amount) > 0.01) {
+                    throw errorResponseMessage.createError(
+                        500,
+                        `Unbalanced ${currency} legs in journal posting: net=${amount} reference=${reference}`,
+                        ErrorSeverity.CRITICAL
+                    );
+                }
             }
         }
 

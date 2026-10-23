@@ -366,6 +366,11 @@ export const TransactionDetailSchema = new Schema<ITransactionDetail>(
         feePercent: { type: Number, required: false, default: 0 },
         providerFeePercent: { type: Number, required: false, default: 0 },
         markupPercent: { type: Number, required: false, default: 0 },
+
+        /** Which wallet paid for a send, and what it was charged (fromAmount/feeAmount stay NGN) */
+        fundingCurrency: { type: String, required: false },
+        fundingAmount: { type: Number, required: false },
+        fundingFee: { type: Number, required: false },
     },
     {
         /** Enable virtual properties when converting to plain object */

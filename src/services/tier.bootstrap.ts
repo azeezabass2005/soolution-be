@@ -1,3 +1,5 @@
+import Transaction from "../models/transaction.model";
+import { TRANSACTION_STATUS } from "../common/constant";
 import User from "../models/user.model";
 import KycApplication from "../models/kyc-application.model";
 import { KYC_STATUS } from "../common/kyc.constants";
@@ -43,5 +45,21 @@ export async function migrateUserTiers(): Promise<void> {
             verifiedUsers: verified.modifiedCount,
             tier1Users: others.modifiedCount,
         });
+    }
+}
+
+/**
+ * Before tiers, unverified users' sends waited in "awaiting KYC verification"
+ * after the payment receipt was uploaded. Tier 1 sends don't need KYC (the
+ * daily limit applies instead), so release them to ops, as an approved KYC
+ * would. Idempotent: nothing sets that status any more.
+ */
+export async function releaseLegacyKycHolds(): Promise<void> {
+    const result = await Transaction.updateMany(
+        { status: TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION },
+        { $set: { status: TRANSACTION_STATUS.AWAITING_CONFIRMATION } }
+    );
+    if (result.modifiedCount) {
+        logger.info("Released transactions held for KYC before tiers", { released: result.modifiedCount });
     }
 }
