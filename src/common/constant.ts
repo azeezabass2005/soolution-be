@@ -23,6 +23,7 @@ export const MODEL_NAME = {
     TRANSACTION_LIMIT_LOCK: "TransactionLimitLockModel",
     BENEFICIARY: "BeneficiaryModel",
     FX_QUOTE: "FxQuoteModel",
+    PAYMENT_LINK: "PaymentLinkModel",
 }
 
 // ===================== LEDGER / CHART OF ACCOUNTS =====================

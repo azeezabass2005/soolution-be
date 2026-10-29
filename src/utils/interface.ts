@@ -6,6 +6,8 @@ export interface ITokenPayload {
     email: string;
     role: number;
     username: string;
+    /** Password-reset tokens: fingerprint of the password they were issued against, so they work once */
+    pfp?: string;
 }
 
 /**
@@ -36,10 +38,16 @@ export interface ITokenOptions {
     expiresIn?: string;
     /** Refresh tokens only: whether the session should survive closing the browser */
     rememberMe?: boolean;
+    /** Refresh tokens only: when the user last entered their password (ms) */
+    sessionStartedAt?: number;
+    /** Reset tokens only: fingerprint of the current password */
+    passwordFingerprint?: string;
 }
 
 export interface IRefreshTokenPayload extends ITokenPayload {
     tokenId: string;
     /** Absent on tokens issued before "keep me signed in" existed; treated as true */
     rememberMe?: boolean;
+    /** When the user last entered their password (ms); caps how long refreshing can keep them in */
+    sessionStartedAt?: number;
 }

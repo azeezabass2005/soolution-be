@@ -6,7 +6,7 @@ import userController from "../../controllers/base/protected/user.controller";
 import partnerController from "../../controllers/base/protected/partner.controller";
 import transactionController from "../../controllers/base/protected/transaction.controller";
 import bankAccountDetailsController from "../../controllers/base/protected/bank-account-details.controller";
-import verificationController from "../../controllers/base/protected/verification.controller";
+import identityController from "../../controllers/base/protected/identity.controller";
 import dashboardController from "../../controllers/base/protected/dashboard.controller";
 import yellowCardTransactionController from "../../controllers/base/protected/yellowcard-transaction.controller";
 import ogatewayTransactionController from "../../controllers/base/protected/ogateway-transaction.controller";
@@ -19,6 +19,8 @@ import adminSuspenseController from "../../controllers/base/protected/admin/susp
 import adminPlatformSettingsController from "../../controllers/base/protected/admin/platform-settings.controller";
 import kycController from "../../controllers/base/protected/kyc.controller";
 import beneficiaryController from "../../controllers/base/protected/beneficiary.controller";
+import paymentLinkController from "../../controllers/base/protected/payment-link.controller";
+import bankController from "../../controllers/base/protected/bank.controller";
 
 const path = "/protected";
 const protectedRouter = Router();
@@ -38,13 +40,15 @@ protectedRouter.use(`${path}/users`, userController);
 protectedRouter.use(`${path}/partners`, partnerController);
 protectedRouter.use(`${path}/transactions`, transactionController);
 protectedRouter.use(`${path}/bank-account-details`, bankAccountDetailsController);
-protectedRouter.use(`${path}/verify`, verificationController);
+protectedRouter.use(`${path}/identity`, identityController);
 protectedRouter.use(`${path}/dashboard`, dashboardController);
 protectedRouter.use(`${path}/yellowcard`, yellowCardTransactionController);
 protectedRouter.use(`${path}/ogateway`, ogatewayTransactionController);
 protectedRouter.use(`${path}/wallet`, walletController);
 protectedRouter.use(`${path}/pin`, pinController);
 protectedRouter.use(`${path}/beneficiaries`, beneficiaryController);
+protectedRouter.use(`${path}/payment-links`, paymentLinkController);
+protectedRouter.use(`${path}/banks`, bankController);
 
 // Admin-only routes (each controller applies RoleMiddleware.isAdmin internally)
 protectedRouter.use(`${path}/admin/ledger`, adminLedgerController);

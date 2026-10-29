@@ -1,5 +1,6 @@
 import Transaction from "../models/transaction.model";
-import { TRANSACTION_STATUS } from "../common/constant";
+import { ROLE_MAP, TRANSACTION_STATUS } from "../common/constant";
+import { IDENTITY_STATUS } from "../common/identity.constants";
 import User from "../models/user.model";
 import KycApplication from "../models/kyc-application.model";
 import { KYC_STATUS } from "../common/kyc.constants";
@@ -44,6 +45,39 @@ export async function migrateUserTiers(): Promise<void> {
             usersFromApplications: fromApplications,
             verifiedUsers: verified.modifiedCount,
             tier1Users: others.modifiedCount,
+        });
+    }
+}
+
+/**
+ * One-off, idempotent migration for accounts created before BVN verification.
+ * Only touches users without an identity record, so it's a no-op afterwards.
+ *   - Already verified (an earlier Smile ID pass, an approved KYC/KYB, or Tier 2+):
+ *     counted as verified and keep their tier
+ *   - Other customers on Tier 1 never verified who they are: Unverified until
+ *     they verify their BVN
+ */
+export async function migrateIdentity(): Promise<void> {
+    const at = new Date();
+    const verified = await User.updateMany(
+        { identity: { $exists: false }, $or: [{ tier: { $gte: USER_TIER.BUSINESS } }, { isKYCDone: true }] },
+        { $set: { identity: { status: IDENTITY_STATUS.VERIFIED, method: "verified_before_bvn_checks" } } }
+    );
+    const unverified = await User.updateMany(
+        { identity: { $exists: false }, role: ROLE_MAP.USER, tier: { $lte: USER_TIER.INDIVIDUAL } },
+        {
+            $set: { identity: { status: IDENTITY_STATUS.UNVERIFIED }, tier: USER_TIER.UNVERIFIED },
+            $push: { tierHistory: { tier: USER_TIER.UNVERIFIED, reason: "BVN verification is now required for Tier 1", at } },
+        }
+    );
+    // Staff accounts don't transact; just give them a record
+    const others = await User.updateMany({ identity: { $exists: false } }, { $set: { identity: { status: IDENTITY_STATUS.UNVERIFIED } } });
+
+    if (verified.modifiedCount + unverified.modifiedCount + others.modifiedCount) {
+        logger.info("Identity verification migrated", {
+            alreadyVerified: verified.modifiedCount,
+            movedToUnverified: unverified.modifiedCount,
+            staff: others.modifiedCount,
         });
     }
 }

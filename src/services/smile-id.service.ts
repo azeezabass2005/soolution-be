@@ -1,691 +1,95 @@
-import { WebApi, Signature } from "smile-identity-core";
+import { WebApi, Signature, Utilities } from "smile-identity-core";
 import config from "../config/env.config";
-import { IUser } from "../models/interface";
-import { randomUUID } from "crypto"
+import logger from "../utils/logger.utils";
+
+/** Smile ID job type 1: Biometric KYC (ID number lookup plus a selfie compared with the ID photo) */
+const BIOMETRIC_KYC_JOB_TYPE = 1;
+
+export interface SmileImage {
+    image: string;
+    image_type_id: number;
+}
+
+export interface SmileJobRef {
+    /** Our identifiers for the job, echoed back in PartnerParams */
+    userId: string;
+    jobId: string;
+}
 
 /**
- * Safely stringify an object, handling circular references
+ * Smile ID client. Never logs ID numbers, names or images: only job IDs and
+ * Smile's result codes.
  */
-const safeStringify = (obj: any, space?: number): string => {
-    const seen = new WeakSet();
-    return JSON.stringify(obj, (key, value) => {
-        if (typeof value === 'object' && value !== null) {
-            if (seen.has(value)) {
-                return '[Circular]';
-            }
-            seen.add(value);
-        }
-        // Exclude functions and undefined
-        if (typeof value === 'function' || value === undefined) {
-            return '[Function]';
-        }
-        return value;
-    }, space);
-};
-
 class SmileId {
-    connection;
-    signatureConnection;
+    private connection: WebApi;
+    private signature: Signature;
+    private utilities: Utilities;
 
-    constructor () {
-        this.connection = new WebApi(config.SMILE_ID_PARTNER_ID, config.SMILE_ID_CALLBACK_URL, config.SMILE_ID_API_KEY, config.SMILE_ID_SID_SERVER)
-        this.signatureConnection = new Signature(config.SMILE_ID_PARTNER_ID, config.SMILE_ID_API_KEY);
+    constructor() {
+        this.connection = new WebApi(config.SMILE_ID_PARTNER_ID, config.SMILE_ID_CALLBACK_URL, config.SMILE_ID_API_KEY, config.SMILE_ID_SID_SERVER);
+        this.signature = new Signature(config.SMILE_ID_PARTNER_ID, config.SMILE_ID_API_KEY);
+        this.utilities = new Utilities(config.SMILE_ID_PARTNER_ID, config.SMILE_ID_API_KEY, config.SMILE_ID_SID_SERVER);
     }
 
-    private generateSignature = (): { signature: string; timestamp: string | number; } => {
-        return this.signatureConnection.generate_signature(Date.now());
-    }
-
-    public verifySignature = (signature: string, timestamp: string | number): boolean => {
+    /** Checks the signature Smile ID puts on webhooks and job status responses */
+    public verifySignature = (signature: unknown, timestamp: unknown): boolean => {
+        if (typeof signature !== "string" || !signature) return false;
+        if (typeof timestamp !== "string" && typeof timestamp !== "number") return false;
         try {
-            // Convert ISO timestamp string to numeric timestamp if needed
-            let numericTimestamp: number;
-            
-            if (typeof timestamp === 'string') {
-                // Check if it's an ISO string (contains 'T' or 'Z')
-                if (timestamp.includes('T') || timestamp.includes('Z')) {
-                    const dateObj = new Date(timestamp);
-                    // Check if date is valid
-                    if (isNaN(dateObj.getTime())) {
-                        console.error("❌ [ERROR] Invalid ISO timestamp format:", timestamp);
-                        return false;
-                    }
-                    numericTimestamp = dateObj.getTime();
-                } else {
-                    // Assume it's already a numeric string
-                    numericTimestamp = parseInt(timestamp, 10);
-                    if (isNaN(numericTimestamp)) {
-                        console.error("❌ [ERROR] Invalid numeric timestamp format:", timestamp);
-                        return false;
-                    }
-                }
-            } else {
-                numericTimestamp = timestamp;
-            }
-            
-            // Validate timestamp is a valid number
-            if (isNaN(numericTimestamp) || numericTimestamp <= 0) {
-                console.error("❌ [ERROR] Invalid timestamp value:", timestamp, "->", numericTimestamp);
-                return false;
-            }
-            
-            // The SDK expects the timestamp as a string representation of milliseconds
-            return this.signatureConnection.confirm_signature(signature, numericTimestamp.toString());
-        } catch (error: any) {
-            console.error("❌ [ERROR] Signature verification failed:", error?.message || error);
-            console.error("   Signature:", signature);
-            console.error("   Timestamp:", timestamp);
-            console.error("   Error stack:", error?.stack);
+            // The SDK expects (timestamp, signature); an unparseable timestamp throws
+            return this.signature.confirm_signature(timestamp, signature);
+        } catch {
             return false;
         }
-    }
+    };
 
-    public verifyBvnWithSelfie = async (user: IUser, bvn: string, images: { image: string; image_type_id: number; }[], isRetry: boolean = false): Promise<{ success: boolean; smile_job_id: string }> => {
-        console.log("\n==========================================");
-        console.log(`🚀 VERIFY BVN WITH SELFIE - START${isRetry ? ' (RETRY WITH AUTHENTICATION)' : ''}`);
-        console.log("==========================================\n");
-
-        // Log function entry with parameters
-        console.log("📋 [LOG] Function called: verifyBvnWithSelfie");
-        console.log("📋 [LOG] Timestamp:", new Date().toISOString());
-        console.log("📋 [LOG] User ID:", user._id?.toString());
-        console.log("📋 [LOG] User Email:", user.email);
-        console.log("📋 [LOG] User Name:", `${user.firstName} ${user.lastName}`);
-        console.log("📋 [LOG] BVN:", bvn);
-        console.log("📋 [LOG] Number of images provided:", images?.length || 0);
-        console.log("📋 [LOG] Is Retry:", isRetry);
-
-        // Validate inputs
-        if (!user) {
-            console.error("❌ [ERROR] User object is missing");
-            throw new Error("User object is required for BVN verification");
-        }
-
-        if (!bvn) {
-            console.error("❌ [ERROR] BVN is missing");
-            throw new Error("BVN is required for verification");
-        }
-
-        if (!images || images.length === 0) {
-            console.error("❌ [ERROR] No images provided");
-            throw new Error("At least one image is required for BVN verification");
-        }
-
-        // Log image details
-        console.log("\n📸 [LOG] Image Details:");
-        images.forEach((img, index) => {
-            console.log(`  Image ${index + 1}:`);
-            console.log(`    - Image Type ID: ${img.image_type_id}`);
-            console.log(`    - Image Length: ${img.image?.length || 0} characters`);
-            console.log(`    - Image Size: ${((img.image?.length || 0) / 1024 / 1024).toFixed(2)}MB (base64)`);
-            console.log(`    - Image Preview: ${img.image?.substring(0, 50)}...`);
-        });
-
-        // Generate job ID
-        let job_id = randomUUID();
-        console.log("\n🆔 [LOG] Generated Job ID:", job_id);
-
-        // Prepare partner parameters
-        // Job type 1 = Basic KYC (Enrollment) for new users
-        // Job type 2 = SmartSelfie Authentication for already enrolled users
-        let partner_params = {
-            job_id: job_id,
-            user_id: user._id as string,
-            job_type: isRetry ? 2 : 1 // Use job_type 2 (Authentication) for retry, 1 (Enrollment) for new users
-        };
-        
-        console.log(`\n📋 [LOG] Using Job Type: ${partner_params.job_type} (${isRetry ? 'Authentication - User Already Enrolled' : 'Enrollment - New User'})`);
-
-        console.log("\n📦 [LOG] Partner Parameters:");
-        console.log(JSON.stringify(partner_params, null, 2));
-
-        // Prepare ID information for BVN
-        let id_info = {
-            first_name: user.firstName,
-            last_name: user.lastName,
-            country: 'NG',
-            id_type: 'BVN',
+    /**
+     * Submits a Nigerian BVN with selfie images for Biometric KYC. Returns as soon
+     * as Smile ID accepts the job; the result arrives by webhook (or `getJobStatus`).
+     */
+    public submitBvnBiometricKyc = async (
+        ref: SmileJobRef,
+        person: { firstName: string; lastName: string },
+        bvn: string,
+        images: SmileImage[]
+    ): Promise<{ smileJobId?: string }> => {
+        const partnerParams = { user_id: ref.userId, job_id: ref.jobId, job_type: BIOMETRIC_KYC_JOB_TYPE };
+        const idInfo = {
+            first_name: person.firstName,
+            last_name: person.lastName,
+            country: "NG",
+            id_type: "BVN",
             id_number: bvn,
-            entered: 'true'
+            entered: "true",
         };
-
-        console.log("\n🪪 [LOG] ID Information:");
-        console.log(JSON.stringify(id_info, null, 2));
-
-        // Prepare options
-        let options = {
-            return_job_status: true,
-            return_history: true,
-            return_image_links: true,
-            return_personal_info: true, // Enable personal info return for name validation
-            signature: true
-        };
-
-        console.log("\n⚙️  [LOG] Request Options:");
-        console.log(JSON.stringify(options, null, 2));
-
-        // Log before API call
-        console.log("\n📡 [LOG] Preparing to submit job to Smile ID API...");
-        console.log("📡 [LOG] API Endpoint: Smile ID WebApi.submit_job");
-        console.log("📡 [LOG] Partner ID:", config.SMILE_ID_PARTNER_ID);
-        console.log("📡 [LOG] Callback URL:", config.SMILE_ID_CALLBACK_URL);
-        console.log("📡 [LOG] Server:", config.SMILE_ID_SID_SERVER);
-
         try {
-            // Submit job to Smile ID
-            console.log("\n⏳ [LOG] Submitting job to Smile ID...");
-            const startTime = Date.now();
-
-            const response: any = await this.connection.submit_job(partner_params, images, id_info, options);
-
-            const endTime = Date.now();
-            const duration = endTime - startTime;
-
-            console.log("\n✅ [LOG] API Call Completed");
-            console.log("⏱️  [LOG] Request Duration:", `${duration}ms`);
-
-            // Log response
-            console.log("\n📥 [LOG] Smile ID API Response:");
-            if (response?.result) {
-                console.log("  ✅ Result object exists");
-                console.log("  📋 Result Code:", response.result.ResultCode || 'N/A');
-                console.log("  📋 Result Text:", response.result.ResultText || 'N/A');
-                console.log("  🆔 Smile Job ID:", response.result.SmileJobID || 'N/A');
-            } else {
-                console.warn("  ⚠️  No result object in response");
-                console.log("  📋 Full Response:", JSON.stringify(response, null, 2));
-            }
-
-            // Determine success
-            const success = !!response?.result;
-            console.log("\n🎯 [LOG] Verification Submission Result:");
-            console.log("  - Success:", success);
-            console.log("  - Job ID:", job_id);
-
-            const returnValue = {
-                success: success,
-                smile_job_id: job_id
-            };
-
-            console.log("\n==========================================");
-            console.log("✅ VERIFY BVN WITH SELFIE - END");
-            console.log("==========================================\n");
-
-            return returnValue;
-
+            const response: any = await this.connection.submit_job(partnerParams, images, idInfo, {
+                return_job_status: false,
+                return_history: false,
+                return_image_links: false,
+            });
+            logger.info("Smile ID: BVN job submitted", { jobId: ref.jobId, smileJobId: response?.smile_job_id });
+            return { smileJobId: response?.smile_job_id };
         } catch (error: any) {
-            console.error("\n❌ [ERROR] Exception occurred during Smile ID API call");
-            console.error("❌ [ERROR] Error Type:", error?.constructor?.name || 'Unknown');
-            console.error("❌ [ERROR] Error Message:", error?.message || 'No error message');
-            console.error("❌ [ERROR] Error Stack:", error?.stack || 'No stack trace');
-
-            // Safely log error response without circular references
-            if (error?.response) {
-                console.error("❌ [ERROR] API Error Response Status:", error.response.status);
-                console.error("❌ [ERROR] API Error Response Status Text:", error.response.statusText);
-                if (error.response.data) {
-                    try {
-                        const dataStr = safeStringify(error.response.data, 2);
-                        console.error("❌ [ERROR] API Error Response Data:", dataStr);
-                    } catch (e) {
-                        // If even safe stringify fails, try to extract just the message
-                        const data = error.response.data;
-                        if (typeof data === 'string') {
-                            console.error("❌ [ERROR] API Error Response Data (string):", data);
-                        } else if (data && typeof data === 'object') {
-                            console.error("❌ [ERROR] API Error Response Data (object):", {
-                                message: data.message,
-                                error: data.error,
-                                code: data.code,
-                                detail: data.detail
-                            });
-                        } else {
-                            console.error("❌ [ERROR] API Error Response Data (raw):", String(data));
-                        }
-                    }
-                }
-                if (error.response.headers) {
-                    try {
-                        const headersStr = safeStringify(error.response.headers, 2);
-                        console.error("❌ [ERROR] API Error Response Headers:", headersStr);
-                    } catch (e) {
-                        console.error("❌ [ERROR] API Error Response Headers (could not stringify)");
-                    }
-                }
-            }
-
-            // Log request details safely
-            if (error?.request) {
-                console.error("❌ [ERROR] Request made but no response received");
-                console.error("❌ [ERROR] Request Path:", error.request.path || 'N/A');
-                console.error("❌ [ERROR] Request Method:", error.request.method || 'N/A');
-            }
-
-            // Extract and log config if available
-            if (error?.config) {
-                console.error("❌ [ERROR] Request Config:");
-                console.error("  - URL:", error.config.url || 'N/A');
-                console.error("  - Method:", error.config.method || 'N/A');
-                console.error("  - Base URL:", error.config.baseURL || 'N/A');
-            }
-
-            console.error("\n==========================================");
-            console.error("❌ VERIFY BVN WITH SELFIE - FAILED");
-            console.error("==========================================\n");
-
-            // Extract error message safely
-            let errorMessage = 'Failed to submit verification to Smile ID';
-            let responseData: any = null;
-            let isAlreadyEnrolled = false;
-            
-            if (error?.response?.data) {
-                try {
-                    const data = error.response.data;
-                    if (typeof data === 'string') {
-                        errorMessage = data;
-                        responseData = data;
-                        // Check if it's an "already enrolled" error
-                        if (data.toLowerCase().includes('already enrolled') || 
-                            data.toLowerCase().includes('wrong job type')) {
-                            isAlreadyEnrolled = true;
-                        }
-                    } else if (data && typeof data === 'object') {
-                        errorMessage = data.message || data.error || data.detail || data.code || errorMessage;
-                        responseData = {
-                            message: data.message,
-                            error: data.error,
-                            code: data.code,
-                            detail: data.detail
-                        };
-                        // Check if it's an "already enrolled" error
-                        const errorStr = JSON.stringify(data).toLowerCase();
-                        if (errorStr.includes('already enrolled') || 
-                            errorStr.includes('wrong job type')) {
-                            isAlreadyEnrolled = true;
-                        }
-                    }
-                } catch (e) {
-                    // If we can't extract, use the error message
-                    errorMessage = error?.message || errorMessage;
-                    if (errorMessage.toLowerCase().includes('already enrolled') || 
-                        errorMessage.toLowerCase().includes('wrong job type')) {
-                        isAlreadyEnrolled = true;
-                    }
-                }
-            } else if (error?.message && !error.message.includes('circular')) {
-                errorMessage = error.message;
-                if (errorMessage.toLowerCase().includes('already enrolled') || 
-                    errorMessage.toLowerCase().includes('wrong job type')) {
-                    isAlreadyEnrolled = true;
-                }
-            }
-            
-            // If user is already enrolled and we haven't retried yet, automatically retry with job_type 2
-            if (isAlreadyEnrolled && !isRetry) {
-                console.log("\n🔄 [INFO] User already enrolled detected. Automatically retrying with job_type 2 (Authentication)...");
-                console.log("🔄 [INFO] This will use SmartSelfie Authentication instead of Basic KYC Enrollment");
-                try {
-                    return await this.verifyBvnWithSelfie(user, bvn, images, true);
-                } catch (retryError: any) {
-                    // If retry also fails, throw the retry error
-                    console.error("❌ [ERROR] Retry with job_type 2 also failed");
-                    throw retryError;
-                }
-            }
-            
-            // Add status code context
-            if (error?.response?.status === 400) {
-                if (isAlreadyEnrolled && isRetry) {
-                    errorMessage = `Smile ID rejected the authentication request (400): ${errorMessage}. The user may need to re-enroll or contact Smile ID support.`;
-                } else if (isAlreadyEnrolled) {
-                    errorMessage = `This BVN has already been enrolled with Smile ID. For testing, please use a different BVN or contact Smile ID support to reset the enrollment. Original error: ${errorMessage}`;
-                } else {
-                    errorMessage = `Smile ID rejected the request (400): ${errorMessage}`;
-                }
-            }
-            
-            const cleanError = new Error(errorMessage);
-            (cleanError as any).statusCode = error?.response?.status;
-            (cleanError as any).responseData = responseData;
-            (cleanError as any).isAlreadyEnrolled = isAlreadyEnrolled;
-            
-            // Re-throw error to be handled by caller
-            throw cleanError;
+            const status = error?.response?.status;
+            const data = error?.response?.data;
+            const providerMessage = typeof data === "string" ? data : data?.error || data?.message || data?.code;
+            logger.error("Smile ID: BVN job submission failed", { jobId: ref.jobId, status, providerMessage, error: error?.message });
+            const wrapped = new Error(providerMessage || error?.message || "Smile ID submission failed");
+            (wrapped as any).statusCode = status;
+            throw wrapped;
         }
-    }
+    };
 
-    public verifyGhanaCardWithSelfie = async (user: IUser, ghanaCardNumber: string, images: { image: string, image_type_id: number; }[], isRetry: boolean = false): Promise<{ success: boolean; smile_job_id: string }> => {
-        console.log("\n==========================================");
-        console.log(`🚀 VERIFY GHANA CARD WITH SELFIE - START${isRetry ? ' (RETRY WITH AUTHENTICATION)' : ''}`);
-        console.log("==========================================\n");
-
-        // Log function entry with parameters
-        console.log("📋 [LOG] Function called: verifyGhanaCardWithSelfie");
-        console.log("📋 [LOG] Timestamp:", new Date().toISOString());
-        console.log("📋 [LOG] User ID:", user._id?.toString());
-        console.log("📋 [LOG] User Email:", user.email);
-        console.log("📋 [LOG] User Name:", `${user.firstName} ${user.lastName}`);
-        console.log("📋 [LOG] User Country:", user.countryOfOrigin || user.countryOfResidence || 'Not specified');
-        console.log("📋 [LOG] Ghana Card Number:", ghanaCardNumber);
-        console.log("📋 [LOG] Number of images provided:", images?.length || 0);
-        console.log("📋 [LOG] Is Retry:", isRetry);
-
-        // Validate inputs
-        if (!user) {
-            console.error("❌ [ERROR] User object is missing");
-            throw new Error("User object is required for Ghana Card verification");
-        }
-
-        if (!ghanaCardNumber) {
-            console.error("❌ [ERROR] Ghana Card number is missing");
-            throw new Error("Ghana Card number is required for verification");
-        }
-
-        if (!images || images.length === 0) {
-            console.error("❌ [ERROR] No images provided");
-            throw new Error("At least one image is required for Ghana Card verification");
-        }
-
-        // Log image details
-        console.log("\n📸 [LOG] Image Details:");
-        images.forEach((img, index) => {
-            console.log(`  Image ${index + 1}:`);
-            console.log(`    - Image Type ID: ${img.image_type_id}`);
-            console.log(`    - Image Length: ${img.image?.length || 0} characters`);
-            console.log(`    - Image Preview: ${img.image?.substring(0, 50)}...`);
-        });
-
-        // Generate job ID
-        let job_id = randomUUID();
-        console.log("\n🆔 [LOG] Generated Job ID:", job_id);
-
-        // Prepare partner parameters
-        // Job type 1 = Basic KYC (Enrollment) for new users
-        // Job type 2 = SmartSelfie Authentication for already enrolled users
-        let partner_params = {
-            job_id: job_id,
-            user_id: user._id as string,
-            job_type: isRetry ? 2 : 1 // Use job_type 2 (Authentication) for retry, 1 (Enrollment) for new users
-        };
-        
-        console.log(`\n📋 [LOG] Using Job Type: ${partner_params.job_type} (${isRetry ? 'Authentication - User Already Enrolled' : 'Enrollment - New User'})`);
-
-        console.log("\n📦 [LOG] Partner Parameters:");
-        console.log(JSON.stringify(partner_params, null, 2));
-
-        // Prepare ID information for Ghana Card
-        let id_info = {
-            first_name: user.firstName,
-            last_name: user.lastName,
-            country: 'GH', // Ghana country code
-            id_type: 'GHANA_CARD', // Ghana Card ID type
-            id_number: ghanaCardNumber, // Ghana Card number - required by SDK
-            entered: 'true' // Indicates data was manually entered
-        };
-
-        console.log("\n🪪 [LOG] ID Information:");
-        console.log(JSON.stringify(id_info, null, 2));
-        console.log("ℹ️  [INFO] Ghana Card number provided:", ghanaCardNumber);
-
-        // Prepare options
-        let options = {
-            return_job_status: true, // Get job result synchronously
-            return_history: true, // Return results of all previous jobs for this user
-            return_image_links: true, // Receive selfie and liveness images
-            return_personal_info: true, // Enable personal info return for name validation
-            signature: true // Include signature in response
-        };
-
-        console.log("\n⚙️  [LOG] Request Options:");
-        console.log(JSON.stringify(options, null, 2));
-        console.log("ℹ️  [INFO] Signature will be automatically generated by Smile ID SDK");
-
-        // Log before API call
-        console.log("\n📡 [LOG] Preparing to submit job to Smile ID API...");
-        console.log("📡 [LOG] API Endpoint: Smile ID WebApi.submit_job");
-        console.log("📡 [LOG] Partner ID:", config.SMILE_ID_PARTNER_ID);
-        console.log("📡 [LOG] Callback URL:", config.SMILE_ID_CALLBACK_URL);
-        console.log("📡 [LOG] Server:", config.SMILE_ID_SID_SERVER);
-
+    /** One job status lookup (no waiting); `result` matches the webhook payload once `job_complete` */
+    public getJobStatus = async (ref: SmileJobRef): Promise<{ job_complete?: boolean; job_success?: boolean; result?: any } | null> => {
         try {
-            // Submit job to Smile ID
-            console.log("\n⏳ [LOG] Submitting job to Smile ID...");
-            const startTime = Date.now();
-
-            const response: any = await this.connection.submit_job(
-                partner_params,
-                images,
-                id_info,
-                options
-            );
-
-            const endTime = Date.now();
-            const duration = endTime - startTime;
-
-            console.log("\n✅ [LOG] API Call Completed");
-            console.log("⏱️  [LOG] Request Duration:", `${duration}ms`);
-
-            // Log full response
-            console.log("\n📥 [LOG] Full Smile ID API Response:");
-            console.log(JSON.stringify(response, null, 2));
-
-            // Parse and log response details
-            if (response) {
-                console.log("\n📊 [LOG] Response Analysis:");
-
-                if (response.result) {
-                    console.log("  ✅ Result object exists");
-                    console.log("  📋 Result Code:", response.result.ResultCode || 'N/A');
-                    console.log("  📋 Result Text:", response.result.ResultText || 'N/A');
-                    console.log("  🆔 Smile Job ID:", response.result.SmileJobID || 'N/A');
-                    console.log("  📈 Confidence Value:", response.result.ConfidenceValue || 'N/A');
-
-                    if (response.result.Actions) {
-                        console.log("\n  🔍 Detailed Actions:");
-                        const actions = response.result.Actions;
-                        Object.keys(actions).forEach(key => {
-                            console.log(`    - ${key}: ${actions[key]}`);
-                        });
-                    }
-
-                    if (response.result.PartnerParams) {
-                        console.log("\n  👤 Partner Parameters (from response):");
-                        console.log("    - Job ID:", response.result.PartnerParams.job_id);
-                        console.log("    - User ID:", response.result.PartnerParams.user_id);
-                        console.log("    - Job Type:", response.result.PartnerParams.job_type);
-                    }
-                } else {
-                    console.log("  ⚠️  No result object in response");
-                }
-
-                if (response.code) {
-                    console.log("  📋 Response Code:", response.code);
-                }
-
-                if (response.status) {
-                    console.log("  📋 Response Status:", response.status);
-                }
-
-                if (response.error) {
-                    console.error("  ❌ Error in response:", response.error);
-                }
-            } else {
-                console.warn("  ⚠️  Response is null or undefined");
-            }
-
-            // Determine success
-            const success = !!response?.result;
-            console.log("\n🎯 [LOG] Verification Submission Result:");
-            console.log("  - Success:", success);
-            console.log("  - Job ID:", job_id);
-
-            const returnValue = {
-                success: success,
-                smile_job_id: job_id
-            };
-
-            console.log("\n📤 [LOG] Return Value:");
-            console.log(JSON.stringify(returnValue, null, 2));
-
-            console.log("\n==========================================");
-            console.log("✅ VERIFY GHANA CARD WITH SELFIE - END");
-            console.log("==========================================\n");
-
-            return returnValue;
-
+            return await this.utilities.get_job_status(ref.userId, ref.jobId, { return_history: false, return_images: false });
         } catch (error: any) {
-            console.error("\n❌ [ERROR] Exception occurred during Smile ID API call");
-            console.error("❌ [ERROR] Error Type:", error?.constructor?.name || 'Unknown');
-            console.error("❌ [ERROR] Error Message:", error?.message || 'No error message');
-            console.error("❌ [ERROR] Error Stack:", error?.stack || 'No stack trace');
-
-            // Safely log error response without circular references
-            if (error?.response) {
-                console.error("❌ [ERROR] API Error Response Status:", error.response.status);
-                console.error("❌ [ERROR] API Error Response Status Text:", error.response.statusText);
-                if (error.response.data) {
-                    try {
-                        const dataStr = safeStringify(error.response.data, 2);
-                        console.error("❌ [ERROR] API Error Response Data:", dataStr);
-                    } catch (e) {
-                        // If even safe stringify fails, try to extract just the message
-                        const data = error.response.data;
-                        if (typeof data === 'string') {
-                            console.error("❌ [ERROR] API Error Response Data (string):", data);
-                        } else if (data && typeof data === 'object') {
-                            console.error("❌ [ERROR] API Error Response Data (object):", {
-                                message: data.message,
-                                error: data.error,
-                                code: data.code,
-                                detail: data.detail
-                            });
-                        } else {
-                            console.error("❌ [ERROR] API Error Response Data (raw):", String(data));
-                        }
-                    }
-                }
-                if (error.response.headers) {
-                    try {
-                        const headersStr = safeStringify(error.response.headers, 2);
-                        console.error("❌ [ERROR] API Error Response Headers:", headersStr);
-                    } catch (e) {
-                        console.error("❌ [ERROR] API Error Response Headers (could not stringify)");
-                    }
-                }
-            }
-
-            // Log request details safely
-            if (error?.request) {
-                console.error("❌ [ERROR] Request made but no response received");
-                console.error("❌ [ERROR] Request Path:", error.request.path || 'N/A');
-                console.error("❌ [ERROR] Request Method:", error.request.method || 'N/A');
-            }
-
-            // Extract and log config if available
-            if (error?.config) {
-                console.error("❌ [ERROR] Request Config:");
-                console.error("  - URL:", error.config.url || 'N/A');
-                console.error("  - Method:", error.config.method || 'N/A');
-                console.error("  - Base URL:", error.config.baseURL || 'N/A');
-            }
-
-            console.error("\n==========================================");
-            console.error("❌ VERIFY GHANA CARD WITH SELFIE - FAILED");
-            console.error("==========================================\n");
-
-            // Extract error message safely
-            let errorMessage = 'Failed to submit verification to Smile ID';
-            let responseData: any = null;
-            let isAlreadyEnrolled = false;
-            
-            if (error?.response?.data) {
-                try {
-                    const data = error.response.data;
-                    if (typeof data === 'string') {
-                        errorMessage = data;
-                        responseData = data;
-                        // Check if it's an "already enrolled" error
-                        if (data.toLowerCase().includes('already enrolled') || 
-                            data.toLowerCase().includes('wrong job type')) {
-                            isAlreadyEnrolled = true;
-                        }
-                    } else if (data && typeof data === 'object') {
-                        errorMessage = data.message || data.error || data.detail || data.code || errorMessage;
-                        responseData = {
-                            message: data.message,
-                            error: data.error,
-                            code: data.code,
-                            detail: data.detail
-                        };
-                        // Check if it's an "already enrolled" error
-                        const errorStr = JSON.stringify(data).toLowerCase();
-                        if (errorStr.includes('already enrolled') || 
-                            errorStr.includes('wrong job type')) {
-                            isAlreadyEnrolled = true;
-                        }
-                    }
-                } catch (e) {
-                    // If we can't extract, use the error message
-                    errorMessage = error?.message || errorMessage;
-                    if (errorMessage.toLowerCase().includes('already enrolled') || 
-                        errorMessage.toLowerCase().includes('wrong job type')) {
-                        isAlreadyEnrolled = true;
-                    }
-                }
-            } else if (error?.message && !error.message.includes('circular')) {
-                errorMessage = error.message;
-                if (errorMessage.toLowerCase().includes('already enrolled') || 
-                    errorMessage.toLowerCase().includes('wrong job type')) {
-                    isAlreadyEnrolled = true;
-                }
-            }
-            
-            // If user is already enrolled and we haven't retried yet, automatically retry with job_type 2
-            if (isAlreadyEnrolled && !isRetry) {
-                console.log("\n🔄 [INFO] User already enrolled detected. Automatically retrying with job_type 2 (Authentication)...");
-                console.log("🔄 [INFO] This will use SmartSelfie Authentication instead of Basic KYC Enrollment");
-                try {
-                    return await this.verifyGhanaCardWithSelfie(user, ghanaCardNumber, images, true);
-                } catch (retryError: any) {
-                    // If retry also fails, throw the retry error
-                    console.error("❌ [ERROR] Retry with job_type 2 also failed");
-                    throw retryError;
-                }
-            }
-            
-            // Add status code context
-            if (error?.response?.status === 400) {
-                if (isAlreadyEnrolled && isRetry) {
-                    errorMessage = `Smile ID rejected the authentication request (400): ${errorMessage}. The user may need to re-enroll or contact Smile ID support.`;
-                } else if (isAlreadyEnrolled) {
-                    errorMessage = `This Ghana Card has already been enrolled with Smile ID. For testing, please use a different card or contact Smile ID support to reset the enrollment. Original error: ${errorMessage}`;
-                } else {
-                    errorMessage = `Smile ID rejected the request (400): ${errorMessage}`;
-                }
-            }
-            
-            const cleanError = new Error(errorMessage);
-            (cleanError as any).statusCode = error?.response?.status;
-            (cleanError as any).responseData = responseData;
-            (cleanError as any).isAlreadyEnrolled = isAlreadyEnrolled;
-            
-            // Re-throw error to be handled by caller
-            throw cleanError;
+            logger.warn("Smile ID: job status lookup failed", { jobId: ref.jobId, status: error?.response?.status, error: error?.message });
+            return null;
         }
-    }
-
-    public getWebToken = async (user: IUser) => {
-        const request_params = {
-            user_id: user?._id!.toString(),
-            job_id: `job-${randomUUID()}`,
-            product: 'biometric_kyc', // Choose one of 'authentication', 'basic_kyc', 'smartselfie', 'biometric_kyc', 'enhanced_kyc', 'doc_verification'
-            callback_url: config.SMILE_ID_CALLBACK_URL
-        };
-
-        return await this.connection.get_web_token(
-            request_params
-        )
-    }
+    };
 }
 
 export default SmileId;

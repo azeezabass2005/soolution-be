@@ -122,9 +122,10 @@ class PlatformSettingsService extends DBService<IPlatformSettings> {
         };
     }
 
-    /** Daily limit in USD for a tier; null means unlimited (Tier 3) */
+    /** Daily limit in USD for a tier; null means unlimited (Tier 3), 0 for unverified accounts */
     public async getTierDailyLimitUsd(tier: UserTier): Promise<number | null> {
         if (tier >= USER_TIER.INSTITUTION) return null;
+        if (tier < USER_TIER.INDIVIDUAL) return 0;
         const limits = this.tierLimits(await this.getSettings());
         return tier === USER_TIER.BUSINESS ? limits.tier2 : limits.tier1;
     }
@@ -132,7 +133,7 @@ class PlatformSettingsService extends DBService<IPlatformSettings> {
     /** All tiers' daily limits (null = unlimited), for display */
     public async getTierDailyLimits(): Promise<Record<UserTier, number | null>> {
         const limits = this.tierLimits(await this.getSettings());
-        return { 1: limits.tier1, 2: limits.tier2, 3: null };
+        return { 0: 0, 1: limits.tier1, 2: limits.tier2, 3: null };
     }
 
     /**

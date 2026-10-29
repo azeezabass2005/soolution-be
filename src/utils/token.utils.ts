@@ -74,13 +74,14 @@ class Token {
             expiresIn: '168h'
         }
     ): string {
-        const { type = TokenType.ACCESS, expiresIn = '1h', rememberMe } = options;
+        const { type = TokenType.ACCESS, expiresIn = '15m', rememberMe, sessionStartedAt, passwordFingerprint } = options;
 
         const payload: ITokenPayload = {
             userId: user?._id as string,
             email: user?.email,
             role: user?.role,
             username: user?.username,
+            ...(passwordFingerprint ? { pfp: passwordFingerprint } : {}),
         };
 
         // Add tokenId to refresh token payload
@@ -89,6 +90,7 @@ class Token {
                 ...payload,
                 tokenId: TokenUtils.generateRefreshTokenId(),
                 ...(rememberMe !== undefined ? { rememberMe } : {}),
+                ...(sessionStartedAt !== undefined ? { sessionStartedAt } : {}),
             };
             return Jwt.sign(
                 {

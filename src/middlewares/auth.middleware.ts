@@ -67,6 +67,13 @@ class AuthMiddleware {
             // Verify user exists
             await this.verifyUser(res);
 
+            // Signed out everywhere (or password reset) after this token was issued
+            const validAfter = res.locals.user?.sessionsValidAfter;
+            if (validAfter && iat * 1000 < new Date(validAfter).getTime() - 1000) {
+                res.status(401).json({ success: false, message: "Unauthorized: Session ended" });
+                return;
+            }
+
             next();
             return;
         } catch (error) {

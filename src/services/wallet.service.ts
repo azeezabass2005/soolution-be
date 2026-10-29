@@ -541,17 +541,26 @@ class WalletService extends DBService<IWallet> {
             // 7. Now call Paystack OUTSIDE the session — balance is already debited
             // If Paystack fails, the transaction record exists with PENDING status for manual review
             try {
-                // In test mode, Test Bank (001) can resolve accounts but can't create recipients
-                // Map it to Zenith Bank (057) which supports both
-                const transferBankCode = bankCode === "001" && config.PAYSTACK_SECRET_KEY?.startsWith("sk_test_")
-                    ? "057"
-                    : bankCode;
-
-                const recipient = await paystackService.createTransferRecipient({
+                const createRecipient = (bank_code: string) => paystackService.createTransferRecipient({
                     name: accountName,
                     account_number: accountNumber,
-                    bank_code: transferBankCode,
+                    bank_code,
                 });
+
+                // Use the bank the account was resolved against. Only if Paystack's
+                // Test Bank (001) is refused in test mode, retry with Zenith (057):
+                // swapping up front sends a Test Bank number to Zenith, which
+                // fails with "Cannot resolve account".
+                let recipient;
+                try {
+                    recipient = await createRecipient(bankCode);
+                } catch (recipientError) {
+                    if (bankCode !== "001" || !config.PAYSTACK_SECRET_KEY?.startsWith("sk_test_")) throw recipientError;
+                    logger.warn("Paystack: Test Bank recipient refused, retrying with 057", {
+                        reference, error: (recipientError as any)?.response?.data || (recipientError as any)?.message,
+                    });
+                    recipient = await createRecipient("057");
+                }
 
                 const transfer = await paystackService.initiateTransfer({
                     amount: amount * 100, // kobo
@@ -608,9 +617,17 @@ class WalletService extends DBService<IWallet> {
                     reverseSession.endSession();
                 }
 
+                const providerMessage: string = paystackError?.response?.data?.message || "";
+                if (/resolve account|invalid account|account number/i.test(providerMessage)) {
+                    throw errorResponseMessage.createError(
+                        400,
+                        "The bank couldn't confirm this account. Check the account number and bank, then try again. Your balance has not been charged.",
+                        ErrorSeverity.MEDIUM
+                    );
+                }
                 throw errorResponseMessage.createError(
                     500,
-                    paystackError?.response?.data?.message || "Failed to initiate transfer with payment provider",
+                    providerMessage || "Failed to initiate transfer with payment provider",
                     ErrorSeverity.HIGH
                 );
             }

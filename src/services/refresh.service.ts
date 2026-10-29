@@ -35,6 +35,24 @@ class RefreshTokenService extends DBService<IRefreshToken> {
         });
     }
 
+    /**
+     * Uses up a refresh token: marks it revoked and returns it, in one atomic
+     * step so two requests can't both spend the same token. Null when it's
+     * unknown, expired or already used.
+     */
+    async consumeToken(tokenId: string): Promise<IRefreshToken | null> {
+        return RefreshToken.findOneAndUpdate(
+            { token: tokenId, isRevoked: false, expiresAt: { $gt: new Date() } },
+            { $set: { isRevoked: true, revokedAt: new Date() } },
+            { new: false },
+        );
+    }
+
+    /** The stored token whatever its state, to see why it couldn't be used */
+    async findByTokenId(tokenId: string): Promise<IRefreshToken | null> {
+        return RefreshToken.findOne({ token: tokenId });
+    }
+
     async revokeToken(tokenId: string, session?: ClientSession): Promise<void> {
         await this.update(
             { token: tokenId },
@@ -44,10 +62,10 @@ class RefreshTokenService extends DBService<IRefreshToken> {
     }
 
     async revokeAllUserTokens(userId: any, session?: ClientSession): Promise<void> {
-        await this.update(
+        await RefreshToken.updateMany(
             { userId: userId, isRevoked: false },
-            { isRevoked: true },
-            session
+            { $set: { isRevoked: true, revokedAt: new Date() } },
+            session ? { session } : {},
         );
     }
 }

@@ -70,6 +70,8 @@ interface EnvConfig {
     SMILE_ID_PROD_LAMBDA_URL: string;
     SMILE_ID_CALLBACK_URL: string;
     SMILE_ID_SID_SERVER: string;
+    /** Key for hashing BVNs (one BVN per account); falls back to JWT_SECRET. Changing it breaks the duplicate check for existing accounts. */
+    IDENTITY_HASH_SECRET: string;
 
     /** YellowCard payment integration */
     YELLOWCARD_API_KEY: string;
@@ -168,6 +170,7 @@ const loadEnvConfig = (): EnvConfig => {
         SMILE_ID_PROD_LAMBDA_URL: process.env.SMILE_ID_PROD_LAMBDA_URL || '',
         SMILE_ID_CALLBACK_URL: process.env.SMILE_ID_CALLBACK_URL || '',
         SMILE_ID_SID_SERVER: process.env.SMILE_ID_SID_SERVER || '',
+        IDENTITY_HASH_SECRET: process.env.IDENTITY_HASH_SECRET || process.env.JWT_SECRET || '',
         YELLOWCARD_API_KEY: process.env.YELLOWCARD_API_KEY || process.env.YELLOW_CARD_PUBLIC_KEY || '',
         YELLOWCARD_SECRET_KEY: process.env.YELLOWCARD_SECRET_KEY || process.env.YELLOW_CARD_SECRET_KEY || '',
         YELLOWCARD_WEBHOOK_SECRET: process.env.YELLOWCARD_WEBHOOK_SECRET || '',

@@ -40,6 +40,9 @@ export const RefreshTokenSchema = new Schema<IRefreshToken>(
          */
         isRevoked: { type: Boolean, default: false },
 
+        /** When it was revoked, to tell a two-tab race from a stolen token being reused */
+        revokedAt: { type: Date },
+
         /**
          * User agent string from the client when the token was issued
          * @type {string}

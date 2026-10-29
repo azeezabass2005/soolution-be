@@ -44,6 +44,7 @@ import walletSendService from "./wallet-send.service";
 import { MANUAL_PAYOUT_CURRENCIES } from "../common/wallet.constants";
 import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
+import { pickYellowCardNetwork } from "../utils/momo-network.utils";
 
 class TransactionService extends DBService<ITransaction> {
 
@@ -179,7 +180,7 @@ class TransactionService extends DBService<ITransaction> {
             }
         }
 
-        const bankAccountDetails = fromWallet ? null : await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
+        const bankAccountDetails = fromWallet ? null : await this.bankAccountDetailsService.getCompanyDefault(fromCurrency);
         if(!fromWallet && !bankAccountDetails) {
             throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
         }
@@ -391,7 +392,7 @@ class TransactionService extends DBService<ITransaction> {
         }
 
         // Bank details are only shown when the user pays by bank transfer
-        const bankAccountDetails = fromWallet ? null : await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
+        const bankAccountDetails = fromWallet ? null : await this.bankAccountDetailsService.getCompanyDefault(fromCurrency);
         if(!fromWallet && !bankAccountDetails) {
             throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
         }
@@ -879,6 +880,8 @@ class TransactionService extends DBService<ITransaction> {
                 accountNumber: string;
                 accountType: string;
                 country: string;
+                /** Provider the user chose, e.g. "Mpesa" or a bank name */
+                network?: string;
             };
             idempotencyKey?: string;
             pin?: string;
@@ -982,8 +985,7 @@ class TransactionService extends DBService<ITransaction> {
             ...activeChannels.filter((c: any) => c.channelType !== targetType),
         ];
 
-        const activeNetworks = allNetworks.filter((n: any) => n.status === 'active');
-        const network = activeNetworks.find((n: any) => n.type === targetType) || activeNetworks[0];
+        const network = pickYellowCardNetwork(allNetworks, { accountType: targetType, provider: destination.network });
 
         if (sortedChannels.length === 0 || !network) {
             throw errorResponseMessage.createError(
@@ -1464,12 +1466,20 @@ class TransactionService extends DBService<ITransaction> {
                 accountNumber?: string;
                 accountType?: string;
                 country?: string;
+                /** Provider the payer pays with, e.g. "Mpesa", or a YellowCard network id */
+                network?: string;
+                /** Readable bank name when `network` is a picked bank's id */
+                bankName?: string;
             };
             idempotencyKey?: string;
+            /** Set when the payer filled in a payment link */
+            paymentLinkId?: string;
+            /** The payer's name and email from the payment link form */
+            payer?: { name?: string; email?: string };
         },
         userId: string,
     ) => {
-        const { amount, fromCurrency, toCurrency, sender, destination, idempotencyKey } = params;
+        const { amount, fromCurrency, toCurrency, sender, destination, idempotencyKey, paymentLinkId } = params;
 
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
@@ -1546,8 +1556,7 @@ class TransactionService extends DBService<ITransaction> {
             ...activeChannels.filter((c: any) => c.channelType !== targetType),
         ];
 
-        const activeNetworks = allNetworks.filter((n: any) => n.status === 'active');
-        const network = activeNetworks.find((n: any) => n.type === targetType) || activeNetworks[0];
+        const network = pickYellowCardNetwork(allNetworks, { accountType: targetType, provider: destination?.network });
 
         if (sortedChannels.length === 0) {
             logger.error("No active on-ramp channels found for collection", {
@@ -1584,6 +1593,7 @@ class TransactionService extends DBService<ITransaction> {
                 lockedRateFromCurrency: fromCurrency,
                 lockedRateToCurrency: toCurrency,
                 lockedRateAt: new Date(),
+                ...(paymentLinkId ? { paymentLink: paymentLinkId, payer: params.payer } : {}),
             });
         } catch (dbError: any) {
             logger.error("Failed to create collection transaction record", { error: dbError?.message, sequenceId });
@@ -1611,6 +1621,10 @@ class TransactionService extends DBService<ITransaction> {
                 accountNumber: destination?.accountNumber,
                 institutionType: destination?.accountType,
                 country: senderCountry,
+                // The provider as the user/payer named it, for receipts ("Mpesa", not YellowCard's network id)
+                ...(destination?.network
+                    ? (destination.accountType === 'bank' ? { bankName: destination.bankName || destination.network } : { momoNetwork: destination.network })
+                    : {}),
             });
         } catch (dbError: any) {
             logger.error("Failed to create collection transaction detail", { error: dbError?.message, sequenceId });
@@ -2374,10 +2388,14 @@ class TransactionService extends DBService<ITransaction> {
                 email?: string;
             };
             idempotencyKey?: string;
+            /** Set when the payer filled in a payment link */
+            paymentLinkId?: string;
+            /** The payer's name and email from the payment link form */
+            payer?: { name?: string; email?: string };
         },
         userId: string,
     ) => {
-        const { amount, sender, idempotencyKey } = params;
+        const { amount, sender, idempotencyKey, paymentLinkId } = params;
 
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
@@ -2445,6 +2463,7 @@ class TransactionService extends DBService<ITransaction> {
             lockedRateFromCurrency: 'GHS',
             lockedRateToCurrency: 'NGN',
             lockedRateAt: new Date(),
+            ...(paymentLinkId ? { paymentLink: paymentLinkId, payer: params.payer } : {}),
         });
 
         if (idempotencyKey) {

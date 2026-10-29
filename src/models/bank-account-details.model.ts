@@ -31,7 +31,7 @@ const bankAccountDetailsSchema = new Schema<IBankAccountDetails>({
      * @type {number}
      * @required
      */
-    accountNumber: { type: Number, required: true },
+    accountNumber: { type: String, required: true, trim: true },
 
     /**
      * Account Name
@@ -46,6 +46,13 @@ const bankAccountDetailsSchema = new Schema<IBankAccountDetails>({
      * @required
      */
     bankName: { type: String, required: true },
+
+    /**
+     * Provider bank code (Paystack bank code for NGN, YellowCard network id elsewhere),
+     * set when the bank was picked from the list
+     * @type {string}
+     */
+    bankCode: { type: String, trim: true },
 
     /**
      * To know if the details is the default for the currency

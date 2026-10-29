@@ -8,6 +8,7 @@ import platformSettingsService from "./platform-settings.service";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import { TRANSACTION_STATUS } from "../common/constant";
 import { LIMIT_DAY_UTC_OFFSET_HOURS, TIER_NAME, USER_TIER, UserTier, isUserTier } from "../common/tier.constants";
+import { IDENTITY_REQUIRED_CODE } from "../common/identity.constants";
 import logger from "../utils/logger.utils";
 
 /** YellowCard per-USD rates are cached briefly; the limit check doesn't need tick-level precision */
@@ -50,7 +51,7 @@ export interface TierLimitCheck extends TierLimitStatus {
     /** null when the amount couldn't be valued in USD */
     usdValue: number | null;
     allowed: boolean;
-    reason?: "limit_exceeded" | "unvalued";
+    reason?: "limit_exceeded" | "unvalued" | "identity_required";
 }
 
 let rateCache: { at: number; unitsPerUsd: Map<string, number> } | null = null;
@@ -64,8 +65,9 @@ const formatUsd = (value: number) => `$${Math.floor(value).toLocaleString("en-US
  * Every send and receive is valued in USD when it's created and stored on the
  * transaction (`usdValue`); a user's usage is the sum for the current day
  * (midnight to midnight, Lagos time), excluding failed and cancelled ones.
- * Tier 3 is unlimited. If a transaction can't be valued for a limited tier,
- * it's refused: the limit fails closed.
+ * Unverified accounts can't transact until they verify their BVN, and Tier 3
+ * is unlimited. If a transaction can't be valued for a limited tier, it's
+ * refused: the limit fails closed.
  */
 class TransactionLimitService {
     /** Start of the current limit day */
@@ -116,7 +118,7 @@ class TransactionLimitService {
     private async getTier(userId: string): Promise<UserTier> {
         const user = await User.findById(userId).select("tier").lean();
         if (!user) throw errorResponseMessage.resourceNotFound("User");
-        return isUserTier(user.tier) ? user.tier : USER_TIER.INDIVIDUAL;
+        return isUserTier(user.tier) ? user.tier : USER_TIER.UNVERIFIED;
     }
 
     /** USD already used today (transactions created before usdValue was stored are valued now) */
@@ -159,6 +161,7 @@ class TransactionLimitService {
 
     async check(userId: string, amounts: AmountInCurrency[]): Promise<TierLimitCheck> {
         const [status, usdValue] = await Promise.all([this.getStatus(userId), this.valueInUsd(amounts)]);
+        if (status.tier < USER_TIER.INDIVIDUAL) return { ...status, usdValue, allowed: false, reason: "identity_required" };
         if (status.limitUsd === null) return { ...status, usdValue, allowed: true };
         if (usdValue === null) return { ...status, usdValue, allowed: false, reason: "unvalued" };
         // A cent of tolerance for rounding
@@ -172,6 +175,7 @@ class TransactionLimitService {
      * Call inside `withUserLock` so parallel requests can't both pass.
      */
     async assertAllowed(userId: string, amounts: AmountInCurrency[]): Promise<{ usdValue: number | null }> {
+        await this.assertCanTransact(userId);
         const result = await this.check(userId, amounts);
         if (result.allowed) return { usdValue: result.usdValue };
 
@@ -191,6 +195,20 @@ class TransactionLimitService {
                 + (result.remainingUsd! > 0 ? `You have ${formatUsd(result.remainingUsd!)} left today. ` : "You've used today's limit. ")
                 + "Upgrade your tier to transact more.";
         throw errorResponseMessage.createError(403, message, ErrorSeverity.LOW, details);
+    }
+
+    /**
+     * Throws a 403 IDENTITY_REQUIRED error for accounts that haven't verified
+     * their BVN yet; every send, receive and exchange calls this first.
+     */
+    async assertCanTransact(userId: string): Promise<void> {
+        if ((await this.getTier(userId)) >= USER_TIER.INDIVIDUAL) return;
+        throw errorResponseMessage.createError(
+            403,
+            "Verify your BVN to start sending, receiving and exchanging money. It takes about 2 minutes.",
+            ErrorSeverity.LOW,
+            { code: IDENTITY_REQUIRED_CODE }
+        );
     }
 
     /**

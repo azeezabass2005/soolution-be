@@ -31,6 +31,7 @@ import logger from "../utils/logger.utils";
 import Transaction from "../models/transaction.model";
 import { TRANSACTION_STATUS } from "../common/constant";
 import { TIER_NAME, USER_TIER, UserTier, isUserTier } from "../common/tier.constants";
+import { IDENTITY_REQUIRED_CODE } from "../common/identity.constants";
 import platformSettingsService from "./platform-settings.service";
 
 /** Signed document links are short-lived because the files hold identity documents */
@@ -71,7 +72,13 @@ export const applicationTier = (application: Pick<IKycApplication, "type" | "tie
 
 const stepsOf = (application: Pick<IKycApplication, "type" | "tier">) => getKycSteps(application.type, applicationTier(application));
 
-const userTier = (user: Pick<IUser, "tier">): UserTier => isUserTier(user.tier) ? user.tier : USER_TIER.INDIVIDUAL;
+const userTier = (user: Pick<IUser, "tier">): UserTier => isUserTier(user.tier) ? user.tier : USER_TIER.UNVERIFIED;
+
+/** Higher tiers build on a verified BVN (Tier 1) */
+const assertBvnVerified = (tier: UserTier) => {
+    if (tier >= USER_TIER.INDIVIDUAL) return;
+    throw errorResponseMessage.createError(403, "Verify your BVN first. It takes about 2 minutes and moves you to Tier 1.", ErrorSeverity.LOW, { code: IDENTITY_REQUIRED_CODE });
+};
 
 const formatUsd = (value: number) => `$${value.toLocaleString("en-US")}`;
 
@@ -204,6 +211,7 @@ class KycApplicationService extends DBService<IKycApplication> {
         }
 
         const currentTier = userTier(user);
+        assertBvnVerified(currentTier);
         const existing = await this.findOne({ user: user._id });
 
         if (existing && existing.status !== KYC_STATUS.APPROVED && existing.type === type && applicationTier(existing) === tier) {
@@ -463,6 +471,7 @@ class KycApplicationService extends DBService<IKycApplication> {
         this.assertEditable(application);
 
         const currentTier = userTier(user);
+        assertBvnVerified(currentTier);
         if (applicationTier(application) <= currentTier) {
             throw badRequest(`You're already on Tier ${currentTier}. Choose a higher tier to upgrade.`);
         }

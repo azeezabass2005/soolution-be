@@ -14,6 +14,8 @@ const beneficiarySchema = new Schema<IBeneficiary>(
 
         // Bank
         bankName: { type: String, trim: true },
+        /** Provider bank code (Paystack code for NGN, YellowCard network id elsewhere) when picked from the list */
+        bankCode: { type: String, trim: true },
         /** Kept as a string so leading zeros survive */
         accountNumber: { type: String, trim: true },
         accountName: { type: String, trim: true },

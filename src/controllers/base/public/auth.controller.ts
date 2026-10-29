@@ -14,6 +14,14 @@ import config from "../../../config/env.config";
 import NotificationService from "../../../utils/notification.utils";
 import PinService from "../../../services/pin.service";
 import WalletService from "../../../services/wallet.service";
+import { SESSION, SESSION_CODE } from "../../../config/session.config";
+import crypto from "crypto";
+import rateLimit from "express-rate-limit";
+
+/** Changes whenever the password does, so a reset link only works once */
+const passwordFingerprint = (passwordHash?: string) =>
+    crypto.createHmac("sha256", config.JWT_SECRET).update(String(passwordHash || "")).digest("hex").slice(0, 24);
+import User from "../../../models/user.model";
 
 /**
  * Controller handling authentication-related operations
@@ -56,10 +64,25 @@ class AuthController extends BaseController {
         this.router.post("/verify-email", this.verifyEmail.bind(this));
 
         // Request password reset route
-        this.router.post("/forgot-password", this.forgotPassword.bind(this));
+        // Each request sends an email; keep it from being used to flood an inbox
+        const forgotLimiter = rateLimit({
+            windowMs: 15 * 60 * 1000,
+            max: 5,
+            standardHeaders: true,
+            legacyHeaders: false,
+            message: { message: "Too many reset requests. Please wait a few minutes and try again." },
+        });
+        const resetLimiter = rateLimit({
+            windowMs: 15 * 60 * 1000,
+            max: 10,
+            standardHeaders: true,
+            legacyHeaders: false,
+            message: { message: "Too many attempts. Please wait a few minutes and try again." },
+        });
+        this.router.post("/forgot-password", forgotLimiter, this.forgotPassword.bind(this));
 
         // Reset password route
-        this.router.post("/reset-password", this.resetPassword.bind(this));
+        this.router.post("/reset-password", resetLimiter, this.resetPassword.bind(this));
 
         // Reset transaction PIN via emailed token
         this.router.post("/reset-pin", validateResetTransactionPin, this.resetPin.bind(this));
@@ -395,28 +418,35 @@ class AuthController extends BaseController {
      */
     private async forgotPassword (req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const { email } = req.body;
-
-            if (!email) {
-                return next(errorResponseMessage.payloadIncorrect("Email is required"));
+            const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+            if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+                return next(errorResponseMessage.payloadIncorrect("Enter a valid email address"));
             }
 
-            const user = await this.userService.findOne({ email });
-
-            // Always return success even if user doesn't exist (security best practice)
+            // Same answer whether or not the account exists, so this can't be used to find accounts
             this.sendSuccess(res, {
-                message: "If your email exists, you will receive a password reset link"
+                message: "If an account exists for that email, we've sent a link to reset your password.",
             });
 
-            if (user) {
-                // Generate reset token
-                // const resetToken = this.tokenBuilder.build().createToken(user, {
-                //     type: TokenType.RESET,
-                //     expiresIn: '1h'
-                // });
-
-                // TODO: Send password reset email
-                // await emailService.sendPasswordResetEmail(email, resetToken);
+            try {
+                const user = await this.userService.findOne({ email }, { select: ['+password'] });
+                if (!user || user.status !== 'active') return;
+                const token = this.tokenBuilder.build().createToken(user, {
+                    type: TokenType.RESET,
+                    expiresIn: '30m',
+                    passwordFingerprint: passwordFingerprint(user.password),
+                });
+                const resetUrl = `${config.FRONTEND_URL}/auth/reset-password?token=${encodeURIComponent(token)}`;
+                await this.notificationService.emailService.sendPasswordResetEmail(user.email, {
+                    name: user.firstName || 'there',
+                    resetUrl,
+                    expiryTime: '30 minutes',
+                });
+                this.logger.info("Password reset email sent", { userId: user._id });
+            } catch (sendError) {
+                this.logger.error("Failed to send password reset email", {
+                    error: sendError instanceof Error ? sendError.message : String(sendError),
+                });
             }
         } catch (error) {
             return next(error);
@@ -429,36 +459,50 @@ class AuthController extends BaseController {
      */
     private async resetPassword (req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const { token, newPassword } = req.body;
+            const { token, newPassword } = req.body || {};
+            const invalidLink = () => errorResponseMessage.createError(400, "This reset link is invalid or has expired. Request a new one.", ErrorSeverity.LOW, { code: "RESET_LINK_INVALID" });
 
-            if (!token || !newPassword) {
-                return next(errorResponseMessage.payloadIncorrect("Token and new password are required"));
+            if (typeof token !== "string" || !token) return next(invalidLink());
+            if (typeof newPassword !== "string" || newPassword.length < 8) {
+                return next(errorResponseMessage.createError(400, "Password must be at least 8 characters.", ErrorSeverity.LOW, { issues: [{ path: "newPassword", message: "Use at least 8 characters" }] }));
+            }
+            if (newPassword.length > 128) {
+                return next(errorResponseMessage.createError(400, "Password is too long.", ErrorSeverity.LOW));
             }
 
-            // Verify token
-            const decoded = await this.tokenBuilder
-                .setToken(token)
-                .build()
-                .verifyToken();
-
-            if (decoded.type !== TokenType.RESET) {
-                return next(errorResponseMessage.unauthorized("Invalid reset token"));
+            let decoded: any;
+            try {
+                decoded = await this.tokenBuilder.setToken(token).build().verifyToken();
+            } catch {
+                return next(invalidLink());
+            }
+            if (decoded?.type !== TokenType.RESET || !decoded?.data?.userId || !decoded?.data?.pfp) {
+                return next(invalidLink());
             }
 
-            // Hash new password
+            const user = await this.userService.findOne({ _id: decoded.data.userId }, { select: ['+password'] });
+            // The link stops working once the password has changed, so it can only be used once
+            if (!user || passwordFingerprint(user.password) !== decoded.data.pfp) {
+                return next(invalidLink());
+            }
+
             const hashedPassword = await HashService.hashPassword(newPassword);
+            await this.userService.updateById(String(user._id), { password: hashedPassword.password });
 
-            // Update password
-            const user = await this.userService.updateById(decoded.data.userId, {
-                password: hashedPassword.password
-            });
+            // A new password signs out every existing session
+            await this.refreshTokenService.revokeAllUserTokens(user._id);
+            await User.updateOne({ _id: user._id }, { $set: { sessionsValidAfter: new Date() } });
+            this.logger.info("Password reset", { userId: user._id });
 
-            if (!user) {
-                return next(errorResponseMessage.resourceNotFound("User"));
-            }
+            this.notificationService.emailService.sendNotificationEmail(user.email, {
+                name: user.firstName || 'there',
+                eyebrow: 'Security',
+                title: 'Your password was changed',
+                message: "Your Solution Pay password was just reset, and you've been signed out on every device. If this wasn't you, contact support@solutionpay.co straight away.",
+            }).catch((error: any) => this.logger.warn("Password change notice failed", { error: error?.message }));
 
             this.sendSuccess(res, {
-                message: "Password reset successful"
+                message: "Password reset. Sign in with your new password."
             });
         } catch (error) {
             return next(error);
@@ -523,10 +567,25 @@ class AuthController extends BaseController {
 
             const refreshPayload = decoded.data as IRefreshTokenPayload;
 
-            // Verify token exists in database and is valid
-            const tokenDoc = await this.refreshTokenService.findValidToken(refreshPayload.tokenId);
+            const sessionEnded = (message: string) =>
+                errorResponseMessage.createError(401, message, ErrorSeverity.LOW, { code: SESSION_CODE.SESSION_ENDED });
+
+            // Spend the token (atomically, so two requests can't both use it)
+            const tokenDoc = await this.refreshTokenService.consumeToken(refreshPayload.tokenId);
             if (!tokenDoc) {
-                return next(errorResponseMessage.unauthorized("Invalid refresh token"));
+                const stored = await this.refreshTokenService.findByTokenId(refreshPayload.tokenId);
+                if (stored?.isRevoked) {
+                    const revokedAgo = Date.now() - new Date(stored.revokedAt || (stored as any).updatedAt || 0).getTime();
+                    if (revokedAgo <= SESSION.REFRESH_REUSE_GRACE_MS) {
+                        // Another tab refreshed with it a moment ago; the browser already has the new cookies
+                        return next(errorResponseMessage.createError(401, "Session refreshed in another tab", ErrorSeverity.LOW, { code: SESSION_CODE.REFRESH_RACED }));
+                    }
+                    // A used token coming back later means it was copied: end every session for this user
+                    this.logger.warn("Refresh token reused; signing the user out everywhere", { userId: refreshPayload.userId, ip: req.ip });
+                    await this.refreshTokenService.revokeAllUserTokens(refreshPayload.userId);
+                    await User.updateOne({ _id: refreshPayload.userId }, { $set: { sessionsValidAfter: new Date() } });
+                }
+                return next(sessionEnded("Your session has ended. Please sign in again."));
             }
 
             // Find user
@@ -534,13 +593,20 @@ class AuthController extends BaseController {
             if (!user) {
                 return next(errorResponseMessage.resourceNotFound("User"));
             }
+            if (user.sessionsValidAfter && (decoded as any).iat * 1000 < new Date(user.sessionsValidAfter).getTime() - 1000) {
+                return next(sessionEnded("Your session has ended. Please sign in again."));
+            }
 
-            // Revoke current refresh token
-            await this.refreshTokenService.revokeToken(refreshPayload.tokenId);
+            // Hard cap: after MAX_SESSION_MS the password is needed again, however active the user is.
+            // Tokens from before this existed start their 30 days now.
+            const sessionStartedAt = refreshPayload.sessionStartedAt ?? Date.now();
+            if (Date.now() - sessionStartedAt > SESSION.MAX_SESSION_MS) {
+                return next(sessionEnded("For your security, please sign in again."));
+            }
 
             // Re-issue with the policy chosen at login (tokens from before the option existed stay persistent)
             const { accessToken: newAccessToken, refreshToken: newRefreshToken } =
-                await this.issueSession(req, res, user, refreshPayload.rememberMe !== false);
+                await this.issueSession(req, res, user, refreshPayload.rememberMe !== false, sessionStartedAt);
 
             this.sendSuccess(res, {
                 accessToken: newAccessToken,
@@ -560,16 +626,19 @@ class AuthController extends BaseController {
      * at 1 day server-side. The choice is stored in the refresh token so refreshes keep it.
      * @private
      */
-    private async issueSession(req: Request, res: Response, user: IUser, rememberMe: boolean) {
-        const refreshDays = rememberMe ? 30 : 1;
+    private async issueSession(req: Request, res: Response, user: IUser, rememberMe: boolean, sessionStartedAt: number = Date.now()) {
+        // The refresh token lives for the idle window, but never past the session's hard cap
+        const idleMs = rememberMe ? SESSION.REMEMBERED_REFRESH_TTL_MS : SESSION.REFRESH_TTL_MS;
+        const refreshMs = Math.max(60 * 1000, Math.min(idleMs, sessionStartedAt + SESSION.MAX_SESSION_MS - Date.now()));
         const accessToken = this.tokenBuilder.build().createToken(user, {
             type: TokenType.ACCESS,
-            expiresIn: '1h'
+            expiresIn: `${Math.round(SESSION.ACCESS_TTL_MS / 1000)}s`,
         });
         const refreshToken = this.tokenBuilder.build().createToken(user, {
             type: TokenType.REFRESH,
-            expiresIn: `${refreshDays}d`,
+            expiresIn: `${Math.round(refreshMs / 1000)}s`,
             rememberMe,
+            sessionStartedAt,
         });
 
         const decodedRefresh = await this.tokenBuilder.setToken(refreshToken).build().verifyToken();
@@ -580,7 +649,7 @@ class AuthController extends BaseController {
                 req.headers['user-agent'],
                 req.ip,
                 undefined,
-                TokenUtils.getRefreshTokenExpiry(refreshDays)
+                new Date(Date.now() + refreshMs)
             );
         }
 
@@ -592,9 +661,8 @@ class AuthController extends BaseController {
         };
         // Omitting maxAge makes a session cookie
         const lifetime = (ms: number) => (rememberMe ? { maxAge: ms } : {});
-        const refreshMs = refreshDays * 24 * 60 * 60 * 1000;
 
-        res.cookie('accessToken', accessToken, { ...base, httpOnly: true, ...lifetime(60 * 60 * 1000) });
+        res.cookie('accessToken', accessToken, { ...base, httpOnly: true, ...lifetime(SESSION.ACCESS_TTL_MS) });
         res.cookie('refreshToken', refreshToken, { ...base, httpOnly: true, ...lifetime(refreshMs) });
         res.cookie('role', Object.entries(ROLE_MAP).find(([_, v]) => v === user.role)?.[0], {
             ...base,
@@ -618,8 +686,9 @@ class AuthController extends BaseController {
                 return next(errorResponseMessage.unauthorized("User not authenticated"));
             }
 
-            // Revoke all refresh tokens for the user
+            // Revoke all refresh tokens, and refuse access tokens already handed out
             await this.refreshTokenService.revokeAllUserTokens(user._id);
+            await User.updateOne({ _id: user._id }, { $set: { sessionsValidAfter: new Date() } });
 
             // Clear cookies
             res.clearCookie('accessToken', {

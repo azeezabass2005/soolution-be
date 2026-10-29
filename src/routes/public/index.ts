@@ -5,6 +5,7 @@ import tagController from "../../controllers/base/public/tag.controller";
 import exchangeRateController from "../../controllers/base/public/exchange-rate.controller";
 import webhookController from "../../controllers/base/public/webhook.controller";
 import receiptController from "../../controllers/base/public/receipt.controller";
+import payController from "../../controllers/base/public/pay.controller";
 
 const path = "/public";
 
@@ -21,6 +22,8 @@ publicRouter.use(`${path}/exchange-rates`, exchangeRateController);
 publicRouter.use(`${path}/webhook`, webhookController);
 
 publicRouter.use(`${path}/receipts`, receiptController);
+
+publicRouter.use(`${path}/pay`, payController);
 
 
 export default publicRouter

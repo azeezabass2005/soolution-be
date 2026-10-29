@@ -2,6 +2,7 @@ import { Schema, model, Model } from 'mongoose';
 import { IUser } from './interface';
 import { MODEL_NAME, ROLE_MAP } from '../common/constant';
 import { USER_TIER, USER_TIERS } from '../common/tier.constants';
+import { IDENTITY_STATUS, IDENTITY_STATUSES } from '../common/identity.constants';
 
 /**
  * Mongoose schema for User model
@@ -49,12 +50,33 @@ export const UserSchema = new Schema<IUser>(
         isVerified: { type: Boolean, default: false },
 
         /**
-         * Account tier: 1 Individual (default, no KYC), 2 Business, 3 Institution.
-         * Decides the daily transaction limit.
+         * Account tier: 0 Unverified (default, can't transact), 1 Individual (BVN verified),
+         * 2 Business, 3 Institution. Decides the daily transaction limit.
          * @type {number}
-         * @default 1
+         * @default 0
          */
-        tier: { type: Number, enum: USER_TIERS, default: USER_TIER.INDIVIDUAL, index: true },
+        tier: { type: Number, enum: USER_TIERS, default: USER_TIER.UNVERIFIED, index: true },
+
+        /**
+         * Identity verification (BVN with Smile ID) that unlocks Tier 1.
+         * The BVN itself is never stored: only a keyed hash (one BVN per
+         * account) and its last 4 digits for display.
+         */
+        identity: {
+            type: {
+                _id: false,
+                status: { type: String, enum: IDENTITY_STATUSES, default: IDENTITY_STATUS.UNVERIFIED },
+                bvnHash: { type: String, select: false },
+                bvnLast4: { type: String },
+                /** Name returned for the BVN */
+                verifiedName: { type: String },
+                verifiedAt: { type: Date },
+                /** How it was verified: Smile ID, an earlier check or KYC review */
+                method: { type: String },
+                failureReason: { type: String },
+            },
+            default: () => ({ status: IDENTITY_STATUS.UNVERIFIED }),
+        },
 
         /**
          * Tier changes: approvals and admin overrides
@@ -113,6 +135,8 @@ export const UserSchema = new Schema<IUser>(
          * @enum UserStatus
          */
         status: { type: String, enum: ['active', 'inactive', 'suspended', 'pending', 'deactivated'], default: 'active' },
+        /** Tokens issued before this are refused (signing out everywhere, password reset, reused refresh token) */
+        sessionsValidAfter: { type: Date },
 
         /**
          * Last login timestamp
@@ -203,6 +227,12 @@ export const UserSchema = new Schema<IUser>(
         /** Automatically manage createdAt and updatedAt timestamps */
         timestamps: true,
     }
+);
+
+// One BVN per account: only verified accounts carry the hash
+UserSchema.index(
+    { 'identity.bvnHash': 1 },
+    { unique: true, partialFilterExpression: { 'identity.bvnHash': { $type: 'string' } } }
 );
 
 // Virtual: PIN is currently locked due to too many failed attempts

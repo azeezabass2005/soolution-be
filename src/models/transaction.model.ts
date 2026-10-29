@@ -177,6 +177,13 @@ export const TransactionSchema = new Schema<ITransaction>(
         lockedRateFromCurrency: { type: String, uppercase: true, trim: true },
         lockedRateToCurrency: { type: String, uppercase: true, trim: true },
         lockedRateAt: { type: Date },
+        /** The payment link the payer used, for collections started from one */
+        paymentLink: { type: Schema.Types.ObjectId, ref: MODEL_NAME.PAYMENT_LINK, index: true },
+        /** Who paid through the link, as they entered it */
+        payer: {
+            name: { type: String, trim: true },
+            email: { type: String, trim: true, lowercase: true },
+        },
     },
     {
         /** Enable virtual properties when converting to plain object */

@@ -51,7 +51,7 @@ class TransactionService extends DBService<ITransaction> {
 
     public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail>, alipayQrCode: Express.Multer.File, user: string,) =>  {
         const { amount, platform, alipayNo, alipayName, fromCurrency } = transactionData;
-        const bankAccountDetails = await this.bankAccountDetailsService.findOne({ isDefault: true, currency: fromCurrency });
+        const bankAccountDetails = await this.bankAccountDetailsService.getCompanyDefault(fromCurrency as string);
         if(!bankAccountDetails) {
             throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
         }

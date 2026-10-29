@@ -7,6 +7,8 @@
  * keeps its width on phones instead of being squeezed by nested containers.
  */
 
+import config from "../config/env.config";
+
 export const EMAIL_COLORS = {
     canvas: "#f5f1ea",
     card: "#ffffff",
@@ -82,10 +84,27 @@ export const htmlToText = (html: string): string =>
 export const stripLeadingEmoji = (text: string): string =>
     text.replace(/^(?:[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}][\u{FE0F}\u{200D}]?\s*)+/u, "").trim();
 
+/**
+ * Removes every emoji, wherever it sits. Emails carry none, so whatever
+ * callers wrote ("✅ Payment Successful") is cleaned just before sending,
+ * after the title has set the email's tone. Keeps © and similar symbols.
+ */
+const EMOJI = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator})(?:\u{FE0F}|\u{200D}|\p{Emoji_Modifier}|\p{Extended_Pictographic})*\u{FE0F}?/gu;
+const KEEP = new Set(["©", "®", "™", "↔", "↩", "↪"]);
+/** For HTML: only the emoji go, markup and spacing are untouched */
+export const removeEmoji = (html: string): string =>
+    html.replace(EMOJI, (m) => (KEEP.has(m) ? m : "")).replace(/[\u{FE0F}\u{20E3}]/gu, "");
+/** For subjects and plain text: also tidies the gap an emoji leaves ("✅ Paid" → "Paid") */
+export const stripEmoji = (text: string): string =>
+    removeEmoji(text)
+        .replace(/[ \t]{2,}/g, " ")
+        .replace(/^[ \t]+/gm, "")
+        .trim();
+
 /* ── Typography ───────────────────────────────────────────────── */
 
 export const eyebrow = (text: string, tone?: EmailTone): string =>
-    `<p style="margin:0 0 14px 0;font-family:${F.mono};font-size:11px;line-height:1.4;letter-spacing:0.16em;text-transform:uppercase;color:${tone ? TONES[tone].fg : C.muted};">[ ${escapeHtml(text)} ]</p>`;
+    `<p style="margin:0 0 14px 0;font-family:${F.mono};font-size:11px;line-height:1.4;letter-spacing:0.16em;text-transform:uppercase;color:${tone ? TONES[tone].fg : C.muted};">${escapeHtml(text)}</p>`;
 
 /** "Plain words *serif accent.*" — mirrors the app's headings */
 export const heading = (text: string, accent?: string): string =>
@@ -209,7 +228,7 @@ export const renderMessage = (message: string): string => {
     return out.join("");
 };
 
-/** Tone implied by a notification title, e.g. "❌ KYC Verification Failed" → negative */
+/** Tone implied by a notification title, e.g. "KYC Verification Failed" → negative (checked before emojis are stripped) */
 export const toneFromTitle = (title: string): EmailTone | undefined => {
     if (/^\s*(❌|⚠️)|\b(fail(ed|ure)?|reject(ed)?|declined|unsuccessful|action needed)\b/i.test(title)) return /⚠️|action needed/i.test(title) ? "warning" : "negative";
     if (/^\s*(✅|🎉)|\b(success(ful)?|completed?|approved|verified)\b/i.test(title)) return "positive";
@@ -228,7 +247,7 @@ export interface EmailAttachmentSummary {
 export const attachmentsBlock = (attachments: EmailAttachmentSummary[]): string => {
     if (!attachments.length) return "";
     return `
-<p style="margin:28px 0 8px 0;font-family:${F.mono};font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:${C.muted};">[ Attached · ${attachments.length} ]</p>
+<p style="margin:28px 0 8px 0;font-family:${F.mono};font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:${C.muted};">Attached · ${attachments.length}</p>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:${C.surface};border:1px solid ${C.line};border-radius:14px;">
     ${attachments.map((att, i) => `
     <tr>
@@ -241,6 +260,17 @@ export const attachmentsBlock = (attachments: EmailAttachmentSummary[]): string 
 };
 
 /* ── Page shell ──────────────────────────────────────────────── */
+
+/**
+ * The real logo, served by the website (email clients only show images from
+ * a public URL). EMAIL_LOGO_URL overrides it, e.g. for a CDN copy. The alt
+ * text, styled like the old wordmark, shows if images are blocked.
+ */
+const emailLogoUrl = (): string =>
+    process.env.EMAIL_LOGO_URL || `${config.FRONTEND_URL.replace(/\/+$/, "")}/assets/images/logo-wide.png`;
+// logo-wide.png is 1551×389
+const LOGO_HEIGHT = 32;
+const LOGO_WIDTH = Math.round((1551 / 389) * LOGO_HEIGHT);
 
 export const emailLayout = ({ title, preheader, content }: { title: string; preheader?: string; content: string }): string => {
     const year = new Date().getFullYear();
@@ -274,7 +304,7 @@ export const emailLayout = ({ title, preheader, content }: { title: string; preh
                 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
                     <tr>
                         <td style="padding:0 4px 18px 4px;">
-                            <span style="font-family:${F.sans};font-size:18px;font-weight:600;letter-spacing:-0.02em;color:${C.fg};">Solution<span style="color:${C.accent};">Pay</span></span>
+                            <img src="${escapeHtml(emailLogoUrl())}" width="${LOGO_WIDTH}" height="${LOGO_HEIGHT}" alt="Solution Pay" style="display:block;width:${LOGO_WIDTH}px;height:${LOGO_HEIGHT}px;border:0;font-family:${F.sans};font-size:18px;font-weight:600;color:${C.fg};">
                         </td>
                     </tr>
                     <tr>

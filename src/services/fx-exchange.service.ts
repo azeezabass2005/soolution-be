@@ -7,6 +7,7 @@ import ledgerService from "./ledger.service";
 import WalletService from "./wallet.service";
 import WalletTransactionService from "./wallet-transaction.service";
 import PinService from "./pin.service";
+import transactionLimitService from "./transaction-limit.service";
 import AuditLogService from "./audit-log.service";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import {
@@ -52,6 +53,7 @@ class FxExchangeService {
     private pinService = new PinService();
 
     async quote(userId: string, request: QuoteRequest) {
+        await transactionLimitService.assertCanTransact(userId);
         const fromCurrency = String(request.fromCurrency ?? "").toUpperCase();
         const toCurrency = String(request.toCurrency ?? "").toUpperCase();
         const amount = Number(request.amount);
@@ -124,6 +126,7 @@ class FxExchangeService {
         if (typeof pin !== "string" || !pin) {
             throw errorResponseMessage.payloadIncorrect("Transaction PIN is required");
         }
+        await transactionLimitService.assertCanTransact(userId);
         await this.pinService.verifyPin(userId, pin);
 
         const pending = await FxQuote.findOne({ _id: quoteId, user: userId }).lean();

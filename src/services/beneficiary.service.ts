@@ -49,7 +49,7 @@ class BeneficiaryService {
 
         // Only the fields that belong to this kind are kept
         const fields: Partial<IBeneficiary> = { currency: data.currency, kind: data.kind, nickname: data.nickname };
-        if (data.kind === BENEFICIARY_KIND.BANK) Object.assign(fields, { bankName: data.bankName, accountNumber: data.accountNumber, accountName: data.accountName });
+        if (data.kind === BENEFICIARY_KIND.BANK) Object.assign(fields, { bankName: data.bankName, bankCode: (data as any).bankCode, accountNumber: data.accountNumber, accountName: data.accountName });
         if (data.kind === BENEFICIARY_KIND.MOMO) Object.assign(fields, { momoNetwork: data.momoNetwork, momoNumber: data.momoNumber, momoName: data.momoName });
         if (isRmb) Object.assign(fields, { alipayNo: data.alipayNo, alipayName: data.alipayName, ...(data.kind === BENEFICIARY_KIND.ALIPAY ? { alipayType: data.alipayType } : {}) });
 

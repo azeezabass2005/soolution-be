@@ -26,6 +26,7 @@ export const ZCreateBeneficiary = z
         }),
         nickname: optionalText(60),
         bankName: optionalText(),
+        bankCode: optionalText(40),
         accountNumber: optionalText(40),
         accountName: optionalText(),
         momoNetwork: optionalText(60),

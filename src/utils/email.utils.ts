@@ -2,7 +2,7 @@ import nodemailer, { Transporter, SendMailOptions } from 'nodemailer';
 import config from '../config/env.config';
 import {
     attachmentsBlock, button, callout, codeBlock, emailLayout, escapeHtml, eyebrow, greeting, heading,
-    htmlToText, paragraph, renderMessage, signoff, SIGNOFF_MARKER, splitTitle, startsWithGreeting, toneFromTitle,
+    htmlToText, paragraph, removeEmoji, renderMessage, signoff, SIGNOFF_MARKER, splitTitle, startsWithGreeting, stripEmoji, toneFromTitle,
 } from './email-layout';
 
 /**
@@ -288,12 +288,13 @@ class EmailService {
                 emailHtml = this.replacePlaceholders(emailHtml, data);
             }
 
+            // No emoji in any email, whatever the caller wrote ("✅ Payment Successful")
             const mailOptions: SendMailOptions = {
                 from: this.config.from,
                 to: Array.isArray(to) ? to.join(', ') : to,
-                subject,
-                html: emailHtml,
-                text: emailText,
+                subject: stripEmoji(subject),
+                html: emailHtml ? removeEmoji(emailHtml) : emailHtml,
+                text: emailText ? stripEmoji(emailText) : emailText,
                 cc: cc ? (Array.isArray(cc) ? cc.join(', ') : cc) : undefined,
                 bcc: bcc ? (Array.isArray(bcc) ? bcc.join(', ') : bcc) : undefined,
                 attachments,

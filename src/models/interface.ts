@@ -1,6 +1,7 @@
 import { WalletCurrency } from "../common/wallet.constants";
 import mongoose, {Document, Schema} from 'mongoose';
 import { UserTier } from "../common/tier.constants";
+import { IdentityStatus } from "../common/identity.constants";
 import {
     USER_STATUS,
     PUBLICATION_STATUS, TRANSACTION_STATUS, TRANSACTION_TYPE, DETAIL_TYPE, ALIPAY_PLATFORM,
@@ -48,8 +49,11 @@ export interface IUser extends Document {
     hearAboutUsOther?: string;
 
     // KYC related fields
-    /** Account tier (1 Individual, 2 Business, 3 Institution); sets the daily limit */
+    /** Tokens issued before this are refused (set when signing out everywhere or resetting the password) */
+    sessionsValidAfter?: Date;
+    /** Account tier (0 Unverified, 1 Individual, 2 Business, 3 Institution); sets the daily limit */
     tier: UserTier;
+    identity?: IUserIdentity;
     tierHistory?: { tier: UserTier; reason: string; by?: Schema.Types.ObjectId | string; at: Date }[];
     isKYCDone?: boolean;
     isKYCRejected?: boolean;
@@ -68,6 +72,7 @@ export interface IRefreshToken extends Document {
     token: string;
     expiresAt: Date;
     isRevoked: boolean;
+    revokedAt?: Date;
     userAgent?: string;
     ipAddress?: string;
 }
@@ -212,6 +217,31 @@ export interface ITransaction extends Document {
     lockedRateFromCurrency?: string;
     lockedRateToCurrency?: string;
     lockedRateAt?: Date;
+    /** The payment link the payer used, for collections started from one */
+    paymentLink?: Schema.Types.ObjectId | string;
+    /** Who paid through the link, as they entered it */
+    payer?: { name?: string; email?: string };
+}
+
+export interface IPaymentLink extends Document {
+    user: Schema.Types.ObjectId | string | IUser;
+    /** Public, unguessable id used in the link URL */
+    slug: string;
+    /** Currency the payer pays in, e.g. KES */
+    currency: string;
+    /** Currency the owner is credited in (NGN) */
+    toCurrency: string;
+    /** Fixed amount in `currency`; when unset the payer enters the amount */
+    amount?: number;
+    /** What the payer is paying for, shown as the page heading */
+    title?: string;
+    /** Older links' note, used as the title when there isn't one */
+    description?: string;
+    active: boolean;
+    /** "single": stops after one completed payment. "reusable": until turned off. */
+    usage: "single" | "reusable";
+    createdAt: Date;
+    updatedAt: Date;
 }
 
 export interface ITransactionDetail extends Document {
@@ -301,6 +331,7 @@ export interface IBeneficiary extends Document {
     kind: 'bank' | 'momo' | 'alipay' | 'wechat';
     nickname?: string;
     bankName?: string;
+    bankCode?: string;
     accountNumber?: string;
     accountName?: string;
     momoNetwork?: string;
@@ -318,9 +349,11 @@ export interface IBeneficiary extends Document {
 export interface IBankAccountDetails extends Document {
     user?: mongoose.Schema.Types.ObjectId | string;
     currency: string;
-    accountNumber: number;
+    /** Text, so leading zeros survive */
+    accountNumber: string;
     accountName: string;
     bankName: string;
+    bankCode?: string;
     isDefault: boolean;
 }
 
@@ -422,11 +455,41 @@ export interface IWalletTransaction extends Document {
     transactionId?: Schema.Types.ObjectId | string;
 }
 
+export interface IUserIdentity {
+    status: IdentityStatus;
+    bvnHash?: string;
+    bvnLast4?: string;
+    verifiedName?: string;
+    verifiedAt?: Date;
+    method?: string;
+    failureReason?: string;
+}
+
 export interface IVerification extends Document {
     user: Schema.Types.ObjectId | string | IUser;
     jobId?: string;
     status?: 'pending' | 'failed' | 'passed';
     reason?: string;
+    /** What was checked; older records (before BVN checks) have none */
+    kind?: 'bvn';
+    /** Keyed hash and last 4 digits of the BVN submitted (never the BVN itself) */
+    idHash?: string;
+    idLast4?: string;
+    /** Smile ID's job ID, result code and per-check outcomes, for support */
+    smileJobId?: string;
+    resultCode?: string;
+    resultText?: string;
+    actions?: Record<string, unknown>;
+    /** Name the BVN is registered to */
+    nameOnId?: string;
+    /** Where the final result came from */
+    resultSource?: 'webhook' | 'poll';
+    completedAt?: Date;
+    lastPolledAt?: Date;
+    /** Set when an admin resets attempts, so the failure no longer counts */
+    excludedFromAttempts?: boolean;
+    createdAt?: Date;
+    updatedAt?: Date;
 }
 
 export interface IKycDocument {

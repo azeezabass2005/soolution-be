@@ -205,7 +205,7 @@ export const ZKycStart = z.object({
 }).transform((data) => ({ ...data, tier: data.tier ?? (data.type === "business" ? 3 : 2) as 2 | 3 }));
 
 export const ZTierOverride = z.object({
-    tier: z.union([z.literal(1), z.literal(2), z.literal(3)], { errorMap: () => ({ message: "Tier must be 1, 2 or 3" }) }),
+    tier: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)], { errorMap: () => ({ message: "Tier must be 0, 1, 2 or 3" }) }),
     reason: z.string({ required_error: "Please give a reason" }).trim().min(3, "Please give a reason").max(500),
 });
 
