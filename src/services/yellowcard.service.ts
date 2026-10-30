@@ -37,6 +37,34 @@ class YellowCardService {
     }
 
     /**
+     * The person block YellowCard requires on payments ("sender") and
+     * collections ("recipient"): dob as mm/dd/yyyy, and an ID.
+     * TODO(kyc): we don't store a DOB, address or ID number yet, so these
+     * fall back to placeholders, which the sandbox accepts. Production
+     * needs the user's real details.
+     */
+    private kycPerson(person: {
+        name: string; country: string; phone: string; address?: string; dob?: string;
+        email: string; idNumber?: string; idType?: string;
+    }) {
+        let dob = person.dob;
+        if (dob && /^\d{4}-\d{2}-\d{2}$/.test(dob)) {
+            const [y, m, d] = dob.split('-');
+            dob = `${m}/${d}/${y}`;
+        }
+        return {
+            name: person.name,
+            country: person.country,
+            phone: person.phone,
+            address: person.address || 'N/A',
+            dob,
+            email: person.email,
+            idNumber: person.idNumber || '0000',
+            idType: person.idType || 'license',
+        };
+    }
+
+    /**
      * Build auth headers for each request.
      * YellowCard HMAC auth:
      *   message = ISO8601_timestamp + fullPath + METHOD [+ base64(sha256(body)) for POST/PUT]
@@ -387,24 +415,7 @@ class YellowCardService {
             // YellowCard collections API uses "recipient" (who receives funds) and "source" (where funds come from)
             // This differs from payments API which uses "sender" and "destination"
 
-            // Format dob to mm/dd/yyyy as required by YellowCard
-            let dob = params.sender.dob;
-            if (dob && dob.includes('-') && dob.indexOf('-') === 4) {
-                // Convert yyyy-mm-dd to mm/dd/yyyy
-                const [y, m, d] = dob.split('-');
-                dob = `${m}/${d}/${y}`;
-            }
-
-            const recipient: any = {
-                name: params.sender.name,
-                country: params.sender.country,
-                phone: params.sender.phone,
-                address: params.sender.address || 'N/A',
-                dob,
-                email: params.sender.email,
-                idNumber: params.sender.idNumber || '0000',
-                idType: params.sender.idType || 'license',
-            };
+            const recipient = this.kycPerson(params.sender);
 
             const body: any = {
                 channelId: params.channelId,
@@ -507,7 +518,7 @@ class YellowCardService {
             const body: any = {
                 channelId: params.channelId,
                 sequenceId: params.sequenceId,
-                sender: params.sender,
+                sender: this.kycPerson(params.sender),
                 destination: params.destination,
                 reason: params.reason || "other",
                 forceAccept: params.forceAccept ?? true,
