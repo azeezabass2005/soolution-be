@@ -2,6 +2,10 @@ import config from "../config/env.config";
 import crypto from "crypto";
 import axios, { AxiosInstance } from "axios";
 import logger from "../utils/logger.utils";
+import errorResponseMessage, { ErrorResponseCode, ErrorSeverity } from "../common/messages/error-response-message";
+
+/** Env values pasted into a dashboard often keep their quotes or a stray space */
+const clean = (value?: string): string => (value || "").trim().replace(/^["']|["']$/g, "").trim();
 
 class YellowCardService {
 
@@ -11,7 +15,10 @@ class YellowCardService {
     constructor() {
         // Dashboard-pasted values often carry quotes or spaces; a value without
         // https:// makes every call fail with a bare "Invalid URL".
-        const baseURL = (config.YELLOWCARD_BASE_URL || "https://sandbox.api.yellowcard.io/business").trim().replace(/^["']|["']$/g, "");
+        const baseURL = clean(config.YELLOWCARD_BASE_URL) || "https://sandbox.api.yellowcard.io/business";
+        if (!clean(config.YELLOWCARD_API_KEY) || !clean(config.YELLOWCARD_SECRET_KEY)) {
+            logger.error("YELLOWCARD_API_KEY or YELLOWCARD_SECRET_KEY is not set; YellowCard will reject every call");
+        }
         if (!/^https?:\/\/[^\s/]+/i.test(baseURL)) {
             logger.error("YELLOWCARD_BASE_URL is not a full URL; every YellowCard call (rates, sends, receives) will fail. Set it like https://sandbox.api.yellowcard.io/business", { value: baseURL });
         }
@@ -50,12 +57,12 @@ class YellowCardService {
         }
 
         const signature = crypto
-            .createHmac("sha256", config.YELLOWCARD_SECRET_KEY)
+            .createHmac("sha256", clean(config.YELLOWCARD_SECRET_KEY))
             .update(message)
             .digest("base64");
 
         return {
-            Authorization: `YcHmacV1 ${config.YELLOWCARD_API_KEY}:${signature}`,
+            Authorization: `YcHmacV1 ${clean(config.YELLOWCARD_API_KEY)}:${signature}`,
             "X-YC-Timestamp": timestamp,
         };
     }
@@ -258,8 +265,17 @@ class YellowCardService {
             logger.info("YellowCard: getRates success", { count: codes.length, currencies: codes });
             return data;
         } catch (error: any) {
-            logger.error("YellowCard: getRates failed", { error: error?.response?.data || error?.message || error });
-            throw error;
+            logger.error("YellowCard: getRates failed", { status: error?.response?.status, error: error?.response?.data || error?.message || error });
+            // Say what YellowCard answered instead of a generic 422 (no secrets in it)
+            const status = error?.response?.status;
+            const reason = error?.response?.data?.code || error?.response?.data?.message || error?.message || "no response";
+            throw errorResponseMessage.createError(
+                ErrorResponseCode.UNABLE_TO_COMPLETE,
+                status === 401 || status === 403
+                    ? `Rates are unavailable: YellowCard rejected our credentials (${status} ${reason})`
+                    : `Rates are unavailable: YellowCard ${status ? `returned ${status}` : "could not be reached"} (${reason})`,
+                ErrorSeverity.HIGH,
+            );
         }
     }
 
