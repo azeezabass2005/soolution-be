@@ -621,9 +621,10 @@ class AuthController extends BaseController {
      * Issues an access + refresh token pair, stores the refresh token and sets the auth cookies.
      *
      * With `rememberMe` the session survives closing the browser: persistent cookies and a
-     * 30-day refresh token (renewed on each refresh). Without it, the cookies are session
-     * cookies (no expiry, so the browser drops them on close) and the refresh token is capped
-     * at 1 day server-side. The choice is stored in the refresh token so refreshes keep it.
+     * 7-day refresh token (renewed on each refresh). Without it, the cookies are session
+     * cookies (no expiry, so the browser drops them on close) and the refresh token lasts
+     * 12 hours. Either way the refresh token never outlives SESSION.MAX_SESSION_MS (30 days)
+     * from sign-in. The choice is stored in the refresh token so refreshes keep it.
      * @private
      */
     private async issueSession(req: Request, res: Response, user: IUser, rememberMe: boolean, sessionStartedAt: number = Date.now()) {

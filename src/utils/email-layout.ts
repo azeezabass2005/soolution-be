@@ -91,9 +91,11 @@ export const stripLeadingEmoji = (text: string): string =>
  */
 const EMOJI = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator})(?:\u{FE0F}|\u{200D}|\p{Emoji_Modifier}|\p{Extended_Pictographic})*\u{FE0F}?/gu;
 const KEEP = new Set(["©", "®", "™", "↔", "↩", "↪"]);
-/** For HTML: only the emoji go, markup and spacing are untouched */
+/** An emoji plus the one space after it, so "📱 M-Pesa" becomes "M-Pesa", not " M-Pesa" */
+const EMOJI_AND_SPACE = new RegExp(`${EMOJI.source}[ \\t]?`, "gu");
+/** For HTML: only the emoji (and the space each one leaves) go, markup is untouched */
 export const removeEmoji = (html: string): string =>
-    html.replace(EMOJI, (m) => (KEEP.has(m) ? m : "")).replace(/[\u{FE0F}\u{20E3}]/gu, "");
+    html.replace(EMOJI_AND_SPACE, (m) => (KEEP.has(m.trimEnd()) ? m : "")).replace(/[\u{FE0F}\u{20E3}]/gu, "");
 /** For subjects and plain text: also tidies the gap an emoji leaves ("✅ Paid" → "Paid") */
 export const stripEmoji = (text: string): string =>
     removeEmoji(text)
@@ -267,10 +269,12 @@ export const attachmentsBlock = (attachments: EmailAttachmentSummary[]): string 
  * text, styled like the old wordmark, shows if images are blocked.
  */
 const emailLogoUrl = (): string =>
-    process.env.EMAIL_LOGO_URL || `${config.FRONTEND_URL.replace(/\/+$/, "")}/assets/images/logo-wide.png`;
-// logo-wide.png is 1551×389
-const LOGO_HEIGHT = 32;
-const LOGO_WIDTH = Math.round((1551 / 389) * LOGO_HEIGHT);
+    process.env.EMAIL_LOGO_URL || `${config.FRONTEND_URL.replace(/\/+$/, "")}/assets/images/logo-wide-email.png`;
+// logo-wide-email.png is the dark logo with a thin white outline, so it stays
+// readable when a mail app forces dark mode (Gmail and Outlook ignore the
+// light-only meta tags). 395×108 at 3× scale, including a 4px clear margin.
+const LOGO_HEIGHT = 36;
+const LOGO_WIDTH = Math.round((395 / 108) * LOGO_HEIGHT);
 
 export const emailLayout = ({ title, preheader, content }: { title: string; preheader?: string; content: string }): string => {
     const year = new Date().getFullYear();

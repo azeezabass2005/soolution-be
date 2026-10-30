@@ -9,7 +9,12 @@ class YellowCardService {
     private basePath: string;
 
     constructor() {
-        const baseURL = config.YELLOWCARD_BASE_URL || "https://sandbox.api.yellowcard.io/business";
+        // Dashboard-pasted values often carry quotes or spaces; a value without
+        // https:// makes every call fail with a bare "Invalid URL".
+        const baseURL = (config.YELLOWCARD_BASE_URL || "https://sandbox.api.yellowcard.io/business").trim().replace(/^["']|["']$/g, "");
+        if (!/^https?:\/\/[^\s/]+/i.test(baseURL)) {
+            logger.error("YELLOWCARD_BASE_URL is not a full URL; every YellowCard call (rates, sends, receives) will fail. Set it like https://sandbox.api.yellowcard.io/business", { value: baseURL });
+        }
         this.client = axios.create({
             baseURL,
             timeout: 30000,
