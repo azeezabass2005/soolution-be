@@ -12,6 +12,7 @@ import { ROLE_MAP } from "../../../common/constant";
  *   POST /transfer-details   complete them: BVN, NIN, date of birth, address
  *   GET  /users/:id   admin: a user's state and recent checks
  *   POST /users/:id/reset-attempts   admin: let a user try again
+ *   POST /users/:id/reset-verification   admin: back to Unverified with nothing on file
  */
 class IdentityController extends BaseController {
 
@@ -27,6 +28,7 @@ class IdentityController extends BaseController {
         this.router.post("/transfer-details", this.submitTransferDetails.bind(this));
         this.router.get("/users/:userId", this.requireAdmin, this.getUserIdentity.bind(this));
         this.router.post("/users/:userId/reset-attempts", this.requireAdmin, this.resetAttempts.bind(this));
+        this.router.post("/users/:userId/reset-verification", this.requireAdmin, this.resetVerification.bind(this));
     }
 
     private requireAdmin(_req: Request, res: Response, next: NextFunction): void {
@@ -77,6 +79,18 @@ class IdentityController extends BaseController {
             const user = await this.userService.findById(req.params.userId);
             if (!user) return next(errorResponseMessage.resourceNotFound("User"));
             this.sendSuccess(res, await identityService.adminSummary(String(user._id)));
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    private async resetVerification(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+            if (reason.length < 3) return next(errorResponseMessage.createError(400, "Please give a reason", ErrorSeverity.LOW));
+            const user = await this.userService.findById(req.params.userId);
+            if (!user) return next(errorResponseMessage.resourceNotFound("User"));
+            this.sendSuccess(res, { message: "Verification reset", ...(await identityService.adminResetVerification(res.locals.user, String(user._id), reason.slice(0, 500))) });
         } catch (error) {
             next(error);
         }

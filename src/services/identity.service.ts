@@ -715,6 +715,38 @@ class IdentityService {
         };
     }
 
+    /**
+     * Undoes a user's identity verification: back to Unverified (tier 0) with
+     * nothing on file (BVN, NIN, date of birth, address), so they verify from
+     * scratch. Also clears their failed attempts. For accounts verified in
+     * error, or for testing the full flow again.
+     */
+    async adminResetVerification(admin: IUser, userId: string, reason: string) {
+        const before = await User.findById(userId).select("tier identity").lean();
+        if (!before) throw errorResponseMessage.resourceNotFound("User");
+        await User.updateOne(
+            { _id: userId },
+            {
+                $set: { tier: USER_TIER.UNVERIFIED, identity: { status: IDENTITY_STATUS.UNVERIFIED } },
+                $push: { tierHistory: { tier: USER_TIER.UNVERIFIED, reason: `Verification reset by admin: ${reason}`, by: admin._id, at: new Date() } },
+            }
+        );
+        // Any check still running is abandoned, and nothing counts against the next attempts
+        await Verification.updateMany(
+            { user: userId, status: "pending" },
+            { $set: { status: "failed", reason: "Verification reset by admin", completedAt: new Date() }, $unset: ENCRYPTED_IDS }
+        );
+        await Verification.updateMany({ user: userId, kind: "bvn", status: "failed" }, { $set: { excludedFromAttempts: true } });
+        await this.auditLog.logAction(
+            undefined, userId, "IDENTITY_VERIFICATION_RESET",
+            { tier: before.tier, status: before.identity?.status, bvnLast4: before.identity?.bvnLast4, ninLast4: before.identity?.ninLast4 },
+            { tier: USER_TIER.UNVERIFIED, status: IDENTITY_STATUS.UNVERIFIED },
+            undefined, undefined, { by: String(admin._id), reason }
+        );
+        logger.info("Identity verification reset by admin", { userId, by: String(admin._id), fromTier: before.tier });
+        return this.adminSummary(userId);
+    }
+
     /** Lets a user who used up their attempts try again (e.g. after support helped them) */
     async adminResetAttempts(admin: IUser, userId: string, reason: string) {
         const failures = await this.countedFailures(userId);
