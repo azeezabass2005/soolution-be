@@ -48,11 +48,17 @@ export const VerificationSchema = new Schema<IVerification>(
         },
 
         /** What was checked; older records (before BVN checks) have none */
-        kind: { type: String, enum: ['bvn'] },
+        kind: { type: String, enum: ['bvn', 'details'] },
 
         /** Keyed hash and last 4 digits of the submitted BVN (never the BVN itself) */
         idHash: { type: String, select: false },
         idLast4: { type: String },
+
+        /** Encrypted BVN and NIN, kept only until the check is decided, then moved to the user or deleted */
+        bvnEnc: { type: String, select: false },
+        ninEnc: { type: String, select: false },
+        ninHash: { type: String, select: false },
+        ninLast4: { type: String },
 
         /** Smile ID's own job ID, result code and per-check outcomes, for support */
         smileJobId: { type: String },

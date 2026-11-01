@@ -22,6 +22,8 @@ import {
 import { PayPaymentLinkInput, ZCreatePaymentLink, ZPayPaymentLink, ZUpdatePaymentLink } from "../validators/z-payment-link";
 import TransactionService from "./transaction.service";
 import transactionLimitService from "./transaction-limit.service";
+import identityService from "./identity.service";
+import { TRANSFER_DETAILS_REQUIRED_CODE } from "../common/identity.constants";
 import logger from "../utils/logger.utils";
 
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -97,6 +99,8 @@ class PaymentLinkService {
         // Same rule as receiving directly: verify your BVN first
         await transactionLimitService.assertCanTransact(userId);
         const data = parse<{ currency: string; amount?: number; title?: string; description?: string; usage: "single" | "reusable" }>(ZCreatePaymentLink, body);
+        // YellowCard collects every currency except GHS and needs the owner's KYC details
+        if (data.currency !== "GHS") await identityService.assertTransferDetails(userId);
 
         const active = await PaymentLink.countDocuments({ user: new Types.ObjectId(userId), active: true });
         if (active >= MAX_ACTIVE_PAYMENT_LINKS) {
@@ -258,7 +262,15 @@ class PaymentLinkService {
                 throw errorResponseMessage.createError(409, UNAVAILABLE, ErrorSeverity.LOW, { code: "PAYMENT_LINK_UNAVAILABLE" });
             }
 
-            const transaction = await this.startCollection(link, owner, input, amount);
+            let transaction;
+            try {
+                transaction = await this.startCollection(link, owner, input, amount);
+            } catch (error: any) {
+                // The owner's missing details are theirs to fix; the payer just can't pay yet
+                if (error?.details?.code !== TRANSFER_DETAILS_REQUIRED_CODE) throw error;
+                logger.warn("Payment link payment refused: owner's transfer details are missing", { linkId: String(link._id) });
+                throw errorResponseMessage.createError(409, UNAVAILABLE, ErrorSeverity.LOW, { code: "PAYMENT_LINK_UNAVAILABLE" });
+            }
             return this.toPublicPayment(transaction, link);
         });
     }
@@ -285,20 +297,14 @@ class PaymentLinkService {
         }
 
         const isMomo = input.method === "momo";
-        // Same shape as the dashboard's receive form: the owner is the YellowCard
-        // "sender" record and the payer's wallet or bank is the destination.
+        // Same as the dashboard's receive form: the owner is YellowCard's KYC
+        // recipient and the payer's wallet or bank is the destination.
         return this.transactionService.createYellowCardCollectionTransaction({
             amount,
             fromCurrency: link.currency,
             toCurrency: PAYMENT_LINK_TO_CURRENCY,
-            sender: {
-                name: ownerName(owner) || "User",
-                country,
-                phone: toIntl(owner.phoneNumber || "", country),
-                address: "N/A",
-                dob: "1990-01-01",
-                email: owner.email || "",
-            },
+            // Where the payer pays from; the KYC recipient is the owner, from their record
+            sender: { country },
             destination: {
                 accountName: isMomo ? input.momoName : input.accountName,
                 accountNumber: isMomo ? toIntl(input.momoNumber!, country) : input.accountNumber,

@@ -7,7 +7,9 @@ import { ROLE_MAP } from "../../../common/constant";
 /**
  * BVN verification (Smile ID) that unlocks Tier 1.
  *   GET  /            the signed-in user's verification state
- *   POST /bvn         submit a BVN with selfie images
+ *   POST /bvn         submit a BVN and NIN with selfie images
+ *   GET  /transfer-details   what YellowCard transfers still need (never the numbers)
+ *   POST /transfer-details   complete them: BVN, NIN, date of birth, address
  *   GET  /users/:id   admin: a user's state and recent checks
  *   POST /users/:id/reset-attempts   admin: let a user try again
  */
@@ -21,6 +23,8 @@ class IdentityController extends BaseController {
     protected setupRoutes(): void {
         this.router.get("/", this.getStatus.bind(this));
         this.router.post("/bvn", this.submitBvn.bind(this));
+        this.router.get("/transfer-details", this.getTransferDetails.bind(this));
+        this.router.post("/transfer-details", this.submitTransferDetails.bind(this));
         this.router.get("/users/:userId", this.requireAdmin, this.getUserIdentity.bind(this));
         this.router.post("/users/:userId/reset-attempts", this.requireAdmin, this.resetAttempts.bind(this));
     }
@@ -42,8 +46,27 @@ class IdentityController extends BaseController {
 
     private async submitBvn(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const status = await identityService.submitBvn(res.locals.user, req.body?.bvn, req.body?.images);
+            const status = await identityService.submitBvn(res.locals.user, req.body?.bvn, req.body?.images, req.body?.nin);
             this.sendSuccess(res, { message: "We're checking your BVN. This usually takes a minute or two.", ...status }, 201);
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    private async getTransferDetails(_req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            this.sendSuccess(res, await identityService.transferDetails(String(res.locals.user._id)));
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    private async submitTransferDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const details = await identityService.submitTransferDetails(res.locals.user, {
+                bvn: req.body?.bvn, nin: req.body?.nin, dob: req.body?.dob, address: req.body?.address,
+            });
+            this.sendSuccess(res, { message: details.complete ? "Your details are saved" : "Saved. A few details are still missing.", ...details });
         } catch (error) {
             next(error);
         }

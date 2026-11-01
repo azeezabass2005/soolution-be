@@ -33,3 +33,16 @@ export const BVN_MAX_IMAGES = 10;
 export const BVN_MAX_IMAGE_CHARS = 7 * 1024 * 1024;
 
 export const isBvn = (value: unknown): value is string => typeof value === "string" && /^\d{11}$/.test(value);
+export const isNin = (value: unknown): value is string => typeof value === "string" && /^\d{11}$/.test(value);
+
+/**
+ * Error code the frontend uses to ask for the details YellowCard needs on
+ * every transfer (NIN, BVN, date of birth, address)
+ */
+export const TRANSFER_DETAILS_REQUIRED_CODE = "TRANSFER_DETAILS_REQUIRED";
+
+/** What can be missing before a YellowCard transfer */
+export type TransferDetail = "bvn" | "nin" | "dob" | "address" | "phone";
+
+/** Smile ID ID lookups (each is paid) a user can run per rolling 24 hours when completing their details */
+export const DETAILS_MAX_LOOKUPS = 5;

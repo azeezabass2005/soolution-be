@@ -4,6 +4,20 @@ import axios, { AxiosInstance } from "axios";
 import logger from "../utils/logger.utils";
 import errorResponseMessage, { ErrorResponseCode, ErrorSeverity } from "../common/messages/error-response-message";
 
+/** The KYC person on a payment (sender) or collection (recipient) */
+export interface KycPerson {
+    name: string;
+    country: string;
+    phone: string;
+    address?: string;
+    dob?: string;
+    email: string;
+    idNumber?: string;
+    idType?: string;
+    additionalIdType?: string;
+    additionalIdNumber?: string;
+}
+
 /** Env values pasted into a dashboard often keep their quotes or a stray space */
 const clean = (value?: string): string => (value || "").trim().replace(/^["']|["']$/g, "").trim();
 
@@ -39,14 +53,10 @@ class YellowCardService {
     /**
      * The person block YellowCard requires on payments ("sender") and
      * collections ("recipient"): dob as mm/dd/yyyy, and an ID.
-     * TODO(kyc): we don't store a DOB, address or ID number yet, so these
-     * fall back to placeholders, which the sandbox accepts. Production
-     * needs the user's real details.
+     * Callers pass identityService.yellowCardPerson(), built from the user's
+     * verified record; the placeholders below only fill gaps on the sandbox.
      */
-    private kycPerson(person: {
-        name: string; country: string; phone: string; address?: string; dob?: string;
-        email: string; idNumber?: string; idType?: string;
-    }) {
+    private kycPerson(person: KycPerson) {
         let dob = person.dob;
         if (dob && /^\d{4}-\d{2}-\d{2}$/.test(dob)) {
             const [y, m, d] = dob.split('-');
@@ -61,6 +71,10 @@ class YellowCardService {
             email: person.email,
             idNumber: person.idNumber || '0000',
             idType: person.idType || 'license',
+            // Nigeria: the NIN is the ID and the BVN the additional ID
+            ...(person.additionalIdType && person.additionalIdNumber
+                ? { additionalIdType: person.additionalIdType, additionalIdNumber: person.additionalIdNumber }
+                : {}),
         };
     }
 
@@ -393,16 +407,7 @@ class YellowCardService {
         sequenceId: string;
         amount?: number;
         localAmount?: number;
-        sender: {
-            name: string;
-            country: string;
-            phone: string;
-            address: string;
-            dob: string;
-            email: string;
-            idNumber?: string;
-            idType?: string;
-        };
+        sender: KycPerson;
         destination?: {
             accountName?: string;
             accountNumber?: string;
@@ -494,16 +499,7 @@ class YellowCardService {
         sequenceId: string;
         amount?: number;
         localAmount?: number;
-        sender: {
-            name: string;
-            country: string;
-            phone: string;
-            address: string;
-            dob: string;
-            email: string;
-            idNumber?: string;
-            idType?: string;
-        };
+        sender: KycPerson;
         destination: {
             accountName: string;
             accountNumber: string;

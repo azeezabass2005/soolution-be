@@ -72,6 +72,20 @@ interface EnvConfig {
     SMILE_ID_SID_SERVER: string;
     /** Key for hashing BVNs (one BVN per account); falls back to JWT_SECRET. Changing it breaks the duplicate check for existing accounts. */
     IDENTITY_HASH_SECRET: string;
+    /**
+     * 32-byte key (64 hex characters) that encrypts users' BVN and NIN, which
+     * YellowCard needs on every transfer. Required in production. Losing or
+     * changing it makes stored numbers unreadable (users would re-enter them).
+     */
+    IDENTITY_ENCRYPTION_KEY: string;
+    /** Check NINs with Smile ID (needs NIMC enterprise registration on the Smile ID account) */
+    SMILE_ID_VERIFY_NIN: boolean;
+    /**
+     * Refuse YellowCard transfers until the user's real KYC details are on file.
+     * Defaults to on for the production YellowCard API and off for its sandbox,
+     * where missing details fall back to placeholders.
+     */
+    YELLOWCARD_REQUIRE_KYC: boolean;
 
     /** YellowCard payment integration */
     YELLOWCARD_API_KEY: string;
@@ -171,6 +185,11 @@ const loadEnvConfig = (): EnvConfig => {
         SMILE_ID_CALLBACK_URL: process.env.SMILE_ID_CALLBACK_URL || '',
         SMILE_ID_SID_SERVER: process.env.SMILE_ID_SID_SERVER || '',
         IDENTITY_HASH_SECRET: process.env.IDENTITY_HASH_SECRET || process.env.JWT_SECRET || '',
+        IDENTITY_ENCRYPTION_KEY: process.env.IDENTITY_ENCRYPTION_KEY || '',
+        SMILE_ID_VERIFY_NIN: process.env.SMILE_ID_VERIFY_NIN === 'true',
+        YELLOWCARD_REQUIRE_KYC: process.env.YELLOWCARD_REQUIRE_KYC !== undefined
+            ? process.env.YELLOWCARD_REQUIRE_KYC === 'true'
+            : !/sandbox/i.test(process.env.YELLOWCARD_BASE_URL || 'sandbox'),
         YELLOWCARD_API_KEY: process.env.YELLOWCARD_API_KEY || process.env.YELLOW_CARD_PUBLIC_KEY || '',
         YELLOWCARD_SECRET_KEY: process.env.YELLOWCARD_SECRET_KEY || process.env.YELLOW_CARD_SECRET_KEY || '',
         YELLOWCARD_WEBHOOK_SECRET: process.env.YELLOWCARD_WEBHOOK_SECRET || '',

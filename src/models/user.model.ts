@@ -68,6 +68,20 @@ export const UserSchema = new Schema<IUser>(
                 status: { type: String, enum: IDENTITY_STATUSES, default: IDENTITY_STATUS.UNVERIFIED },
                 bvnHash: { type: String, select: false },
                 bvnLast4: { type: String },
+                /**
+                 * Details YellowCard needs on every transfer (Nigeria: NIN plus BVN).
+                 * The numbers are encrypted (utils/identity-crypto) and never
+                 * selected by default; the hashes stop one ID being used twice.
+                 */
+                bvnEnc: { type: String, select: false },
+                ninEnc: { type: String, select: false },
+                ninHash: { type: String, select: false },
+                ninLast4: { type: String },
+                /** From the BVN record (Smile ID), or entered when the record has none */
+                dob: { type: String },
+                idPhone: { type: String },
+                address: { type: String },
+                detailsUpdatedAt: { type: Date },
                 /** Name returned for the BVN */
                 verifiedName: { type: String },
                 verifiedAt: { type: Date },
@@ -233,6 +247,10 @@ export const UserSchema = new Schema<IUser>(
 UserSchema.index(
     { 'identity.bvnHash': 1 },
     { unique: true, partialFilterExpression: { 'identity.bvnHash': { $type: 'string' } } }
+);
+UserSchema.index(
+    { 'identity.ninHash': 1 },
+    { unique: true, partialFilterExpression: { 'identity.ninHash': { $type: 'string' } } }
 );
 
 // Virtual: PIN is currently locked due to too many failed attempts

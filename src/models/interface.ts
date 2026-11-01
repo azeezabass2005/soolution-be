@@ -459,6 +459,17 @@ export interface IUserIdentity {
     status: IdentityStatus;
     bvnHash?: string;
     bvnLast4?: string;
+    /** Encrypted BVN and NIN (select: false); see utils/identity-crypto */
+    bvnEnc?: string;
+    ninEnc?: string;
+    ninHash?: string;
+    ninLast4?: string;
+    /** YYYY-MM-DD */
+    dob?: string;
+    /** Phone on the BVN record */
+    idPhone?: string;
+    address?: string;
+    detailsUpdatedAt?: Date;
     verifiedName?: string;
     verifiedAt?: Date;
     method?: string;
@@ -471,10 +482,15 @@ export interface IVerification extends Document {
     status?: 'pending' | 'failed' | 'passed';
     reason?: string;
     /** What was checked; older records (before BVN checks) have none */
-    kind?: 'bvn';
+    kind?: 'bvn' | 'details';
     /** Keyed hash and last 4 digits of the BVN submitted (never the BVN itself) */
     idHash?: string;
     idLast4?: string;
+    /** Encrypted BVN and NIN, held only until the check is decided */
+    bvnEnc?: string;
+    ninEnc?: string;
+    ninHash?: string;
+    ninLast4?: string;
     /** Smile ID's job ID, result code and per-check outcomes, for support */
     smileJobId?: string;
     resultCode?: string;

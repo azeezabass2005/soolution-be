@@ -45,6 +45,8 @@ import { MANUAL_PAYOUT_CURRENCIES } from "../common/wallet.constants";
 import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
 import { pickYellowCardNetwork } from "../utils/momo-network.utils";
+import identityService from "./identity.service";
+import { CURRENCY_COUNTRY } from "../common/payment-link.constants";
 
 class TransactionService extends DBService<ITransaction> {
 
@@ -865,16 +867,8 @@ class TransactionService extends DBService<ITransaction> {
             fromAmount?: number;
             fromCurrency: string;
             toCurrency: string;
-            sender: {
-                name: string;
-                country: string;
-                phone: string;
-                address: string;
-                dob: string;
-                email: string;
-                idNumber?: string;
-                idType?: string;
-            };
+            /** Ignored for KYC: the sender is built from the user's verified record */
+            sender?: { country?: string };
             destination: {
                 accountName: string;
                 accountNumber: string;
@@ -892,7 +886,7 @@ class TransactionService extends DBService<ITransaction> {
         ipAddress?: string,
         userAgent?: string
     ) => {
-        const { amount, fromCurrency, toCurrency, sender, destination, idempotencyKey, pin } = params;
+        const { amount, fromCurrency, toCurrency, destination, idempotencyKey, pin } = params;
         const walletCurrency = walletSendService.resolveWalletCurrency(params.walletCurrency, toCurrency);
 
         if (!amount || amount <= 0) {
@@ -904,6 +898,10 @@ class TransactionService extends DBService<ITransaction> {
             throw errorResponseMessage.payloadIncorrect("Transaction PIN is required");
         }
         await this.pinService.verifyPin(userId, pin);
+
+        // YellowCard's KYC for the sender, from our records. Refuses before any
+        // money moves when the details aren't on file (production only).
+        const kycPerson = await identityService.yellowCardPerson(userId);
 
         // ========== SERVER-SIDE RATE + FEE ==========
         // Compute the NGN debit from YellowCard's live rates and apply the
@@ -1124,7 +1122,7 @@ class TransactionService extends DBService<ITransaction> {
                     channelId: channel.id,
                     sequenceId,
                     localAmount: amount,
-                    sender,
+                    sender: kycPerson,
                     destination: {
                         accountName: destination.accountName,
                         accountNumber: destination.accountNumber,
@@ -1451,16 +1449,11 @@ class TransactionService extends DBService<ITransaction> {
             fromAmount?: number;     // NGN equivalent (what user receives)
             fromCurrency: string;    // Foreign currency (KES, GHS, XAF)
             toCurrency: string;      // NGN (user's wallet currency)
-            sender: {
-                name: string;
-                country: string;
-                phone: string;
-                address: string;
-                dob: string;
-                email: string;
-                idNumber?: string;
-                idType?: string;
-            };
+            /**
+             * Only `country` is used: where the payer pays from (it picks the
+             * YellowCard channel). The KYC recipient is our user, from our records.
+             */
+            sender?: { country?: string };
             destination?: {
                 accountName?: string;
                 accountNumber?: string;
@@ -1479,11 +1472,15 @@ class TransactionService extends DBService<ITransaction> {
         },
         userId: string,
     ) => {
-        const { amount, fromCurrency, toCurrency, sender, destination, idempotencyKey, paymentLinkId } = params;
+        const { amount, fromCurrency, toCurrency, destination, idempotencyKey, paymentLinkId } = params;
 
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
         }
+
+        // YellowCard's KYC for the recipient (our user), from our records.
+        // Refuses before anything is created when details are missing (production only).
+        const kycPerson = await identityService.yellowCardPerson(userId);
 
         // Server-side rate + fee for the collection. The user receives
         // `gross − fee` NGN at the markup-adjusted (receive) rate.
@@ -1527,7 +1524,7 @@ class TransactionService extends DBService<ITransaction> {
         }
 
         // Resolve channels/networks for the SENDER's country (where collection happens)
-        const senderCountry = sender.country;
+        const senderCountry = params.sender?.country || CURRENCY_COUNTRY[fromCurrency];
         const targetType = destination?.accountType || 'momo';
 
         let channelsData: any;
@@ -1645,7 +1642,7 @@ class TransactionService extends DBService<ITransaction> {
                     channelId: channel.id,
                     sequenceId,
                     localAmount: amount,
-                    sender,
+                    sender: kycPerson,
                     destination: destination ? {
                         accountName: destination.accountName,
                         accountNumber: destination.accountNumber,
