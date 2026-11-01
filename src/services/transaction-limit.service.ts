@@ -205,7 +205,7 @@ class TransactionLimitService {
         if ((await this.getTier(userId)) >= USER_TIER.INDIVIDUAL) return;
         throw errorResponseMessage.createError(
             403,
-            "Verify your BVN to start sending, receiving and exchanging money. It takes about 2 minutes.",
+            "Verify your identity with your BVN, NIN and a quick selfie to start sending, receiving and exchanging money. It takes about 2 minutes.",
             ErrorSeverity.LOW,
             { code: IDENTITY_REQUIRED_CODE }
         );

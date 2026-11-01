@@ -77,7 +77,7 @@ const userTier = (user: Pick<IUser, "tier">): UserTier => isUserTier(user.tier) 
 /** Higher tiers build on a verified BVN (Tier 1) */
 const assertBvnVerified = (tier: UserTier) => {
     if (tier >= USER_TIER.INDIVIDUAL) return;
-    throw errorResponseMessage.createError(403, "Verify your BVN first. It takes about 2 minutes and moves you to Tier 1.", ErrorSeverity.LOW, { code: IDENTITY_REQUIRED_CODE });
+    throw errorResponseMessage.createError(403, "Verify your identity first with your BVN, NIN and a quick selfie. It takes about 2 minutes and moves you to Tier 1.", ErrorSeverity.LOW, { code: IDENTITY_REQUIRED_CODE });
 };
 
 const formatUsd = (value: number) => `$${value.toLocaleString("en-US")}`;

@@ -504,7 +504,7 @@ class IdentityService {
         const current = await User.findById(userId).select("+identity.bvnHash +identity.bvnEnc +identity.ninEnc").lean();
         if (!current) throw errorResponseMessage.resourceNotFound("User");
         if (current.identity?.status !== IDENTITY_STATUS.VERIFIED) {
-            throw errorResponseMessage.createError(403, "Verify your BVN first. It takes about 2 minutes.", ErrorSeverity.LOW, { code: IDENTITY_REQUIRED_CODE });
+            throw errorResponseMessage.createError(403, "Verify your identity first. It takes about 2 minutes.", ErrorSeverity.LOW, { code: IDENTITY_REQUIRED_CODE });
         }
         const identity = current.identity;
         const set: Record<string, unknown> = {};
@@ -676,7 +676,7 @@ class IdentityService {
         try {
             await this.notifications.emailService.sendNotificationEmail(user.email, outcome.passed
                 ? {
-                    title: "✅ Your BVN is verified",
+                    title: "Your identity is verified",
                     eyebrow: "Verification",
                     name: user.firstName,
                     message: `Your identity is verified and your account is now on <strong>Tier 1 (${TIER_NAME[USER_TIER.INDIVIDUAL]})</strong>. You can start sending, receiving and exchanging money.`,
@@ -684,10 +684,10 @@ class IdentityService {
                     buttonText: "Go to Dashboard",
                 }
                 : {
-                    title: "We couldn't verify your BVN",
+                    title: "We couldn't verify your identity",
                     eyebrow: "Verification",
                     name: user.firstName,
-                    message: `Your BVN verification wasn't successful. ${escapeHtml(outcome.reason)}`,
+                    message: `Your identity verification wasn't successful. ${escapeHtml(outcome.reason)}`,
                     actionUrl: `${config.FRONTEND_URL}/dashboard/user?verify=bvn`,
                     buttonText: "Try again",
                 });

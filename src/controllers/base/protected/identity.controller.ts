@@ -49,7 +49,7 @@ class IdentityController extends BaseController {
     private async submitBvn(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const status = await identityService.submitBvn(res.locals.user, req.body?.bvn, req.body?.images, req.body?.nin);
-            this.sendSuccess(res, { message: "We're checking your BVN. This usually takes a minute or two.", ...status }, 201);
+            this.sendSuccess(res, { message: "We're checking your details. This usually takes a minute or two.", ...status }, 201);
         } catch (error) {
             next(error);
         }
