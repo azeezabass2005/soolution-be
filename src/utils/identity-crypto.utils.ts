@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
 import config from "../config/env.config";
+import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import logger from "./logger.utils";
 
 /**
@@ -10,13 +11,30 @@ import logger from "./logger.utils";
 const VERSION = "v1";
 let warned = false;
 
+/** Quotes and spaces pasted into a hosting dashboard aren't part of the key */
+const rawKey = () => (config.IDENTITY_ENCRYPTION_KEY || "").trim().replace(/^["']|["']$/g, "");
+
+/** Why the configured key can't be used, if it can't */
+const keyProblem = (): string | undefined => {
+    const raw = rawKey();
+    if (/^[0-9a-f]{64}$/i.test(raw)) return undefined;
+    if (raw) return "IDENTITY_ENCRYPTION_KEY must be 64 hex characters (generate one with `openssl rand -hex 32`)";
+    if (config.NODE_ENV === "production") return "IDENTITY_ENCRYPTION_KEY is not set; identity numbers can't be stored";
+    return undefined;
+};
+
+// Say so at startup rather than on the first user's verification
+const startupProblem = keyProblem();
+if (startupProblem) logger.error(`${startupProblem}. Identity verification and cross-border transfers will fail until it's set.`);
+
 const key = (): Buffer => {
-    const raw = (config.IDENTITY_ENCRYPTION_KEY || "").trim();
-    if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, "hex");
-    if (raw) throw new Error("IDENTITY_ENCRYPTION_KEY must be 64 hex characters (generate one with `openssl rand -hex 32`)");
-    if (config.NODE_ENV === "production") {
-        throw new Error("IDENTITY_ENCRYPTION_KEY is not set; identity numbers can't be stored");
+    const problem = keyProblem();
+    if (problem) {
+        logger.error(problem);
+        throw errorResponseMessage.createError(500, "Identity verification is temporarily unavailable on our side. Please try again later.", ErrorSeverity.HIGH, { code: "IDENTITY_UNAVAILABLE" });
     }
+    const raw = rawKey();
+    if (raw) return Buffer.from(raw, "hex");
     // Development and tests only: a key derived from the hash secret
     if (!warned) {
         warned = true;
