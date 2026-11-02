@@ -80,6 +80,8 @@ interface EnvConfig {
     IDENTITY_ENCRYPTION_KEY: string;
     /** Check NINs with Smile ID (needs NIMC enterprise registration on the Smile ID account) */
     SMILE_ID_VERIFY_NIN: boolean;
+    /** Sandbox only: don't fail on face match (Smile ID's test BVN carries a stand-in photo) */
+    SMILE_ID_SANDBOX_SKIP_FACE_MATCH: boolean;
     /**
      * Refuse YellowCard transfers until the user's real KYC details are on file.
      * Defaults to on for the production YellowCard API and off for its sandbox,
@@ -187,6 +189,7 @@ const loadEnvConfig = (): EnvConfig => {
         IDENTITY_HASH_SECRET: process.env.IDENTITY_HASH_SECRET || process.env.JWT_SECRET || '',
         IDENTITY_ENCRYPTION_KEY: process.env.IDENTITY_ENCRYPTION_KEY || '',
         SMILE_ID_VERIFY_NIN: process.env.SMILE_ID_VERIFY_NIN === 'true',
+        SMILE_ID_SANDBOX_SKIP_FACE_MATCH: process.env.SMILE_ID_SANDBOX_SKIP_FACE_MATCH === 'true' && (process.env.SMILE_ID_SID_SERVER || '').replace(/["'\s]/g, '') === '0',
         YELLOWCARD_REQUIRE_KYC: process.env.YELLOWCARD_REQUIRE_KYC !== undefined
             ? process.env.YELLOWCARD_REQUIRE_KYC === 'true'
             : !/sandbox/i.test(process.env.YELLOWCARD_BASE_URL || 'sandbox'),

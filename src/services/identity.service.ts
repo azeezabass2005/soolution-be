@@ -252,7 +252,7 @@ class IdentityService {
                 { _id: verification._id },
                 { $set: { status: "failed", reason: "Submission to Smile ID failed", excludedFromAttempts: true, completedAt: new Date() }, $unset: ENCRYPTED_IDS }
             );
-            throw errorResponseMessage.createError(500, "We couldn't reach our verification partner. Please try again in a few minutes.", ErrorSeverity.MEDIUM);
+            throw errorResponseMessage.createError(500, "We couldn't start your verification. Please try again in a few minutes.", ErrorSeverity.MEDIUM);
         }
 
         await User.updateOne(
@@ -319,11 +319,18 @@ class IdentityService {
         if (!PASSING.liveness.includes(liveness)) {
             return { passed: false, reason: "We couldn't confirm your selfie was taken live. Try again in good light, facing the camera." };
         }
-        if (actions.Register_Selfie === "Rejected") {
+        // Smile ID's sandbox compares against a stand-in photo for its test BVN, so no real face matches it
+        const skipFaceMatch = config.SMILE_ID_SANDBOX_SKIP_FACE_MATCH;
+        // 0811 "No Face Match": the selfie was fine, it just isn't the face on the BVN record
+        const faceMismatch = result?.ResultCode === "0811" || actions.Selfie_To_ID_Authority_Compare === "Failed";
+        if (faceMismatch && !skipFaceMatch) {
+            return { passed: false, reason: "Your selfie didn't match the photo on your BVN record. Check that the BVN is your own, then try again facing the camera." };
+        }
+        if (actions.Register_Selfie === "Rejected" && !(faceMismatch && skipFaceMatch)) {
             return { passed: false, reason: "Your selfie couldn't be used. Try again in good light, without glasses or a face covering." };
         }
-        if (!PASSING.compare.includes(actions.Selfie_To_ID_Authority_Compare)) {
-            return { passed: false, reason: "Your selfie didn't match the photo on your BVN record. Try again in good light, without glasses or a face covering." };
+        if (!PASSING.compare.includes(actions.Selfie_To_ID_Authority_Compare) && !skipFaceMatch) {
+            return { passed: false, reason: "Your selfie didn't match the photo on your BVN record. Check that the BVN is your own, then try again facing the camera." };
         }
 
         const info = result?.PersonalInfo ?? result?.personal_info ?? {};
@@ -605,7 +612,7 @@ class IdentityService {
             return result;
         } catch (error) {
             await Verification.updateOne({ _id: check._id }, { $set: { status: "failed", reason: `${idType} lookup: Smile ID unavailable`, completedAt: new Date() } });
-            throw errorResponseMessage.createError(500, "We couldn't reach our verification partner. Please try again in a few minutes.", ErrorSeverity.MEDIUM);
+            throw errorResponseMessage.createError(500, "We couldn't start your verification. Please try again in a few minutes.", ErrorSeverity.MEDIUM);
         }
     }
 
