@@ -508,7 +508,7 @@ class IdentityService {
      * address). The BVN must be the one they verified with; it's looked up
      * again (no selfie) to fill in date of birth, phone and address.
      */
-    async submitTransferDetails(user: IUser, body: { bvn?: unknown; nin?: unknown; dob?: unknown; address?: unknown }): Promise<TransferDetailsView> {
+    async submitTransferDetails(user: IUser, body: { bvn?: unknown; nin?: unknown; dob?: unknown; address?: unknown; phone?: unknown }): Promise<TransferDetailsView> {
         const userId = String(user._id);
         const current = await User.findById(userId).select("+identity.bvnHash +identity.bvnEnc +identity.ninEnc").lean();
         if (!current) throw errorResponseMessage.resourceNotFound("User");
@@ -575,6 +575,12 @@ class IdentityService {
             const typed = typeof body.address === "string" ? body.address.trim().replace(/\s+/g, " ") : "";
             if (typed.length < 10) typedProblem ??= badRequest("Enter your home address, including the street, town and state", "INVALID_ADDRESS");
             else set["identity.address"] = typed.slice(0, 300);
+        }
+        // Phone: YellowCard takes only a Nigerian number, so a foreign profile phone needs one here
+        if (!toNigerianIntl((set["identity.idPhone"] as string) || identity.idPhone) && !toNigerianIntl(current.phoneNumber)) {
+            const typed = toNigerianIntl(typeof body.phone === "string" ? body.phone : "");
+            if (!typed) typedProblem ??= badRequest("Enter your Nigerian phone number", "INVALID_PHONE");
+            else set["identity.idPhone"] = typed;
         }
 
         // Save what we have (e.g. a paid lookup's result) even if something typed needs fixing

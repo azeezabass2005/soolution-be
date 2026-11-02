@@ -48,6 +48,32 @@ import { pickYellowCardNetwork } from "../utils/momo-network.utils";
 import identityService from "./identity.service";
 import { CURRENCY_COUNTRY } from "../common/payment-link.constants";
 
+
+/**
+ * A YellowCard rejection in words a customer can act on. The provider's own
+ * message stays in the logs and in the error details for support.
+ */
+const yellowCardFailureMessage = (providerMessage: string, flow: "send" | "receive"): string => {
+    const m = (providerMessage || "").toLowerCase();
+    if (/channel|not supported|unsupported/.test(m)) {
+        return "This payment method isn't available for that country right now. Please try a different one.";
+    }
+    if (/phone/.test(m) && /(sender|recipient)/.test(m)) {
+        return "We couldn't use the phone number on your account for this transfer. Update your details and try again.";
+    }
+    if (/(minimum|maximum|limit|too (low|high|small|large)|amount)/.test(m)) {
+        return "This amount is outside what's allowed for this route. Try a different amount.";
+    }
+    if (/(account|destination|source|network|bank|momo|wallet)/.test(m)) {
+        return flow === "send"
+            ? "The recipient's account details couldn't be used. Check the account number and provider, then try again."
+            : "The payer's account details couldn't be used. Check the number and provider, then try again.";
+    }
+    return flow === "send"
+        ? "We couldn't send this payment right now. Please try again in a few minutes."
+        : "We couldn't start this payment request right now. Please try again in a few minutes.";
+};
+
 class TransactionService extends DBService<ITransaction> {
 
     transactionDetailsService: TransactionDetailsService;
@@ -1094,6 +1120,8 @@ class TransactionService extends DBService<ITransaction> {
                 accountNumber: destination.accountNumber,
                 institutionType: destination.accountType,
                 country: destination.country,
+                // Shown as the bank on receipts and transaction details
+                ...(destination.accountType === "bank" ? { bankName: network.name } : { momoNetwork: network.name }),
             });
         } catch (dbError: any) {
             logger.error("Failed to create YellowCard transaction detail", {
@@ -1218,8 +1246,9 @@ class TransactionService extends DBService<ITransaction> {
         const ycMessage = ycError?.message || ycError?.code || lastError?.message || "YellowCard payment failed";
         throw errorResponseMessage.createError(
             400,
-            `YellowCard: ${ycMessage}`,
-            ErrorSeverity.HIGH
+            `${yellowCardFailureMessage(ycMessage, "send")} Your wallet has not been charged.`,
+            ErrorSeverity.HIGH,
+            { code: "PROVIDER_REJECTED", providerMessage: ycMessage }
         );
     };
 
@@ -1704,7 +1733,7 @@ class TransactionService extends DBService<ITransaction> {
 
         const ycError = lastError?.ycError || lastError?.response?.data || lastError?.data;
         const ycMessage = ycError?.message || ycError?.code || lastError?.message || "Collection request failed";
-        throw errorResponseMessage.createError(400, `YellowCard: ${ycMessage}`, ErrorSeverity.HIGH);
+        throw errorResponseMessage.createError(400, yellowCardFailureMessage(ycMessage, "receive"), ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED", providerMessage: ycMessage });
     };
 
     /**

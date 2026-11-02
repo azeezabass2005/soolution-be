@@ -53,7 +53,14 @@ export const encryptIdentity = (value: string): string => {
 export const decryptIdentity = (stored: string): string => {
     const [version, iv, tag, data] = stored.split(":");
     if (version !== VERSION || !iv || !tag || !data) throw new Error("Unreadable identity value");
-    const decipher = createDecipheriv("aes-256-gcm", key(), Buffer.from(iv, "base64"));
-    decipher.setAuthTag(Buffer.from(tag, "base64"));
-    return Buffer.concat([decipher.update(Buffer.from(data, "base64")), decipher.final()]).toString("utf8");
+    const secret = key();
+    try {
+        const decipher = createDecipheriv("aes-256-gcm", secret, Buffer.from(iv, "base64"));
+        decipher.setAuthTag(Buffer.from(tag, "base64"));
+        return Buffer.concat([decipher.update(Buffer.from(data, "base64")), decipher.final()]).toString("utf8");
+    } catch {
+        // Encrypted with a different IDENTITY_ENCRYPTION_KEY (e.g. another environment sharing this database)
+        logger.error("Couldn't decrypt an identity number: IDENTITY_ENCRYPTION_KEY differs from the key it was encrypted with");
+        throw errorResponseMessage.createError(500, "Identity verification is temporarily unavailable on our side. Please try again later.", ErrorSeverity.HIGH, { code: "IDENTITY_UNAVAILABLE" });
+    }
 };

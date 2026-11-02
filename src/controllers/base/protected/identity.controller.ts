@@ -66,7 +66,7 @@ class IdentityController extends BaseController {
     private async submitTransferDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const details = await identityService.submitTransferDetails(res.locals.user, {
-                bvn: req.body?.bvn, nin: req.body?.nin, dob: req.body?.dob, address: req.body?.address,
+                bvn: req.body?.bvn, nin: req.body?.nin, dob: req.body?.dob, address: req.body?.address, phone: req.body?.phone,
             });
             this.sendSuccess(res, { message: details.complete ? "Your details are saved" : "Saved. A few details are still missing.", ...details });
         } catch (error) {
