@@ -74,14 +74,16 @@ export interface YellowCardPerson {
 }
 
 /** Phone numbers from Smile ID come as 080…, 234… or +234… */
+/**
+ * "+2348012345678", or undefined when it isn't a Nigerian mobile number.
+ * YellowCard rejects any other phone for a Nigerian sender or recipient
+ * ("invalid phone in recipient"), even a valid foreign one.
+ */
 export const toNigerianIntl = (phone?: string): string | undefined => {
-    const digits = (phone || "").replace(/[^\d+]/g, "");
-    if (!digits) return undefined;
-    if (digits.startsWith("+")) return digits.length >= 8 ? digits : undefined;
-    if (digits.startsWith("234") && digits.length >= 13) return `+${digits}`;
-    if (digits.startsWith("0") && digits.length === 11) return `+234${digits.slice(1)}`;
-    if (digits.length === 10) return `+234${digits}`;
-    return undefined;
+    let digits = (phone || "").replace(/\D/g, "");
+    if (digits.startsWith("234")) digits = digits.slice(3);
+    if (digits.startsWith("0")) digits = digits.slice(1);
+    return /^[789]\d{9}$/.test(digits) ? `+234${digits}` : undefined;
 };
 
 const yearsSince = (isoDate: string) => {
