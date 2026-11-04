@@ -1,6 +1,8 @@
 import BaseController from "../base-controller";
 import TransactionService from "../../../services/transaction.service";
 import yellowCardService from "../../../services/yellowcard.service";
+import { CURRENCY_COUNTRY } from "../../../common/payment-link.constants";
+import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 import platformSettingsService from "../../../services/platform-settings.service";
 import { Request, Response, NextFunction } from "express";
 import { validateCreateYellowCardTransaction } from "../../../validators/z-yellowcard-transaction";
@@ -26,8 +28,8 @@ class YellowCardTransactionController extends BaseController {
             this.createTransaction.bind(this)
         );
 
-        // Get YellowCard channels for a country
-        this.router.get("/channels", this.getChannels.bind(this));
+        // What YellowCard supports for a currency: send/receive, limits and channel types (bank, momo)
+        this.router.get("/country-config", this.getCountryConfig.bind(this));
 
         // Get YellowCard networks for a country
         this.router.get("/networks", this.getNetworks.bind(this));
@@ -84,11 +86,15 @@ class YellowCardTransactionController extends BaseController {
         }
     }
 
-    private async getChannels(req: Request, res: Response, next: NextFunction) {
+    private async getCountryConfig(req: Request, res: Response, next: NextFunction) {
         try {
-            const country = req.query.country as string | undefined;
-            const channels = await yellowCardService.getChannels(country);
-            return this.sendSuccess(res, channels);
+            const currency = String(req.query.currency || "").toUpperCase();
+            const country = String(req.query.country || CURRENCY_COUNTRY[currency] || "").toUpperCase();
+            if (!/^[A-Z]{3}$/.test(currency) || !/^[A-Z]{2}$/.test(country)) {
+                throw errorResponseMessage.createError(400, "Choose a supported currency", ErrorSeverity.LOW);
+            }
+            const countryConfig = await yellowCardService.getCountryConfig(country, currency);
+            return this.sendSuccess(res, countryConfig);
         } catch (error: any) {
             return next(error);
         }

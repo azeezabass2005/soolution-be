@@ -5,6 +5,24 @@ import logger from "../utils/logger.utils";
 import errorResponseMessage, { ErrorResponseCode, ErrorSeverity } from "../common/messages/error-response-message";
 
 /** The KYC person on a payment (sender) or collection (recipient) */
+export type YellowCardChannelType = "bank" | "momo";
+
+export interface YellowCardCountryConfig {
+    country: string;
+    currency: string;
+    send: boolean;
+    receive: boolean;
+    sendMin: number;
+    /** 0 means no maximum */
+    sendMax: number;
+    receiveMin: number;
+    /** 0 means no maximum */
+    receiveMax: number;
+    channelTypes: YellowCardChannelType[];
+}
+
+const COUNTRY_CONFIG_TTL_MS = 5 * 60 * 1000;
+
 export interface KycPerson {
     name: string;
     country: string;
@@ -280,6 +298,41 @@ class YellowCardService {
         }
     }
 
+    /** Country configs by "country:currency", kept briefly so every form open doesn't call YellowCard */
+    private countryConfigCache = new Map<string, { at: number; value: YellowCardCountryConfig }>();
+
+    /**
+     * What YellowCard supports for a country and currency: whether send and
+     * receive are active, their limits (local currency; a max of 0 means none)
+     * and the channel types ("bank", "momo") to offer.
+     */
+    public async getCountryConfig(country: string, currency: string): Promise<YellowCardCountryConfig> {
+        const key = `${country}:${currency}`.toUpperCase();
+        const cached = this.countryConfigCache.get(key);
+        if (cached && Date.now() - cached.at < COUNTRY_CONFIG_TTL_MS) return cached.value;
+        try {
+            const data = await this.get("/country/config", { country, currency });
+            const raw = data?.data ?? data ?? {};
+            const value: YellowCardCountryConfig = {
+                country: raw.country || country,
+                currency: raw.currency || currency,
+                send: raw.send === "active",
+                receive: raw.receive === "active",
+                sendMin: Number(raw.sendMin) || 0,
+                sendMax: Number(raw.sendMax) || 0,
+                receiveMin: Number(raw.receiveMin) || 0,
+                receiveMax: Number(raw.receiveMax) || 0,
+                channelTypes: (Array.isArray(raw.channelTypes) ? raw.channelTypes : [])
+                    .filter((t: unknown): t is YellowCardChannelType => t === "bank" || t === "momo"),
+            };
+            this.countryConfigCache.set(key, { at: Date.now(), value });
+            return value;
+        } catch (error: any) {
+            logger.error("YellowCard: getCountryConfig failed", { country, currency, error: error?.ycError || error?.response?.data || error?.message });
+            throw error;
+        }
+    }
+
     /**
      * Get supported financial networks (Banks, Mobile Money providers).
      */
@@ -403,7 +456,10 @@ class YellowCardService {
      * This is step 1 of the automatic payment flow.
      */
     public async submitCollectionRequest(params: {
-        channelId: string;
+        /** YellowCard picks the best active channel of this type for the country and currency */
+        channelType: YellowCardChannelType;
+        country: string;
+        currency: string;
         sequenceId: string;
         amount?: number;
         localAmount?: number;
@@ -423,7 +479,9 @@ class YellowCardService {
             const recipient = this.kycPerson(params.sender);
 
             const body: any = {
-                channelId: params.channelId,
+                channelType: params.channelType,
+                country: params.country,
+                currency: params.currency,
                 sequenceId: params.sequenceId,
                 customerType: "retail",
                 customerUID: params.sender.email,
@@ -495,7 +553,10 @@ class YellowCardService {
      * This is step 2 of the automatic payment flow.
      */
     public async submitPaymentRequest(params: {
-        channelId: string;
+        /** YellowCard picks the best active channel of this type for the country and currency */
+        channelType: YellowCardChannelType;
+        country: string;
+        currency: string;
         sequenceId: string;
         amount?: number;
         localAmount?: number;
@@ -512,7 +573,9 @@ class YellowCardService {
     }) {
         try {
             const body: any = {
-                channelId: params.channelId,
+                channelType: params.channelType,
+                country: params.country,
+                currency: params.currency,
                 sequenceId: params.sequenceId,
                 sender: this.kycPerson(params.sender),
                 destination: params.destination,

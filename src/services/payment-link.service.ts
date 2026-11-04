@@ -23,6 +23,7 @@ import { PayPaymentLinkInput, ZCreatePaymentLink, ZPayPaymentLink, ZUpdatePaymen
 import TransactionService from "./transaction.service";
 import transactionLimitService from "./transaction-limit.service";
 import identityService from "./identity.service";
+import yellowCardService from "./yellowcard.service";
 import { TRANSFER_DETAILS_REQUIRED_CODE } from "../common/identity.constants";
 import logger from "../utils/logger.utils";
 
@@ -209,18 +210,40 @@ class PaymentLinkService {
     async getPublic(slug: string) {
         const { link, owner } = await this.findPayable(slug);
         const used = await this.isUsedUp(link);
+        const methods = await this.payMethods(link.currency);
+        // No way to pay in this currency right now (e.g. YellowCard has collections off)
+        const payable = this.canTakePayments(link, owner) && methods.length > 0;
         return {
             slug: link.slug,
             payee: ownerName(owner),
             currency: link.currency,
             amount: link.amount ?? null,
             title: link.title || link.description || null,
-            methods: PAYMENT_LINK_MOMO_ONLY.includes(link.currency) ? ["momo"] : ["momo", "bank"],
+            methods,
             usage: link.usage || PAYMENT_LINK_USAGE.REUSABLE,
-            available: !used && this.canTakePayments(link, owner),
+            available: !used && payable,
             /** Why it can't be paid, so the page can say so */
-            unavailableReason: used ? "used" : !link.active ? "off" : this.canTakePayments(link, owner) ? null : "unavailable",
+            unavailableReason: used ? "used" : !link.active ? "off" : payable ? null : "unavailable",
         };
+    }
+
+    /**
+     * How a payer can pay in this currency. YellowCard currencies follow its
+     * country config (the channel types it can collect through right now);
+     * GHS goes through OGateway, mobile money only. Falls back to our own list
+     * if YellowCard can't be reached, so the page still loads.
+     */
+    private async payMethods(currency: string): Promise<("momo" | "bank")[]> {
+        const fallback: ("momo" | "bank")[] = PAYMENT_LINK_MOMO_ONLY.includes(currency) ? ["momo"] : ["momo", "bank"];
+        if (currency === "GHS" || !CURRENCY_COUNTRY[currency]) return fallback;
+        try {
+            const config = await yellowCardService.getCountryConfig(CURRENCY_COUNTRY[currency], currency);
+            if (!config.receive) return [];
+            // Mobile money first, as payers mostly use it
+            return (["momo", "bank"] as const).filter((type) => config.channelTypes.includes(type));
+        } catch {
+            return fallback;
+        }
     }
 
     /** The payer submits their details; starts the collection under the owner's account */
