@@ -150,7 +150,7 @@ class WebhookController extends BaseController {
         const rawBody = (req as any).rawBody || JSON.stringify(req.body);
         const signature = (req.headers["x-yc-signature"] as string) || (req.headers["x-yellowcard-signature"] as string) || undefined;
         const event: string | undefined = req.body?.event;
-        const externalId = req.body?.data?.sequenceId || req.body?.data?.id;
+        const externalId = req.body?.sequenceId || req.body?.data?.sequenceId || req.body?.id || req.body?.data?.id;
 
         const signatureValid = !!signature && yellowCardService.verifyWebhookSignature(rawBody, signature);
 

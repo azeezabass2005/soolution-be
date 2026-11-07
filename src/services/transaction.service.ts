@@ -1842,8 +1842,11 @@ class TransactionService extends DBService<ITransaction> {
      * Called by the webhook controller after signature verification.
      */
     public handleYellowCardWebhook = async (webhookData: any) => {
-        const { event, data } = webhookData || {};
-        const sequenceId = data?.sequenceId;
+        // YellowCard sends the fields at the top level ({ event, sequenceId,
+        // status, ... }); older payloads nested them under `data`.
+        const event = webhookData?.event;
+        const data = webhookData?.data || webhookData || {};
+        const sequenceId = data.sequenceId;
 
         if (!sequenceId) {
             logger.warn("YellowCard webhook missing sequenceId", { event });
