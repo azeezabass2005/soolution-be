@@ -79,7 +79,7 @@ class YellowCardTransactionController extends BaseController {
 
             return this.sendSuccess(res, {
                 transaction,
-                message: "YellowCard automatic payment initiated successfully.",
+                message: "Payment initiated successfully.",
             }, 201);
         } catch (error: any) {
             return next(error);

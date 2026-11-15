@@ -10,6 +10,7 @@ import logger from './utils/logger.utils';
 import routes from './routes';
 import DatabaseService from "./config/db.config";
 import ResponseErrorHandler from "./middlewares/error.middleware";
+import providerRedaction from "./middlewares/provider-redaction.middleware";
 import NotificationService from './utils/notification.utils';
 import { bootstrapSystemAccounts } from './services/account.bootstrap';
 import { migrateIdentity, migrateUserTiers, releaseLegacyKycHolds } from './services/tier.bootstrap';
@@ -79,6 +80,9 @@ class App {
                 });
             }
         });
+        // Customers never see our providers' names or raw records (admins do)
+        this.app.use(providerRedaction);
+
         this.app.use('/api', limiter);
 
         // Body parsing — capture raw body for webhook signature verification

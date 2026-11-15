@@ -240,7 +240,7 @@ class OGatewayService {
         const rateNum = typeof data?.rate === "string" ? parseFloat(data.rate) : Number(data?.rate);
         if (!isFinite(rateNum) || rateNum <= 0) {
             logger.error("OGateway: getRate returned non-numeric rate", { source, destination, data });
-            throw new Error(`OGateway returned an invalid rate for ${source}→${destination}`);
+            throw new Error(`Invalid rate for ${source}→${destination}`);
         }
         this.ratesCache.set(key, { rate: rateNum, fetchedAt: Date.now() });
         logger.info("OGateway: getRate success", { source, destination, rate: rateNum });

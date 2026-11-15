@@ -252,7 +252,7 @@ class IdentityService {
             // Our partner didn't take the job: not the user's fault, so it doesn't use an attempt
             await Verification.updateOne(
                 { _id: verification._id },
-                { $set: { status: "failed", reason: "Submission to Smile ID failed", excludedFromAttempts: true, completedAt: new Date() }, $unset: ENCRYPTED_IDS }
+                { $set: { status: "failed", reason: "Submission to our verification partner failed", excludedFromAttempts: true, completedAt: new Date() }, $unset: ENCRYPTED_IDS }
             );
             throw errorResponseMessage.createError(500, "We couldn't start your verification. Please try again in a few minutes.", ErrorSeverity.MEDIUM);
         }
@@ -296,7 +296,7 @@ class IdentityService {
         if (age >= BVN_PENDING_TIMEOUT_MS) {
             const expired = await Verification.updateOne(
                 { _id: verification._id, status: "pending" },
-                { $set: { status: "failed", reason: "No result from Smile ID in time", excludedFromAttempts: true, completedAt: new Date() }, $unset: ENCRYPTED_IDS }
+                { $set: { status: "failed", reason: "No verification result in time", excludedFromAttempts: true, completedAt: new Date() }, $unset: ENCRYPTED_IDS }
             );
             if (expired.modifiedCount) {
                 await User.updateOne(
@@ -619,7 +619,7 @@ class IdentityService {
             });
             return result;
         } catch (error) {
-            await Verification.updateOne({ _id: check._id }, { $set: { status: "failed", reason: `${idType} lookup: Smile ID unavailable`, completedAt: new Date() } });
+            await Verification.updateOne({ _id: check._id }, { $set: { status: "failed", reason: `${idType} lookup unavailable`, completedAt: new Date() } });
             throw errorResponseMessage.createError(500, "We couldn't start your verification. Please try again in a few minutes.", ErrorSeverity.MEDIUM);
         }
     }

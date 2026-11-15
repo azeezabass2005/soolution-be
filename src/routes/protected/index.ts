@@ -17,6 +17,9 @@ import adminReconciliationController from "../../controllers/base/protected/admi
 import adminWebhooksController from "../../controllers/base/protected/admin/webhooks.controller";
 import adminSuspenseController from "../../controllers/base/protected/admin/suspense.controller";
 import adminPlatformSettingsController from "../../controllers/base/protected/admin/platform-settings.controller";
+import adminFincraController from "../../controllers/base/protected/admin/fincra.controller";
+import adminSpotflowController from "../../controllers/base/protected/admin/spotflow.controller";
+import adminDayaController from "../../controllers/base/protected/admin/daya.controller";
 import kycController from "../../controllers/base/protected/kyc.controller";
 import beneficiaryController from "../../controllers/base/protected/beneficiary.controller";
 import paymentLinkController from "../../controllers/base/protected/payment-link.controller";
@@ -56,6 +59,9 @@ protectedRouter.use(`${path}/admin/reconciliation`, adminReconciliationControlle
 protectedRouter.use(`${path}/admin/webhooks`, adminWebhooksController);
 protectedRouter.use(`${path}/admin/suspense`, adminSuspenseController);
 protectedRouter.use(`${path}/admin/platform-settings`, adminPlatformSettingsController);
+protectedRouter.use(`${path}/admin/fincra`, adminFincraController);
+protectedRouter.use(`${path}/admin/spotflow`, adminSpotflowController);
+protectedRouter.use(`${path}/admin/daya`, adminDayaController);
 protectedRouter.use(`${path}/kyc`, kycController);
 
 export default protectedRouter;

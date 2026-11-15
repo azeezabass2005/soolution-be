@@ -80,10 +80,10 @@ const assertYellowCardRoute = (config: YellowCardCountryConfig, flow: "send" | "
 };
 
 /**
- * A YellowCard rejection in words a customer can act on. The provider's own
- * message stays in the logs and in the error details for support.
+ * A provider rejection in words a customer can act on. The provider's own
+ * message stays in the logs; never send it to the client (it can name the provider).
  */
-const yellowCardFailureMessage = (providerMessage: string, flow: "send" | "receive"): string => {
+const providerFailureMessage = (providerMessage: string, flow: "send" | "receive"): string => {
     const m = (providerMessage || "").toLowerCase();
     if (/channel|not supported|unsupported/.test(m)) {
         return "This payment method isn't available for that country right now. Please try a different one.";
@@ -908,7 +908,7 @@ class TransactionService extends DBService<ITransaction> {
 
     private generateYellowCardSequenceId = () => {
         const randomPart = crypto.randomUUID().replace(/-/g, "").slice(0, 22).toUpperCase();
-        return `YC_TX_${randomPart}`;
+        return `SP_TX_${randomPart}`;
     };
 
     /**
@@ -970,7 +970,7 @@ class TransactionService extends DBService<ITransaction> {
             userRate = await platformSettingsService.applyRateMarkup(providerRate, 'send');
         } catch (err: any) {
             logger.error("YellowCard rate lookup failed during send", { fromCurrency, toCurrency, error: err?.message });
-            throw errorResponseMessage.createError(400, `Could not retrieve the ${fromCurrency}→${toCurrency} rate from YellowCard. Please try again.`, ErrorSeverity.HIGH);
+            throw errorResponseMessage.createError(400, `We couldn't get the ${fromCurrency}→${toCurrency} exchange rate right now. Please try again in a few minutes.`, ErrorSeverity.HIGH);
         }
         const ngnAmount = Math.round(amount * userRate * 100) / 100;
         if (!ngnAmount || ngnAmount <= 0) {
@@ -1222,7 +1222,7 @@ class TransactionService extends DBService<ITransaction> {
         );
 
         // Refund wallet balance
-        await this.refundWallet(wallet._id, userId, totalDebit, walletTransaction._id, walletTxRef, "YellowCard payment failed", feeAmount);
+        await this.refundWallet(wallet._id, userId, totalDebit, walletTransaction._id, walletTxRef, "Payment failed", feeAmount);
 
         const ycError = lastError?.ycError || lastError?.response?.data || lastError?.data;
         logger.error("YellowCard payment submission failed — wallet refunded", {
@@ -1234,12 +1234,12 @@ class TransactionService extends DBService<ITransaction> {
             walletCurrency,
         });
 
-        const ycMessage = ycError?.message || ycError?.code || lastError?.message || "YellowCard payment failed";
+        const ycMessage = ycError?.message || ycError?.code || lastError?.message || "Payment request failed";
         throw errorResponseMessage.createError(
             400,
-            `${yellowCardFailureMessage(ycMessage, "send")} Your wallet has not been charged.`,
+            `${providerFailureMessage(ycMessage, "send")} Your wallet has not been charged.`,
             ErrorSeverity.HIGH,
-            { code: "PROVIDER_REJECTED", providerMessage: ycMessage }
+            { code: "PROVIDER_REJECTED" }
         );
     };
 
@@ -1279,12 +1279,12 @@ class TransactionService extends DBService<ITransaction> {
             throw errorResponseMessage.createError(404, "Transaction not found", ErrorSeverity.MEDIUM);
         }
         if (transaction.detailType !== DETAIL_TYPE.YELLOWCARD) {
-            throw errorResponseMessage.createError(400, "Not a YellowCard transaction", ErrorSeverity.MEDIUM);
+            throw errorResponseMessage.createError(400, "This transaction's status can't be checked here.", ErrorSeverity.MEDIUM);
         }
 
         const detail = await this.transactionDetailsService.findOne({ transactionId: transaction._id });
         if (!detail?.ycSequenceId) {
-            throw errorResponseMessage.createError(400, "No YellowCard sequence ID found", ErrorSeverity.MEDIUM);
+            throw errorResponseMessage.createError(400, "This transaction has no payment reference yet.", ErrorSeverity.MEDIUM);
         }
 
         // Lookup payment status from YellowCard
@@ -1300,7 +1300,7 @@ class TransactionService extends DBService<ITransaction> {
             return {
                 transaction: transaction.toObject(),
                 ycStatus: detail.ycStatus || "unknown",
-                message: "Could not fetch status from YellowCard",
+                message: "We couldn't check the latest status. We'll keep trying.",
             };
         }
 
@@ -1394,7 +1394,7 @@ class TransactionService extends DBService<ITransaction> {
                         walletTx.amount,
                         walletTx._id,
                         walletTx.reference,
-                        `YellowCard payment ${ycStatus}`,
+                        `Payment ${ycStatus}`,
                         fee,
                     );
                     logger.info("Wallet refunded via poll", { walletTxId: walletTx._id, amount: walletTx.amount });
@@ -1476,7 +1476,7 @@ class TransactionService extends DBService<ITransaction> {
             userRate = await platformSettingsService.applyRateMarkup(providerRate, 'receive');
         } catch (err: any) {
             logger.error("YellowCard rate lookup failed during collection", { fromCurrency, toCurrency, error: err?.message });
-            throw errorResponseMessage.createError(400, `Could not retrieve the ${fromCurrency}→${toCurrency} rate from YellowCard. Please try again.`, ErrorSeverity.HIGH);
+            throw errorResponseMessage.createError(400, `We couldn't get the ${fromCurrency}→${toCurrency} exchange rate right now. Please try again in a few minutes.`, ErrorSeverity.HIGH);
         }
         const grossNgn = Math.round(amount * userRate * 100) / 100;
 
@@ -1647,7 +1647,8 @@ class TransactionService extends DBService<ITransaction> {
 
         const ycError = lastError?.ycError || lastError?.response?.data || lastError?.data;
         const ycMessage = ycError?.message || ycError?.code || lastError?.message || "Collection request failed";
-        throw errorResponseMessage.createError(400, yellowCardFailureMessage(ycMessage, "receive"), ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED", providerMessage: ycMessage });
+        logger.error("YellowCard collection rejected", { transactionId: transaction._id, sequenceId, providerMessage: ycMessage });
+        throw errorResponseMessage.createError(400, providerFailureMessage(ycMessage, "receive"), ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
     };
 
     /**
@@ -1662,7 +1663,7 @@ class TransactionService extends DBService<ITransaction> {
 
         const detail = await this.transactionDetailsService.findOne({ transactionId: transaction._id });
         if (!detail?.ycSequenceId) {
-            throw errorResponseMessage.createError(400, "No YellowCard sequence ID found", ErrorSeverity.MEDIUM);
+            throw errorResponseMessage.createError(400, "This transaction has no payment reference yet.", ErrorSeverity.MEDIUM);
         }
 
         // Try lookup by collection ID first, then by sequence ID
@@ -1682,7 +1683,7 @@ class TransactionService extends DBService<ITransaction> {
             return {
                 transaction: transaction.toObject(),
                 ycStatus: detail.ycStatus || "unknown",
-                message: "Could not fetch status from YellowCard",
+                message: "We couldn't check the latest status. We'll keep trying.",
             };
         }
 
@@ -1906,7 +1907,7 @@ class TransactionService extends DBService<ITransaction> {
 
     private generateOGatewaySequenceId = () => {
         const randomPart = crypto.randomUUID().replace(/-/g, "").slice(0, 22).toUpperCase();
-        return `OG_TX_${randomPart}`;
+        return `SP_TX_${randomPart}`;
     };
 
     /**
@@ -1985,11 +1986,11 @@ class TransactionService extends DBService<ITransaction> {
             userRate = quoted.userRate;
         } catch (err: any) {
             logger.error("OGateway rate lookup failed during payout", { error: err?.message });
-            throw errorResponseMessage.createError(400, "Could not retrieve the NGN→GHS rate from OGateway. Please try again.", ErrorSeverity.HIGH);
+            throw errorResponseMessage.createError(400, "We couldn't get the NGN→GHS exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
         }
         const ngnAmount = Math.round(amount * userRate * 100) / 100;
         if (!ngnAmount || ngnAmount <= 0) {
-            throw errorResponseMessage.createError(400, "Could not compute NGN amount from the live OGateway rate", ErrorSeverity.HIGH);
+            throw errorResponseMessage.createError(400, "We couldn't work out the NGN amount from the current rate. Please try again.", ErrorSeverity.HIGH);
         }
 
         // Fee is charged on top of the converted NGN amount so the recipient
@@ -2204,10 +2205,11 @@ class TransactionService extends DBService<ITransaction> {
                 { transactionId: transaction._id },
                 { ogStatus: OGATEWAY_STATUS.FAILED },
             );
-            await this.refundWalletFromOGateway(wallet._id, userId, totalDebit, ngnAmount, walletTransaction._id, walletTxRef, `OGateway payout dispatch failed: ${error?.message || 'unknown'}`, feeAmount);
+            await this.refundWalletFromOGateway(wallet._id, userId, totalDebit, ngnAmount, walletTransaction._id, walletTxRef, "Payment failed", feeAmount);
             const ogError = error?.ogError || error?.response?.data || error?.data;
-            const ogMessage = ogError?.message || ogError?.error || error?.message || "OGateway payout failed";
-            throw errorResponseMessage.createError(400, `OGateway: ${ogMessage}`, ErrorSeverity.HIGH);
+            const ogMessage = ogError?.message || ogError?.error || error?.message || "Payout request failed";
+            logger.error("OGateway payout rejected", { transactionId: transaction._id, providerMessage: ogMessage });
+            throw errorResponseMessage.createError(400, `${providerFailureMessage(ogMessage, "send")} Your wallet has not been charged.`, ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
         }
     };
 
@@ -2256,11 +2258,11 @@ class TransactionService extends DBService<ITransaction> {
             userRate = quoted.userRate;
         } catch (err: any) {
             logger.error("OGateway rate lookup failed during collection", { error: err?.message });
-            throw errorResponseMessage.createError(400, "Could not retrieve the GHS→NGN rate from OGateway. Please try again.", ErrorSeverity.HIGH);
+            throw errorResponseMessage.createError(400, "We couldn't get the GHS→NGN exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
         }
         const grossNgn = Math.round(amount * userRate * 100) / 100;
         if (!grossNgn || grossNgn <= 0) {
-            throw errorResponseMessage.createError(400, "Could not compute NGN amount from the live OGateway rate", ErrorSeverity.HIGH);
+            throw errorResponseMessage.createError(400, "We couldn't work out the NGN amount from the current rate. Please try again.", ErrorSeverity.HIGH);
         }
 
         // Daily tier limit (throws when this would exceed today's limit)
@@ -2370,8 +2372,9 @@ class TransactionService extends DBService<ITransaction> {
                 { ogStatus: OGATEWAY_STATUS.FAILED },
             );
             const ogError = error?.ogError || error?.response?.data || error?.data;
-            const ogMessage = ogError?.message || ogError?.error || error?.message || "OGateway collection failed";
-            throw errorResponseMessage.createError(400, `OGateway: ${ogMessage}`, ErrorSeverity.HIGH);
+            const ogMessage = ogError?.message || ogError?.error || error?.message || "Collection request failed";
+            logger.error("OGateway collection rejected", { transactionId: transaction._id, providerMessage: ogMessage });
+            throw errorResponseMessage.createError(400, providerFailureMessage(ogMessage, "receive"), ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
         }
     };
 
@@ -2584,7 +2587,7 @@ class TransactionService extends DBService<ITransaction> {
                         convertedNgn,
                         walletTx._id,
                         walletTx.reference,
-                        webhookData?.provider_message || webhookData?.message || 'OGateway payout failed',
+                        'Payment failed',
                         feeAmount,
                     );
                 }
@@ -2668,7 +2671,7 @@ class TransactionService extends DBService<ITransaction> {
             });
             return resultFromCurrentState(
                 (detail as any).ogStatus || String(transaction.status || "unknown"),
-                "No OGateway transaction id found",
+                "This transaction has no payment reference yet.",
             );
         }
 
@@ -2678,7 +2681,7 @@ class TransactionService extends DBService<ITransaction> {
             logger.warn("pollOGatewayStatus: remote returned no status", { transactionId, ogId });
             return resultFromCurrentState(
                 (detail as any).ogStatus || String(transaction.status || "unknown"),
-                "OGateway returned no status",
+                "We couldn't check the latest status. We'll keep trying.",
             );
         }
 

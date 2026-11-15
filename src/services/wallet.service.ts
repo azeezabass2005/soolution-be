@@ -25,6 +25,7 @@ import User from "../models/user.model";
 import Account from "../models/account.model";
 import ledgerService from "./ledger.service";
 import AuditLogService from "./audit-log.service";
+import { withoutProviderName } from "../utils/provider-names.utils";
 
 const auditLogService = new AuditLogService();
 
@@ -605,7 +606,7 @@ class WalletService extends DBService<IWallet> {
 
                     await this.walletTransactionService.updateById(walletTransaction._id as string, {
                         status: WALLET_TRANSACTION_STATUS.FAILED,
-                        failureReason: paystackError?.response?.data?.message || paystackError?.message || "Transfer initiation failed",
+                        failureReason: withoutProviderName(paystackError?.response?.data?.message, "Transfer initiation failed"),
                     });
 
                     await reverseSession.commitTransaction();
@@ -769,7 +770,7 @@ class WalletService extends DBService<IWallet> {
             // Mark original transaction as failed
             await this.walletTransactionService.updateById(walletTx._id as string, {
                 status: WALLET_TRANSACTION_STATUS.FAILED,
-                failureReason: reason || "Transfer failed",
+                failureReason: withoutProviderName(reason, "Transfer failed"),
             });
 
             // Reverse the balance: credit back the debited amount

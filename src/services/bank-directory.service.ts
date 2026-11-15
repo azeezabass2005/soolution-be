@@ -22,7 +22,6 @@ export interface BankOption {
 
 export interface BankDirectory {
     currency: string;
-    provider: "paystack" | "yellowcard" | null;
     banks: BankOption[];
     /** Whether we can look up the account holder's name */
     canResolve: boolean;
@@ -50,7 +49,6 @@ class BankDirectoryService {
             const banks = await this.walletService.listBanks();
             value = {
                 currency,
-                provider: "paystack",
                 banks: banks
                     .filter((b: any) => b.active !== false && b.code)
                     .map((b: any) => ({ code: String(b.code), name: String(b.name).trim() })),
@@ -61,17 +59,16 @@ class BankDirectoryService {
             const networks: any[] = data?.networks || data || [];
             value = {
                 currency,
-                provider: "yellowcard",
                 banks: networks.filter(isBankNetwork).map((n) => ({ code: String(n.id), name: String(n.name).trim() })),
                 canResolve: true,
             };
         } else {
-            value = { currency, provider: null, banks: [], canResolve: false };
+            value = { currency, banks: [], canResolve: false };
         }
 
         value.banks = this.dedupeAndSort(value.banks);
         // Don't cache an empty list: it's more likely a provider hiccup than a country with no banks
-        if (value.banks.length || !value.provider) this.cache.set(currency, { at: Date.now(), value });
+        if (value.banks.length || !value.canResolve) this.cache.set(currency, { at: Date.now(), value });
         return value;
     }
 

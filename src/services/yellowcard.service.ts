@@ -361,15 +361,12 @@ class YellowCardService {
             return data;
         } catch (error: any) {
             logger.error("YellowCard: getRates failed", { status: error?.response?.status, error: error?.response?.data || error?.message || error });
-            // Say what YellowCard answered instead of a generic 422 (no secrets in it)
-            const status = error?.response?.status;
-            const reason = error?.response?.data?.code || error?.response?.data?.message || error?.message || "no response";
+            // What the provider answered stays in the log above; customers get a plain message
             throw errorResponseMessage.createError(
                 ErrorResponseCode.UNABLE_TO_COMPLETE,
-                status === 401 || status === 403
-                    ? `Rates are unavailable: YellowCard rejected our credentials (${status} ${reason})`
-                    : `Rates are unavailable: YellowCard ${status ? `returned ${status}` : "could not be reached"} (${reason})`,
+                "Exchange rates are unavailable right now. Please try again in a few minutes.",
                 ErrorSeverity.HIGH,
+                { code: "RATES_UNAVAILABLE" },
             );
         }
     }
@@ -395,14 +392,14 @@ class YellowCardService {
         const fromRate = find(from);
         const toRate = find(to);
         if (!fromRate || !toRate) {
-            throw new Error(`YellowCard: no rate found for ${from}→${to}`);
+            throw new Error(`No rate found for ${from}→${to}`);
         }
         const buyFrom = Number(fromRate.buy);
         const sellFrom = Number(fromRate.sell);
         const buyTo = Number(toRate.buy);
         const sellTo = Number(toRate.sell);
         if (!isFinite(buyFrom) || !isFinite(sellTo) || buyFrom <= 0 || sellTo <= 0) {
-            throw new Error(`YellowCard: invalid rate values for ${from}→${to}`);
+            throw new Error(`Invalid rate values for ${from}→${to}`);
         }
         return direction === 'send'
             ? buyFrom / sellTo       // from-units per to-unit

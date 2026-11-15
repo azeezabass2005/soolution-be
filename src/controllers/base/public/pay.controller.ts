@@ -40,8 +40,8 @@ class PayController extends BaseController {
     private async banks(req: Request, res: Response, next: NextFunction) {
         try {
             const link = await paymentLinkService.getPublic(req.params.slug);
-            const { banks, provider } = await bankDirectoryService.list(link.currency);
-            this.sendSuccess(res, { banks, provider });
+            const { banks } = await bankDirectoryService.list(link.currency);
+            this.sendSuccess(res, { banks });
         } catch (error) {
             next(error);
         }

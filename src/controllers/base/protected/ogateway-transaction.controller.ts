@@ -65,7 +65,7 @@ class OGatewayTransactionController extends BaseController {
                 res,
                 {
                     transaction,
-                    message: "OGateway payout initiated successfully.",
+                    message: "Payment initiated successfully.",
                 },
                 201,
             );
@@ -126,7 +126,7 @@ class OGatewayTransactionController extends BaseController {
             if (transaction.detailType !== DETAIL_TYPE.OGATEWAY) {
                 return next(errorResponseMessage.createError(
                     400,
-                    "Not an OGateway transaction",
+                    "This transaction's status can't be checked here.",
                     ErrorSeverity.MEDIUM,
                 ));
             }
@@ -179,7 +179,7 @@ class OGatewayTransactionController extends BaseController {
             if (!allowed.has(source) || !allowed.has(destination) || source === destination) {
                 return next({
                     response_code: 400,
-                    message: "OGateway rates are only quoted for the GHS↔NGN pair",
+                    message: "Rates here are only available for GHS and NGN.",
                 });
             }
             if (!isFinite(amount) || amount <= 0) {

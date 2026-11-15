@@ -106,6 +106,30 @@ interface EnvConfig {
     PAYSTACK_SECRET_KEY: string;
     PAYSTACK_PUBLIC_KEY: string;
     PAYSTACK_BASE_URL: string;
+
+    /** Fincra lab (admin-only, local exploration of NGN virtual accounts and fees) */
+    FINCRA_LAB_ENABLED: boolean;
+    FINCRA_ENV: 'sandbox' | 'live';
+    FINCRA_SECRET_KEY: string;
+    /** Public key (pk_…), sent as x-pub-key when creating checkout payment links */
+    FINCRA_PUBLIC_KEY: string;
+    FINCRA_BUSINESS_ID: string;
+
+    /** Spotflow lab (admin-only, local exploration of NGN/GHS virtual accounts); mode follows the key */
+    SPOTFLOW_LAB_ENABLED: boolean;
+    SPOTFLOW_SECRET_KEY: string;
+    SPOTFLOW_BASE_URL: string;
+
+    /** Daya lab (admin-only, local exploration of NGN funding accounts and USD/EUR virtual accounts); mode follows the key */
+    DAYA_LAB_ENABLED: boolean;
+    DAYA_SECRET_KEY: string;
+    /** Optional override; otherwise sk_sandbox_ → api.sandbox.daya.co, sk_live_ → api.daya.co */
+    DAYA_BASE_URL: string;
+
+    /** How often the lab poller re-checks provider deposits and balances */
+    LAB_POLL_SECONDS: number;
+    /** How long an action in a lab tab keeps its account watched */
+    LAB_WATCH_MINUTES: number;
 }
 
 /**
@@ -209,6 +233,24 @@ const loadEnvConfig = (): EnvConfig => {
         PAYSTACK_SECRET_KEY: process.env.PAYSTACK_SECRET_KEY || '',
         PAYSTACK_PUBLIC_KEY: process.env.PAYSTACK_PUBLIC_KEY || '',
         PAYSTACK_BASE_URL: process.env.PAYSTACK_BASE_URL || 'https://api.paystack.co',
+
+        // Fincra lab — off unless explicitly enabled; sandbox unless FINCRA_ENV=live
+        FINCRA_LAB_ENABLED: process.env.FINCRA_LAB_ENABLED === 'true',
+        FINCRA_ENV: (process.env.FINCRA_ENV === 'live' ? 'live' : 'sandbox') as 'sandbox' | 'live',
+        FINCRA_SECRET_KEY: process.env.FINCRA_SECRET_KEY || '',
+        FINCRA_PUBLIC_KEY: process.env.FINCRA_PUBLIC_KEY || '',
+        FINCRA_BUSINESS_ID: process.env.FINCRA_BUSINESS_ID || '',
+
+        // Spotflow lab — off unless explicitly enabled; sk_test_ / sk_live_ picks the mode
+        SPOTFLOW_LAB_ENABLED: process.env.SPOTFLOW_LAB_ENABLED === 'true',
+        SPOTFLOW_SECRET_KEY: process.env.SPOTFLOW_SECRET_KEY || '',
+        SPOTFLOW_BASE_URL: process.env.SPOTFLOW_BASE_URL || 'https://api.spotflow.co/api/v1',
+        // Daya lab — off unless explicitly enabled; sk_sandbox_ / sk_live_ picks the host
+        DAYA_LAB_ENABLED: process.env.DAYA_LAB_ENABLED === 'true',
+        DAYA_SECRET_KEY: process.env.DAYA_SECRET_KEY || '',
+        DAYA_BASE_URL: process.env.DAYA_BASE_URL || '',
+        LAB_POLL_SECONDS: Math.max(10, parseInt(process.env.LAB_POLL_SECONDS || '30', 10) || 30),
+        LAB_WATCH_MINUTES: Math.max(1, parseInt(process.env.LAB_WATCH_MINUTES || '30', 10) || 30),
     };
 
     // Log configuration on startup
