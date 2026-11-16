@@ -16,6 +16,23 @@ import NotificationService from './utils/notification.utils';
 import { bootstrapSystemAccounts } from './services/account.bootstrap';
 import { registerJobs, unregisterJobs } from './jobs';
 
+const PRODUCTION_ORIGINS = [
+    'https://solutionpay.co',
+    'https://www.solutionpay.co',
+    'https://soolution.co',
+    'https://www.soolution.co',
+];
+
+/**
+ * Browser origins allowed to call the API with cookies. CORS_ORIGIN (a
+ * comma-separated list) replaces the default production list, e.g. on
+ * staging. Outside production, localhost:3000 is always allowed.
+ */
+function allowedOrigins(): string[] {
+    const configured = config.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter((origin) => origin && origin !== '*');
+    const origins = configured.length ? configured : PRODUCTION_ORIGINS;
+    return config.NODE_ENV === 'production' ? origins : [...origins, 'http://localhost:3000'];
+}
 
 /**
  * Express application wrapper class
@@ -45,19 +62,14 @@ class App {
      * @private
      */
     private setupMiddlewares(): void {
+        // One reverse proxy (Traefik) sits in front: trust its X-Forwarded-For
+        // so req.ip, rate limits and audit logs see the real client address
+        this.app.set('trust proxy', 1);
+
         // Security middlewares
         this.app.use(helmet());
         this.app.use(cors({
-            origin: [
-                'http://localhost:3000',
-                'https://solutionpay.co',
-                'https://soolution.co',
-                'https://www.soolution.co',
-                'https://www.solutionpay.co',
-                'https://staging.solutionpay.co',
-                'https://trycloudflared.com',
-                'https://df0c-102-89-83-98.ngrok-free.app'
-            ],
+            origin: allowedOrigins(),
             credentials: true,
             exposedHeaders: ['set-cookie']
         }));
