@@ -1,5 +1,6 @@
 import axios, { AxiosInstance } from "axios";
 import crypto from "crypto";
+import https from "https";
 import config from "../config/env.config";
 import logger from "../utils/logger.utils";
 
@@ -106,6 +107,8 @@ class FincraService {
             baseURL: BASE_URLS[config.FINCRA_ENV],
             timeout: 30000,
             headers: { Accept: "application/json", "Content-Type": "application/json" },
+            // Fincra allow-lists the server's IPv4 address; never reach it over IPv6
+            httpsAgent: new https.Agent({ family: 4, keepAlive: true }),
         });
     }
 
