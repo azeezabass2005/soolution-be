@@ -20,9 +20,9 @@ vi.mock("../src/services/fincra.service", async (importOriginal) => {
 });
 vi.mock("../src/services/transaction-limit.service", () => ({
     default: {
-        assertAllowed: vi.fn(async () => ({ usdValue: 10 })),
+        assertAllowed: vi.fn(async () => ({ ngnValue: 10_000 })),
         assertCanTransact: vi.fn(async () => undefined),
-        check: vi.fn(async () => ({ allowed: true, usdValue: 10 })),
+        check: vi.fn(async () => ({ allowed: true, ngnValue: 10_000 })),
         withUserLock: vi.fn(async (_userId: string, fn: () => Promise<unknown>) => fn()),
     },
 }));

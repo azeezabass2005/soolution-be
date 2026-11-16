@@ -151,7 +151,7 @@ class KycController extends BaseController {
         ]);
         return {
             ...status,
-            tiers: USER_TIERS.map((tier) => ({ tier, name: TIER_NAME[tier], limitUsd: limits[tier] })),
+            tiers: USER_TIERS.map((tier) => ({ tier, name: TIER_NAME[tier], limitNgn: limits[tier] })),
         };
     }
 

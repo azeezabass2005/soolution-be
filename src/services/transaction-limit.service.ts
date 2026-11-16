@@ -3,6 +3,7 @@ import userRepository from "../repositories/user.repository";
 import transactionRepository from "../repositories/transaction.repository";
 import transactionLimitLockRepository from "../repositories/transaction-limit-lock.repository";
 import yellowCardService from "./yellowcard.service";
+import fincraService from "./fincra.service";
 import platformSettingsService from "./platform-settings.service";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import { TRANSACTION_STATUS } from "../common/constant";
@@ -10,7 +11,7 @@ import { LIMIT_DAY_UTC_OFFSET_HOURS, TIER_NAME, USER_TIER, UserTier, isUserTier 
 import { IDENTITY_REQUIRED_CODE } from "../common/identity.constants";
 import logger from "../utils/logger.utils";
 
-/** YellowCard per-USD rates are cached briefly; the limit check doesn't need tick-level precision */
+/** YellowCard per-USD rates (only for currencies other than NGN/GHS) are cached briefly */
 const RATE_CACHE_MS = 10 * 60 * 1000;
 
 /** How long a lock may be held (creation calls payment providers) and how long a second request waits */
@@ -35,38 +36,40 @@ export interface AmountInCurrency {
 export interface TierLimitStatus {
     tier: UserTier;
     tierName: string;
+    /** In NGN; null = unlimited */
+    limitNgn: number | null;
+    usedNgn: number;
     /** null = unlimited */
-    limitUsd: number | null;
-    usedUsd: number;
-    /** null = unlimited */
-    remainingUsd: number | null;
+    remainingNgn: number | null;
     /** When today's usage resets (midnight Lagos time) */
     resetsAt: string;
     /** The next tier up, if any */
-    nextTier: { tier: UserTier; name: string; limitUsd: number | null } | null;
+    nextTier: { tier: UserTier; name: string; limitNgn: number | null } | null;
 }
 
 export interface TierLimitCheck extends TierLimitStatus {
-    /** null when the amount couldn't be valued in USD */
-    usdValue: number | null;
+    /** null when the amount couldn't be valued in NGN */
+    ngnValue: number | null;
     allowed: boolean;
     reason?: "limit_exceeded" | "unvalued" | "identity_required";
 }
 
 let rateCache: { at: number; unitsPerUsd: Map<string, number> } | null = null;
 
-const roundUsd = (value: number) => Math.round(value * 100) / 100;
-const formatUsd = (value: number) => `$${Math.floor(value).toLocaleString("en-US")}`;
+const roundNgn = (value: number) => Math.round(value * 100) / 100;
+const formatNgn = (value: number) => `₦${Math.floor(value).toLocaleString("en-NG")}`;
 
 /**
- * Daily transaction limits per account tier.
+ * Daily transaction limits per account tier, in NGN.
  *
- * Every send and receive is valued in USD when it's created and stored on the
- * transaction (`usdValue`); a user's usage is the sum for the current day
+ * Every send and receive is valued in NGN when it's created and stored on the
+ * transaction (`ngnValue`); a user's usage is the sum for the current day
  * (midnight to midnight, Lagos time), excluding failed and cancelled ones.
- * Unverified accounts can't transact until they verify their BVN, and Tier 3
- * is unlimited. If a transaction can't be valued for a limited tier, it's
- * refused: the limit fails closed.
+ * NGN counts as is and GHS at Fincra's rate; other currencies (not offered
+ * at the moment) go through YellowCard's USD rates. Unverified accounts can't
+ * transact until they verify their BVN, and Tier 3 is unlimited. If a
+ * transaction can't be valued for a limited tier, it's refused: the limit
+ * fails closed.
  */
 class TransactionLimitService {
     /** Start of the current limit day */
@@ -74,7 +77,7 @@ class TransactionLimitService {
         return new Date(Math.floor((now + OFFSET_MS) / DAY_MS) * DAY_MS - OFFSET_MS);
     }
 
-    /** Units of each currency per 1 USD */
+    /** Units of each currency per 1 USD (YellowCard) */
     private async unitsPerUsd(): Promise<Map<string, number>> {
         if (rateCache && Date.now() - rateCache.at < RATE_CACHE_MS) return rateCache.unitsPerUsd;
 
@@ -83,7 +86,6 @@ class TransactionLimitService {
         const unitsPerUsd = new Map<string, number>();
         for (const rate of rates) {
             const code = String(rate.code || rate.currency || rate.currencyCode || "").toUpperCase();
-            // The smaller quote gives the larger USD value, so borderline amounts count fully
             const quote = Math.min(...[Number(rate.buy), Number(rate.sell)].filter((n) => isFinite(n) && n > 0));
             if (code && isFinite(quote)) unitsPerUsd.set(code, quote);
         }
@@ -91,25 +93,32 @@ class TransactionLimitService {
         return unitsPerUsd;
     }
 
-    /** USD value of an amount, or null if the currency can't be valued */
-    async toUsd(amount: number, currency: string): Promise<number | null> {
+    /** NGN value of an amount, or null if the currency can't be valued */
+    async toNgn(amount: number, currency: string): Promise<number | null> {
         const code = currency.toUpperCase();
-        if (code === "USD" || code === "USDT" || code === "USDC") return amount;
+        if (code === "NGN") return amount;
         try {
-            const rate = (await this.unitsPerUsd()).get(code);
-            return rate ? amount / rate : null;
+            // Fincra's NGN cost of buying GHS: the higher of its two rates, so amounts count fully
+            if (code === "GHS") return amount * (await fincraService.ngnPerGhs("send"));
+            const rates = await this.unitsPerUsd();
+            const ngnPerUsd = rates.get("NGN");
+            if (!ngnPerUsd) return null;
+            if (code === "USD" || code === "USDT" || code === "USDC") return amount * ngnPerUsd;
+            const unitsPerUsd = rates.get(code);
+            return unitsPerUsd ? (amount / unitsPerUsd) * ngnPerUsd : null;
         } catch (error: any) {
-            logger.warn("Transaction limit: could not load USD rates", { error: error?.message });
+            logger.warn("Transaction limit: could not value amount in NGN", { currency: code, error: error?.message });
             return null;
         }
     }
 
-    /** Values the first amount that can be converted (e.g. the NGN side when the other is RMB) */
-    async valueInUsd(amounts: AmountInCurrency[]): Promise<number | null> {
-        for (const { amount, currency } of amounts) {
+    /** Values the first amount that can be converted (the NGN side when there is one) */
+    async valueInNgn(amounts: AmountInCurrency[]): Promise<number | null> {
+        const ordered = [...amounts].sort((a, b) => Number(String(b.currency).toUpperCase() === "NGN") - Number(String(a.currency).toUpperCase() === "NGN"));
+        for (const { amount, currency } of ordered) {
             if (!amount || amount <= 0 || !currency) continue;
-            const usd = await this.toUsd(amount, currency);
-            if (usd !== null) return roundUsd(usd);
+            const ngn = await this.toNgn(amount, currency);
+            if (ngn !== null) return roundNgn(ngn);
         }
         return null;
     }
@@ -120,74 +129,74 @@ class TransactionLimitService {
         return isUserTier(user.tier) ? user.tier : USER_TIER.UNVERIFIED;
     }
 
-    /** USD already used today (transactions created before usdValue was stored are valued now) */
-    async getUsedTodayUsd(userId: string): Promise<number> {
+    /** NGN already used today */
+    async getUsedTodayNgn(userId: string): Promise<number> {
         const transactions = await transactionRepository.listForLimit(userId, this.dayStart(), RELEASED_STATUSES);
 
         let used = 0;
         for (const transaction of transactions) {
-            if (typeof transaction.usdValue === "number") {
-                used += transaction.usdValue;
+            if (typeof transaction.ngnValue === "number") {
+                used += transaction.ngnValue;
             } else if (transaction.amount && transaction.currency) {
-                used += (await this.toUsd(transaction.amount, transaction.currency)) ?? 0;
+                used += (await this.toNgn(transaction.amount, transaction.currency)) ?? 0;
             }
         }
-        return roundUsd(used);
+        return roundNgn(used);
     }
 
     async getStatus(userId: string): Promise<TierLimitStatus> {
         const tier = await this.getTier(userId);
-        const [limitUsd, usedUsd, allLimits] = await Promise.all([
-            platformSettingsService.getTierDailyLimitUsd(tier),
-            this.getUsedTodayUsd(userId),
+        const [limitNgn, usedNgn, allLimits] = await Promise.all([
+            platformSettingsService.getTierDailyLimitNgn(tier),
+            this.getUsedTodayNgn(userId),
             platformSettingsService.getTierDailyLimits(),
         ]);
         const next = (tier + 1) as UserTier;
         return {
             tier,
             tierName: TIER_NAME[tier],
-            limitUsd,
-            usedUsd,
-            remainingUsd: limitUsd === null ? null : roundUsd(Math.max(0, limitUsd - usedUsd)),
+            limitNgn,
+            usedNgn,
+            remainingNgn: limitNgn === null ? null : roundNgn(Math.max(0, limitNgn - usedNgn)),
             resetsAt: new Date(this.dayStart().getTime() + DAY_MS).toISOString(),
-            nextTier: isUserTier(next) ? { tier: next, name: TIER_NAME[next], limitUsd: allLimits[next] } : null,
+            nextTier: isUserTier(next) ? { tier: next, name: TIER_NAME[next], limitNgn: allLimits[next] } : null,
         };
     }
 
     async check(userId: string, amounts: AmountInCurrency[]): Promise<TierLimitCheck> {
-        const [status, usdValue] = await Promise.all([this.getStatus(userId), this.valueInUsd(amounts)]);
-        if (status.tier < USER_TIER.INDIVIDUAL) return { ...status, usdValue, allowed: false, reason: "identity_required" };
-        if (status.limitUsd === null) return { ...status, usdValue, allowed: true };
-        if (usdValue === null) return { ...status, usdValue, allowed: false, reason: "unvalued" };
-        // A cent of tolerance for rounding
-        const allowed = status.usedUsd + usdValue <= status.limitUsd + 0.01;
-        return { ...status, usdValue, allowed, ...(allowed ? {} : { reason: "limit_exceeded" as const }) };
+        const [status, ngnValue] = await Promise.all([this.getStatus(userId), this.valueInNgn(amounts)]);
+        if (status.tier < USER_TIER.INDIVIDUAL) return { ...status, ngnValue, allowed: false, reason: "identity_required" };
+        if (status.limitNgn === null) return { ...status, ngnValue, allowed: true };
+        if (ngnValue === null) return { ...status, ngnValue, allowed: false, reason: "unvalued" };
+        // A kobo of tolerance for rounding
+        const allowed = status.usedNgn + ngnValue <= status.limitNgn + 0.01;
+        return { ...status, ngnValue, allowed, ...(allowed ? {} : { reason: "limit_exceeded" as const }) };
     }
 
     /**
      * Throws a 403 TIER_LIMIT_EXCEEDED error when this transaction would take the
-     * user over today's limit. Returns the USD value to store on the transaction.
+     * user over today's limit. Returns the NGN value to store on the transaction.
      * Call inside `withUserLock` so parallel requests can't both pass.
      */
-    async assertAllowed(userId: string, amounts: AmountInCurrency[]): Promise<{ usdValue: number | null }> {
+    async assertAllowed(userId: string, amounts: AmountInCurrency[]): Promise<{ ngnValue: number | null }> {
         await this.assertCanTransact(userId);
         const result = await this.check(userId, amounts);
-        if (result.allowed) return { usdValue: result.usdValue };
+        if (result.allowed) return { ngnValue: result.ngnValue };
 
         const details = {
             code: TIER_LIMIT_CODE,
             reason: result.reason,
             tier: result.tier,
-            limitUsd: result.limitUsd,
-            usedUsd: result.usedUsd,
-            remainingUsd: result.remainingUsd,
-            usdValue: result.usdValue,
+            limitNgn: result.limitNgn,
+            usedNgn: result.usedNgn,
+            remainingNgn: result.remainingNgn,
+            ngnValue: result.ngnValue,
             resetsAt: result.resetsAt,
         };
         const message = result.reason === "unvalued"
             ? "We couldn't confirm this transaction's value against your daily limit right now. Please try again shortly."
-            : `This transaction (about ${formatUsd(result.usdValue!)}) is over your Tier ${result.tier} daily limit of ${formatUsd(result.limitUsd!)}. `
-                + (result.remainingUsd! > 0 ? `You have ${formatUsd(result.remainingUsd!)} left today. ` : "You've used today's limit. ")
+            : `This transaction (about ${formatNgn(result.ngnValue!)}) is over your Tier ${result.tier} daily limit of ${formatNgn(result.limitNgn!)}. `
+                + (result.remainingNgn! > 0 ? `You have ${formatNgn(result.remainingNgn!)} left today. ` : "You've used today's limit. ")
                 + "Upgrade your tier to transact more.";
         throw errorResponseMessage.createError(403, message, ErrorSeverity.LOW, details);
     }

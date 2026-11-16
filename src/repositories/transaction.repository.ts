@@ -151,10 +151,10 @@ class TransactionRepository {
     async listForLimit(userId: string, since: Date, excludeStatuses: TransactionStatus[]) {
         if (!isUuid(userId)) return [];
         const rows = await exec()
-            .select({ usdValue: transactions.usdValue, amount: transactions.amount, currency: transactions.currency })
+            .select({ ngnValue: transactions.ngnValue, amount: transactions.amount, currency: transactions.currency })
             .from(transactions)
             .where(and(eq(transactions.user, userId), gte(transactions.createdAt, since), notInArray(transactions.status, excludeStatuses)));
-        return rows.map((row) => stripNulls(row) as { usdValue?: number; amount: number; currency: string });
+        return rows.map((row) => stripNulls(row) as { ngnValue?: number; amount: number; currency: string });
     }
 
     /** Stuck provider transactions for the sweeper, oldest first */

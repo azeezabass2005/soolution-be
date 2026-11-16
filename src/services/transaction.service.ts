@@ -246,7 +246,7 @@ class TransactionService {
         }
 
         // Daily tier limit (throws when this would exceed today's limit)
-        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(user, [
+        const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(user, [
             { amount: calculatedFromAmount, currency: fromCurrency },
             { amount, currency: toCurrency },
         ]);
@@ -264,7 +264,7 @@ class TransactionService {
         }
 
         const transaction = await transactionRepository.create({
-            usdValue: txUsdValue ?? undefined,
+            ngnValue: txNgnValue ?? undefined,
             user,
             reference: this.generateBankTransferTransactionReference(toCurrency),
             amount: Math.round(amount * 100) / 100, // Round to 2 decimal places
@@ -445,7 +445,7 @@ class TransactionService {
         }
 
         // Daily tier limit, valued from the source side (RMB isn't quoted in USD)
-        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(user, [{ amount: ngnEquivalent, currency: fromCurrency }]);
+        const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(user, [{ amount: ngnEquivalent, currency: fromCurrency }]);
         if (fromWallet) await walletSendService.assertCanPay(user, "RMB", Math.round(amount * 100) / 100);
 
         // Handle idempotency key if provided
@@ -477,7 +477,7 @@ class TransactionService {
         }
 
         const transaction = await transactionRepository.create({
-            usdValue: txUsdValue ?? undefined,
+            ngnValue: txNgnValue ?? undefined,
             user,
             reference: this.generateTransactionReference(),
             amount: Math.round(amount * 100) / 100, // Round to 2 decimal places
@@ -898,7 +898,7 @@ class TransactionService {
         const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
 
         // Daily tier limit (throws when this would exceed today's limit)
-        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(userId, [
+        const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(userId, [
             { amount: totalDebit, currency: fromCurrency },
             { amount, currency: toCurrency },
         ]);
@@ -982,7 +982,7 @@ class TransactionService {
         let transactionDetails: any;
         try {
             transaction = await transactionRepository.create({
-                usdValue: txUsdValue ?? undefined,
+                ngnValue: txNgnValue ?? undefined,
                 user: userId,
                 reference: sequenceId,
                 amount: Math.round(amount * 100) / 100,
@@ -1377,7 +1377,7 @@ class TransactionService {
         const grossNgn = Math.round(amount * userRate * 100) / 100;
 
         // Daily tier limit (throws when this would exceed today's limit)
-        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(userId, [
+        const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(userId, [
             { amount, currency: fromCurrency },
             { amount: grossNgn, currency: toCurrency },
         ]);
@@ -1423,7 +1423,7 @@ class TransactionService {
         let transactionDetails: any;
         try {
             transaction = await transactionRepository.create({
-                usdValue: txUsdValue ?? undefined,
+                ngnValue: txNgnValue ?? undefined,
                 user: userId,
                 reference: sequenceId,
                 amount: Math.round(amount * 100) / 100,
@@ -1854,7 +1854,7 @@ class TransactionService {
         const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('fincra', ngnAmount);
         const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
 
-        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(userId, [
+        const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(userId, [
             { amount: totalDebit, currency: 'NGN' },
             { amount, currency: 'GHS' },
         ]);
@@ -1926,7 +1926,7 @@ class TransactionService {
         let transactionDetails: any;
         try {
             transaction = await transactionRepository.create({
-                usdValue: txUsdValue ?? undefined,
+                ngnValue: txNgnValue ?? undefined,
                 user: userId,
                 reference,
                 amount,
@@ -2097,7 +2097,7 @@ class TransactionService {
             throw errorResponseMessage.createError(400, "We couldn't work out the NGN amount from the current rate. Please try again.", ErrorSeverity.HIGH);
         }
 
-        const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(userId, [
+        const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(userId, [
             { amount, currency: 'GHS' },
             { amount: grossNgn, currency: 'NGN' },
         ]);
@@ -2122,7 +2122,7 @@ class TransactionService {
         if (!payerEmail) throw errorResponseMessage.payloadIncorrect("Enter the payer's email address");
 
         const transaction = await transactionRepository.create({
-            usdValue: txUsdValue ?? undefined,
+            ngnValue: txNgnValue ?? undefined,
             user: userId,
             reference,
             amount,

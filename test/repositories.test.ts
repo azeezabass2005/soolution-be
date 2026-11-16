@@ -178,7 +178,7 @@ describe("repositories", () => {
     it("seeds platform settings once and keeps nested shapes", async () => {
         const settings = await platformSettingsService.getSettings();
         expect(settings.providerBaseFeePercent).toEqual({ ogateway: 1.5, yellowcard: 0, fincra: 1.5 });
-        expect(settings.tierDailyLimitUsd).toEqual({ tier1: 2000, tier2: 100000 });
+        expect(settings.tierDailyLimitNgn).toEqual({ tier1: 5_000_000, tier2: 150_000_000 });
         const user = await createUser();
         const updated = await platformSettingsService.updateSettings({ rateMarkupPercent: 2, providerBaseFeePercent: { yellowcard: 1 } }, user.id);
         expect(updated.rateMarkupPercent).toBe(2);

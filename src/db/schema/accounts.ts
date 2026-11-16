@@ -31,8 +31,11 @@ export const platformSettings = pgTable(
         providerFeeOgatewayPercent: decimal("provider_fee_ogateway_percent").notNull().default(1.5),
         providerFeeYellowcardPercent: decimal("provider_fee_yellowcard_percent").notNull().default(0),
         providerFeeFincraPercent: decimal("provider_fee_fincra_percent").notNull().default(1.5),
-        tier1DailyLimitUsd: decimal("tier1_daily_limit_usd").notNull(),
-        tier2DailyLimitUsd: decimal("tier2_daily_limit_usd").notNull(),
+        // Daily limits in NGN. The *_usd columns are the old USD limits, no longer used.
+        tier1DailyLimitNgn: decimal("tier1_daily_limit_ngn").notNull().default(5_000_000),
+        tier2DailyLimitNgn: decimal("tier2_daily_limit_ngn").notNull().default(150_000_000),
+        tier1DailyLimitUsd: decimal("tier1_daily_limit_usd"),
+        tier2DailyLimitUsd: decimal("tier2_daily_limit_usd"),
         updatedBy: uuid("updated_by"),
         ...timestamps(),
     },
@@ -44,7 +47,7 @@ export const platformSettings = pgTable(
             "platform_settings_provider_fee_check",
             sql`${t.providerFeeOgatewayPercent} between 0 and 10 and ${t.providerFeeYellowcardPercent} between 0 and 10 and ${t.providerFeeFincraPercent} between 0 and 10`
         ),
-        check("platform_settings_limits_check", sql`${t.tier1DailyLimitUsd} >= 0 and ${t.tier2DailyLimitUsd} >= 0`),
+        check("platform_settings_limits_check", sql`${t.tier1DailyLimitNgn} >= 0 and ${t.tier2DailyLimitNgn} >= 0`),
     ]
 );
 

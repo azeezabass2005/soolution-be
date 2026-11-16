@@ -22,6 +22,13 @@
       "when": 1794858818187,
       "tag": "0002_fincra_ngn_payouts",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794860447674,
+      "tag": "0003_ngn_tier_limits",
+      "breakpoints": true
     }
   ]
 }

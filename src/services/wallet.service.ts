@@ -26,7 +26,7 @@ import {
     fincraPayoutInflightCode,
 } from "../common/constant";
 import { WALLET_LIMITS } from "../config/wallet-limits.config";
-import { BASE_WALLET_CURRENCY, WALLET_CURRENCIES, WalletCurrency, isWalletCurrency } from "../common/wallet.constants";
+import { BASE_WALLET_CURRENCY, OPENABLE_WALLET_CURRENCIES, WALLETS_UNAVAILABLE_CODE, WALLET_CURRENCIES, WalletCurrency, isWalletCurrency } from "../common/wallet.constants";
 import logger from "../utils/logger.utils";
 import config from "../config/env.config";
 import PinService from "./pin.service";
@@ -144,6 +144,9 @@ class WalletService {
             throw errorResponseMessage.createError(400, "Choose a currency we support for wallets", ErrorSeverity.LOW, {
                 supported: WALLET_CURRENCIES,
             });
+        }
+        if (code !== BASE_WALLET_CURRENCY && !OPENABLE_WALLET_CURRENCIES.includes(code)) {
+            throw errorResponseMessage.createError(403, "Other wallets aren't available yet.", ErrorSeverity.LOW, { code: WALLETS_UNAVAILABLE_CODE });
         }
         const existing = await walletRepository.findByUserAndCurrency(userId, code);
         if (existing) {

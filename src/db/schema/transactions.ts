@@ -46,7 +46,10 @@ export const transactions = pgTable(
         // FX snapshot captured when the transaction is created
         lockedRate: decimal("locked_rate"),
         /** USD value at creation; counts towards the user's daily tier limit */
+        /** Old USD valuation, no longer used */
         usdValue: decimal("usd_value"),
+        /** Value in NGN, counted against the owner's daily tier limit */
+        ngnValue: decimal("ngn_value"),
         lockedRateFromCurrency: text("locked_rate_from_currency"),
         lockedRateToCurrency: text("locked_rate_to_currency"),
         lockedRateAt: timestamptz("locked_rate_at"),

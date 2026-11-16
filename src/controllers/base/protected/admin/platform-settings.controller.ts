@@ -34,7 +34,7 @@ class AdminPlatformSettingsController extends BaseController {
     private async put(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            const { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitUsd } = req.body ?? {};
+            const { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn } = req.body ?? {};
 
             const inRange = (v: any, min: number, max: number) =>
                 typeof v === 'number' && isFinite(v) && v >= min && v <= max;
@@ -61,26 +61,26 @@ class AdminPlatformSettingsController extends BaseController {
                 }
             }
 
-            if (tierDailyLimitUsd !== undefined) {
-                if (typeof tierDailyLimitUsd !== 'object' || tierDailyLimitUsd === null) {
-                    return next(invalid('tierDailyLimitUsd must be an object'));
+            if (tierDailyLimitNgn !== undefined) {
+                if (typeof tierDailyLimitNgn !== 'object' || tierDailyLimitNgn === null) {
+                    return next(invalid('tierDailyLimitNgn must be an object'));
                 }
-                const { tier1, tier2 } = tierDailyLimitUsd;
-                const MAX_LIMIT = 100_000_000;
+                const { tier1, tier2 } = tierDailyLimitNgn;
+                const MAX_LIMIT = 100_000_000_000; // ₦100bn
                 if (tier1 !== undefined && !inRange(tier1, 0, MAX_LIMIT)) {
                     return next(invalid('Tier 1 daily limit must be a positive amount'));
                 }
                 if (tier2 !== undefined && !inRange(tier2, 0, MAX_LIMIT)) {
                     return next(invalid('Tier 2 daily limit must be a positive amount'));
                 }
-                const current = (await platformSettingsService.getSettings()).tierDailyLimitUsd;
+                const current = (await platformSettingsService.getSettings()).tierDailyLimitNgn;
                 if ((tier1 ?? current?.tier1) > (tier2 ?? current?.tier2)) {
                     return next(invalid('The Tier 1 limit cannot be higher than the Tier 2 limit'));
                 }
             }
 
             const updated = await platformSettingsService.updateSettings(
-                { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitUsd },
+                { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn },
                 user.id,
             );
             return this.sendSuccess(res, { settings: updated });

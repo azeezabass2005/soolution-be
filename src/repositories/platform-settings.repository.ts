@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { platformSettings } from "../db/schema";
 import type { PlatformSettings } from "../types/entities";
-import { DEFAULT_TIER_DAILY_LIMIT_USD } from "../common/tier.constants";
+import { DEFAULT_TIER_DAILY_LIMIT_NGN } from "../common/tier.constants";
 import { exec } from "./utils";
 
 type SettingsRow = typeof platformSettings.$inferSelect;
@@ -10,7 +10,7 @@ export interface PlatformSettingsUpdate {
     rateMarkupPercent?: number;
     additionalFeePercent?: number;
     providerBaseFeePercent?: { ogateway: number; yellowcard: number; fincra: number };
-    tierDailyLimitUsd?: { tier1: number; tier2: number };
+    tierDailyLimitNgn?: { tier1: number; tier2: number };
     updatedBy?: string;
 }
 
@@ -21,7 +21,7 @@ function toSettings(row: SettingsRow): PlatformSettings {
         rateMarkupPercent: row.rateMarkupPercent,
         additionalFeePercent: row.additionalFeePercent,
         providerBaseFeePercent: { ogateway: row.providerFeeOgatewayPercent, yellowcard: row.providerFeeYellowcardPercent, fincra: row.providerFeeFincraPercent },
-        tierDailyLimitUsd: { tier1: row.tier1DailyLimitUsd, tier2: row.tier2DailyLimitUsd },
+        tierDailyLimitNgn: { tier1: row.tier1DailyLimitNgn, tier2: row.tier2DailyLimitNgn },
         ...(row.updatedBy ? { updatedBy: row.updatedBy } : {}),
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
@@ -35,8 +35,8 @@ class PlatformSettingsRepository {
             .insert(platformSettings)
             .values({
                 kind: "singleton",
-                tier1DailyLimitUsd: DEFAULT_TIER_DAILY_LIMIT_USD.tier1,
-                tier2DailyLimitUsd: DEFAULT_TIER_DAILY_LIMIT_USD.tier2,
+                tier1DailyLimitNgn: DEFAULT_TIER_DAILY_LIMIT_NGN.tier1,
+                tier2DailyLimitNgn: DEFAULT_TIER_DAILY_LIMIT_NGN.tier2,
             })
             .onConflictDoNothing({ target: platformSettings.kind });
         const [row] = await exec().select().from(platformSettings).where(eq(platformSettings.kind, "singleton")).limit(1);
@@ -52,9 +52,9 @@ class PlatformSettingsRepository {
             values.providerFeeYellowcardPercent = patch.providerBaseFeePercent.yellowcard;
             values.providerFeeFincraPercent = patch.providerBaseFeePercent.fincra;
         }
-        if (patch.tierDailyLimitUsd) {
-            values.tier1DailyLimitUsd = patch.tierDailyLimitUsd.tier1;
-            values.tier2DailyLimitUsd = patch.tierDailyLimitUsd.tier2;
+        if (patch.tierDailyLimitNgn) {
+            values.tier1DailyLimitNgn = patch.tierDailyLimitNgn.tier1;
+            values.tier2DailyLimitNgn = patch.tierDailyLimitNgn.tier2;
         }
         if (patch.updatedBy !== undefined) values.updatedBy = patch.updatedBy;
         await this.getOrCreate();

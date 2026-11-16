@@ -293,6 +293,7 @@ describe("WalletService", () => {
         it("quotes, executes once, and books both currencies", async () => {
             const user = await createUser();
             await fundWallet(user.id, 50_000);
+            await walletService.getOrCreateWallet(user.id, "GHS"); // opened before wallets were switched off
 
             const quote = await fxExchangeService.quote(user.id, { fromCurrency: "NGN", toCurrency: "GHS", amount: 10_000 });
             expect(quote).toMatchObject({ fromAmount: 10_000, toAmount: 100, rate: 100 });
@@ -311,6 +312,7 @@ describe("WalletService", () => {
         it("rolls back (and releases the quote) when the balance is short", async () => {
             const user = await createUser();
             await fundWallet(user.id, 5000);
+            await walletService.getOrCreateWallet(user.id, "GHS");
             const quote = await fxExchangeService.quote(user.id, { fromCurrency: "NGN", toCurrency: "GHS", amount: 10_000 });
 
             await expect(fxExchangeService.execute(user.id, quote.id, TEST_PIN)).rejects.toMatchObject({ response_code: 400 });
@@ -320,6 +322,14 @@ describe("WalletService", () => {
             // The quote was not consumed: once funded, the same quote works
             await fundWallet(user.id, 5000);
             await expect(fxExchangeService.execute(user.id, quote.id, TEST_PIN)).resolves.toMatchObject({ toAmount: 100 });
+        });
+
+        it("won't open another wallet while only NGN is offered", async () => {
+            const user = await createUser();
+            await fundWallet(user.id, 50_000);
+            await expect(walletService.createWallet(user.id, "GHS")).rejects.toMatchObject({ response_code: 403 });
+            await expect(fxExchangeService.quote(user.id, { fromCurrency: "NGN", toCurrency: "GHS", amount: 10_000 })).rejects.toMatchObject({ response_code: 403 });
+            expect(await walletRepository.findByUserAndCurrency(user.id, "GHS")).toBeUndefined();
         });
     });
 });

@@ -139,7 +139,7 @@ export interface PlatformSettings {
     id: string;
     kind: "singleton";
     /** Daily transaction limits in USD per tier (Tier 3 is unlimited) */
-    tierDailyLimitUsd: { tier1: number; tier2: number };
+    tierDailyLimitNgn: { tier1: number; tier2: number };
     /** % the platform adds on top of the provider's FX rate */
     rateMarkupPercent: number;
     /** % the platform charges on top of the provider's base fee */

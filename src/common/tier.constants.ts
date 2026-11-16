@@ -1,7 +1,7 @@
 /**
  * Account tiers. Every user starts Unverified (no transactions); verifying
  * their BVN moves them to Tier 1, and they can apply for higher tiers.
- * Each tier has a daily transaction limit in USD.
+ * Each tier has a daily transaction limit in NGN.
  * Limits are admin-editable in platform settings; these are the defaults.
  */
 
@@ -26,10 +26,10 @@ export const TIER_NAME: Record<UserTier, string> = {
     3: "Institution",
 };
 
-/** Default daily limits in USD; Unverified accounts can't transact and Tier 3 is unlimited */
-export const DEFAULT_TIER_DAILY_LIMIT_USD = {
-    tier1: 2_000,
-    tier2: 100_000,
+/** Default daily limits in NGN; Unverified accounts can't transact and Tier 3 is unlimited */
+export const DEFAULT_TIER_DAILY_LIMIT_NGN = {
+    tier1: 5_000_000,
+    tier2: 150_000_000,
 };
 
 /**

@@ -1,7 +1,7 @@
 import platformSettingsRepository from "../repositories/platform-settings.repository";
 import type { PlatformSettings as IPlatformSettings } from "../types/entities";
 import logger from "../utils/logger.utils";
-import { DEFAULT_TIER_DAILY_LIMIT_USD, USER_TIER, UserTier } from "../common/tier.constants";
+import { DEFAULT_TIER_DAILY_LIMIT_NGN, USER_TIER, UserTier } from "../common/tier.constants";
 
 export type ProviderKey = 'ogateway' | 'yellowcard' | 'fincra';
 export type RateDirection = 'send' | 'receive';
@@ -50,7 +50,7 @@ class PlatformSettingsService {
             rateMarkupPercent: number;
             additionalFeePercent: number;
             providerBaseFeePercent: Partial<{ ogateway: number; yellowcard: number; fincra: number }>;
-            tierDailyLimitUsd: Partial<{ tier1: number; tier2: number }>;
+            tierDailyLimitNgn: Partial<{ tier1: number; tier2: number }>;
         }>,
         adminUserId: string,
     ): Promise<IPlatformSettings> {
@@ -71,11 +71,11 @@ class PlatformSettingsService {
                     : current.providerBaseFeePercent.fincra,
             };
         }
-        if (patch.tierDailyLimitUsd) {
+        if (patch.tierDailyLimitNgn) {
             const limits = this.tierLimits(current);
-            update.tierDailyLimitUsd = {
-                tier1: patch.tierDailyLimitUsd.tier1 ?? limits.tier1,
-                tier2: patch.tierDailyLimitUsd.tier2 ?? limits.tier2,
+            update.tierDailyLimitNgn = {
+                tier1: patch.tierDailyLimitNgn.tier1 ?? limits.tier1,
+                tier2: patch.tierDailyLimitNgn.tier2 ?? limits.tier2,
             };
         }
         update.updatedBy = adminUserId;
@@ -84,7 +84,7 @@ class PlatformSettingsService {
             rateMarkupPercent: current.rateMarkupPercent,
             additionalFeePercent: current.additionalFeePercent,
             providerBaseFeePercent: current.providerBaseFeePercent,
-            tierDailyLimitUsd: this.tierLimits(current),
+            tierDailyLimitNgn: this.tierLimits(current),
         };
 
         const updated = await platformSettingsRepository.update(update);
@@ -97,7 +97,7 @@ class PlatformSettingsService {
                 rateMarkupPercent: updated.rateMarkupPercent,
                 additionalFeePercent: updated.additionalFeePercent,
                 providerBaseFeePercent: updated.providerBaseFeePercent,
-                tierDailyLimitUsd: updated.tierDailyLimitUsd,
+                tierDailyLimitNgn: updated.tierDailyLimitNgn,
             },
         });
 
@@ -106,13 +106,13 @@ class PlatformSettingsService {
 
     private tierLimits(settings: IPlatformSettings) {
         return {
-            tier1: settings.tierDailyLimitUsd?.tier1 ?? DEFAULT_TIER_DAILY_LIMIT_USD.tier1,
-            tier2: settings.tierDailyLimitUsd?.tier2 ?? DEFAULT_TIER_DAILY_LIMIT_USD.tier2,
+            tier1: settings.tierDailyLimitNgn?.tier1 ?? DEFAULT_TIER_DAILY_LIMIT_NGN.tier1,
+            tier2: settings.tierDailyLimitNgn?.tier2 ?? DEFAULT_TIER_DAILY_LIMIT_NGN.tier2,
         };
     }
 
-    /** Daily limit in USD for a tier; null means unlimited (Tier 3), 0 for unverified accounts */
-    public async getTierDailyLimitUsd(tier: UserTier): Promise<number | null> {
+    /** Daily limit in NGN for a tier; null means unlimited (Tier 3), 0 for unverified accounts */
+    public async getTierDailyLimitNgn(tier: UserTier): Promise<number | null> {
         if (tier >= USER_TIER.INSTITUTION) return null;
         if (tier < USER_TIER.INDIVIDUAL) return 0;
         const limits = this.tierLimits(await this.getSettings());

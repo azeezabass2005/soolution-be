@@ -20,7 +20,7 @@ import {
     WALLET_TRANSACTION_TYPE,
     userWalletAccountCode,
 } from "../common/constant";
-import { BASE_WALLET_CURRENCY, FX_QUOTE_TTL_MS, fxPositionCode, isWalletCurrency } from "../common/wallet.constants";
+import { BASE_WALLET_CURRENCY, FX_QUOTE_TTL_MS, OPENABLE_WALLET_CURRENCIES, WALLETS_UNAVAILABLE_CODE, fxPositionCode, isWalletCurrency } from "../common/wallet.constants";
 import logger from "../utils/logger.utils";
 
 /** Smallest exchange, in NGN, so quotes aren't dominated by rounding */
@@ -61,6 +61,13 @@ class FxExchangeService {
         const toCurrency = String(request.toCurrency ?? "").toUpperCase();
         const amount = Number(request.amount);
         const side = request.side === "to" ? "to" : "from";
+        // Exchanging would open the other wallet: only for currencies users may hold now
+        for (const code of [fromCurrency, toCurrency]) {
+            if (code === BASE_WALLET_CURRENCY || OPENABLE_WALLET_CURRENCIES.includes(code)) continue;
+            if (!(await this.walletService.findWallet(userId, code))) {
+                throw errorResponseMessage.createError(403, "Exchanges aren't available yet.", ErrorSeverity.LOW, { code: WALLETS_UNAVAILABLE_CODE });
+            }
+        }
 
         if (!isWalletCurrency(fromCurrency) || !isWalletCurrency(toCurrency)) {
             throw errorResponseMessage.createError(400, "Choose two wallet currencies to exchange between", ErrorSeverity.LOW);

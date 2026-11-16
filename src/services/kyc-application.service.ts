@@ -76,7 +76,7 @@ const assertBvnVerified = (tier: UserTier) => {
     throw errorResponseMessage.createError(403, "Verify your identity first with your BVN, NIN and a quick selfie. It takes about 2 minutes and moves you to Tier 1.", ErrorSeverity.LOW, { code: IDENTITY_REQUIRED_CODE });
 };
 
-const formatUsd = (value: number) => `$${value.toLocaleString("en-US")}`;
+const formatNgn = (value: number) => `₦${value.toLocaleString("en-NG")}`;
 
 class KycApplicationService {
     private uploadService: FileUploadService;
@@ -688,8 +688,8 @@ class KycApplicationService {
         const label = application.type === "business" ? "KYB" : "KYC";
         const approved = status === KYC_STATUS.APPROVED;
         const tier = applicationTier(application);
-        const limit = await platformSettingsService.getTierDailyLimitUsd(tier).catch(() => undefined);
-        const limitText = limit === null ? "with no daily limit" : limit ? `with a daily limit of ${formatUsd(limit)}` : "with a higher daily limit";
+        const limit = await platformSettingsService.getTierDailyLimitNgn(tier).catch(() => undefined);
+        const limitText = limit === null ? "with no daily limit" : limit ? `with a daily limit of ${formatNgn(limit)}` : "with a higher daily limit";
         try {
             await this.notificationService.emailService.sendNotificationEmail(user.email, {
                 title: approved ? `🎉 Your ${label} has been approved` : `Action needed on your ${label} application`,
