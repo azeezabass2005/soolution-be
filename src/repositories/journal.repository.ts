@@ -145,6 +145,16 @@ class JournalRepository {
         return toPage(rows.map(toJournalEntry), Number(n), window);
     }
 
+    /** Whether `accountCode` has an entry for this provider reference */
+    async existsByExternalRef(accountCode: string, provider: string, externalId: string, tx?: Executor): Promise<boolean> {
+        const [row] = await exec(tx)
+            .select({ id: journalEntries.id })
+            .from(journalEntries)
+            .where(and(eq(journalEntries.accountCode, accountCode), eq(journalEntries.externalRefProvider, provider), eq(journalEntries.externalRefId, externalId)))
+            .limit(1);
+        return !!row;
+    }
+
     async countOpenCredits(accountCode: string, tx?: Executor): Promise<number> {
         const [row] = await exec(tx)
             .select({ n: count() })

@@ -37,11 +37,11 @@ class WalletTransactionRepository {
         return row ? stripNulls(row) : undefined;
     }
 
-    async findByPaystackReference(paystackReference: string, type?: WalletTransactionType): Promise<WalletTransaction | undefined> {
+    async findByPaystackReference(paystackReference: string, type?: WalletTransactionType, tx?: Executor): Promise<WalletTransaction | undefined> {
         const where = type
             ? and(eq(walletTransactions.paystackReference, paystackReference), eq(walletTransactions.type, type))
             : eq(walletTransactions.paystackReference, paystackReference);
-        const [row] = await exec().select().from(walletTransactions).where(where).orderBy(desc(walletTransactions.createdAt)).limit(1);
+        const [row] = await exec(tx).select().from(walletTransactions).where(where).orderBy(desc(walletTransactions.createdAt)).limit(1);
         return row ? stripNulls(row) : undefined;
     }
 

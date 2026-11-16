@@ -132,6 +132,24 @@ describe("WalletService", () => {
             expect(await accountBalance(SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN)).toBe(2500);
             expect(await accountBalance(NGN_CASH)).toBe(2500);
         });
+
+        it("holds unmatched money once when retries arrive at the same time", async () => {
+            await Promise.all([1, 2, 3].map(() => fincraWebhookService.handle(deposit("fc-orphan-race", "unknown-va", 700))));
+            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN)).toBe(700);
+            expect(await accountBalance(NGN_CASH)).toBe(700);
+        });
+
+        it("never credits a deposit that is already held in suspense", async () => {
+            const user = await userWithAccount("va-3");
+            const wallet = await walletRepository.findByUserAndCurrency(user.id, "NGN");
+            await walletRepository.update(wallet!.id, { status: "frozen" } as any);
+            await fincraWebhookService.handle(deposit("fc-held", "va-3", 900)); // held: wallet frozen
+            await walletRepository.update(wallet!.id, { status: "active" } as any);
+            await fincraWebhookService.handle(deposit("fc-held", "va-3", 900)); // Fincra's retry
+            expect(await walletBalance(user.id)).toBe(0);
+            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN)).toBe(900);
+            expect(await accountBalance(NGN_CASH)).toBe(900);
+        });
     });
 
     describe("withdrawals (Fincra NGN payouts)", () => {
@@ -177,6 +195,25 @@ describe("WalletService", () => {
             expect(await accountBalance(NGN_INFLIGHT)).toBe(0);
             const history = await walletService.getTransactionHistory(user.id, { page: 1, limit: 10, type: "reversal" });
             expect(history.data).toHaveLength(1);
+            expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
+        it("never refunds a paid withdrawal, nor settles a refunded one, whatever arrives later", async () => {
+            const user = await createUser();
+            await fundWallet(user.id, 10_000);
+            fincra.createPayout.mockResolvedValue({ reference: "FP_4", status: "processing" });
+            const paid = await walletService.initiateWithdrawal(user.id, 1000, "058", "0123456789", "Ada", TEST_PIN);
+            const refunded = await walletService.initiateWithdrawal(user.id, 2000, "058", "0123456789", "Ada", TEST_PIN);
+
+            const ev = (event: string, ref: string) => ({ event, data: { customerReference: ref, reference: "FP_4", status: event.split(".")[1] } });
+            await fincraWebhookService.handle(ev("payout.successful", paid.reference));
+            await fincraWebhookService.handle(ev("payout.failed", paid.reference));
+            await fincraWebhookService.handle(ev("payout.failed", refunded.reference));
+            await fincraWebhookService.handle(ev("payout.successful", refunded.reference));
+
+            expect((await walletTransactionRepository.findById(paid.id))?.status).toBe("successful");
+            expect((await walletTransactionRepository.findById(refunded.id))?.status).toBe("failed");
+            expect(await walletBalance(user.id)).toBe(9000);
             expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
         });
 

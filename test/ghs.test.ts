@@ -109,6 +109,20 @@ describe("GHS through Fincra", () => {
             expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
         });
 
+        it("never refunds a payout Fincra already reported as paid", async () => {
+            const user = await createUser();
+            await fundWallet(user.id, 50_000);
+            fincra.createPayout.mockResolvedValue({ reference: "FP_GH_4", status: "processing" });
+            const transaction: any = await send(user.id);
+
+            const event = (status: string) => ({ event: `payout.${status}`, data: { customerReference: transaction.reference, status } });
+            await fincraWebhookService.handle(event("successful"));
+            await Promise.all([fincraWebhookService.handle(event("failed")), fincraWebhookService.handle(event("successful"))]);
+            expect((await transactionRepository.findById(transaction.id))?.status).toBe("completed");
+            expect(await walletBalance(user.id)).toBe(39_850);
+            expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
         it("refunds at once when Fincra refuses the payout", async () => {
             const user = await createUser();
             await fundWallet(user.id, 50_000);
@@ -172,6 +186,19 @@ describe("GHS through Fincra", () => {
             expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(150);
             const status = await paymentLinkService.paymentStatus(link.slug, payment.reference);
             expect(status.status).toBe("completed");
+            expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
+        it("credits once however many charge webhooks and status checks race", async () => {
+            const { owner, payment } = await pay();
+            fincra.getCheckout.mockResolvedValue({ status: "success", amount: 100, currency: "GHS" });
+            const charge = { event: "charge.successful", data: { metadata: { reference: payment.reference } } };
+            await Promise.all([
+                ...[1, 2, 3, 4].map(() => fincraWebhookService.handle(charge)),
+                transactionRepository.findByReference(payment.reference).then((t) => transactionService.pollGhsStatus(t!.id)),
+            ]);
+            await fincraWebhookService.handle(charge);
+            expect(await walletBalance(owner.id)).toBe(9_850);
             expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
         });
 

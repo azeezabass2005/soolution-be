@@ -1,5 +1,5 @@
 import type { Executor } from "../db/client";
-import { withTransaction } from "../db/transaction";
+import { lockKey, withTransaction } from "../db/transaction";
 import { isUniqueViolation } from "../db/errors";
 import walletRepository from "../repositories/wallet.repository";
 import walletTransactionRepository from "../repositories/wallet-transaction.repository";
@@ -71,6 +71,14 @@ const splitName = (full: string) => {
 /** A Fincra error that means the request certainly didn't create a payout */
 const definitelyRejected = (error: unknown) =>
     error instanceof FincraError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429;
+
+
+/** A withdrawal in one of these has settled one way or the other and must not move again */
+const WITHDRAWAL_SETTLED = [
+    WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful",
+    WALLET_TRANSACTION_STATUS.FAILED as "failed",
+    WALLET_TRANSACTION_STATUS.REVERSED as "reversed",
+];
 
 class WalletService {
     private walletTransactionService: WalletTransactionService;
@@ -242,6 +250,12 @@ class WalletService {
             logger.warn("Fincra virtual account event for an unknown account", { externalId, status: account?.status });
             return false;
         }
+        const incoming = String(account?.status || "").toLowerCase();
+        if ((wallet.dvaStatus === "closed" || wallet.dvaStatus === "declined") && incoming !== "closed" && incoming !== "declined") {
+            // A late or retried event from before the account was shut
+            logger.warn("Fincra virtual account event after it was closed/declined; ignored", { walletId: wallet.id, externalId, incoming, current: wallet.dvaStatus });
+            return true;
+        }
         await this.applyVirtualAccount(wallet, account);
         return true;
     }
@@ -314,9 +328,12 @@ class WalletService {
         await this.ensureUserLedgerAccount(wallet.user, wallet);
         const target = wallet;
 
-        let walletTransaction: WalletTransaction;
+        let walletTransaction: WalletTransaction | null;
         try {
             walletTransaction = await withTransaction(async (tx) => {
+                // Same lock as the suspense hold: a deposit is either credited or held, never both
+                await lockKey(tx, `fincra-deposit:${reference}`);
+                if (await journalRepository.existsByExternalRef(SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN, FINCRA, reference, tx)) return null;
                 const ourReference = this.walletTransactionService.generateReference("FND");
 
                 // Money entered the platform at Fincra and we now owe the user
@@ -365,6 +382,10 @@ class WalletService {
             throw error;
         }
 
+        if (!walletTransaction) {
+            logger.info("Deposit already held in suspense; not credited again", { reference });
+            return null;
+        }
         logger.info("Wallet funded successfully", { walletId: target.id, amount, reference: walletTransaction.reference });
 
         // Best-effort: a logging failure does NOT block the funding result.
@@ -395,26 +416,29 @@ class WalletService {
      */
     private async recordSuspenseFunding(opts: { reference: string; amount: number; details: Record<string, unknown>; note?: string }): Promise<void> {
         try {
-            // Fincra retries webhooks: hold each deposit once
-            const held = await journalRepository.paginate(
-                { accountCode: SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN, externalProvider: FINCRA, externalId: opts.reference },
-                { page: 1, limit: 1 }
-            );
-            if (held.paginator.itemsCount > 0) {
+            // Fincra retries webhooks, sometimes two at once: the lock makes the
+            // second delivery wait and then find the first one's entry
+            const held = await withTransaction(async (tx) => {
+                await lockKey(tx, `fincra-deposit:${opts.reference}`);
+                if (await journalRepository.existsByExternalRef(SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN, FINCRA, opts.reference, tx)) return false;
+                await ledgerService.post({
+                    legs: [
+                        { accountCode: NGN_CASH, direction: JOURNAL_DIRECTION.DEBIT, amount: opts.amount },
+                        { accountCode: SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: opts.amount },
+                    ],
+                    source: JOURNAL_SOURCE.FUNDING,
+                    reference: opts.reference,
+                    description: `Unmatched Fincra deposit held in suspense${opts.note ? ` — ${opts.note}` : ""}`,
+                    externalRef: { provider: FINCRA, id: opts.reference },
+                    metadata: { ...opts.details, note: opts.note },
+                    tx,
+                });
+                return true;
+            });
+            if (!held) {
                 logger.info("Unmatched deposit already held in suspense", { reference: opts.reference });
                 return;
             }
-            await ledgerService.postStandalone({
-                legs: [
-                    { accountCode: NGN_CASH, direction: JOURNAL_DIRECTION.DEBIT, amount: opts.amount },
-                    { accountCode: SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: opts.amount },
-                ],
-                source: JOURNAL_SOURCE.FUNDING,
-                reference: opts.reference,
-                description: `Unmatched Fincra deposit held in suspense${opts.note ? ` — ${opts.note}` : ""}`,
-                externalRef: { provider: FINCRA, id: opts.reference },
-                metadata: { ...opts.details, note: opts.note },
-            });
 
             try {
                 await auditLogService.logAction(
@@ -434,11 +458,12 @@ class WalletService {
                 });
             }
         } catch (error) {
-            // A repeated webhook for the same unmatched deposit is refused here (same externalRef)
             logger.error("Failed to record suspense funding entry", {
                 reference: opts.reference,
                 error: error instanceof Error ? error.message : String(error),
             });
+            // Fail the webhook so Fincra delivers it again
+            throw error;
         }
     }
 
@@ -645,12 +670,17 @@ class WalletService {
             logger.info("Withdrawal already marked successful (idempotent)", { reference });
             return;
         }
+        if (walletTx.status === WALLET_TRANSACTION_STATUS.FAILED || walletTx.status === WALLET_TRANSACTION_STATUS.REVERSED) {
+            // Refunded already, yet Fincra says it paid: the user has the money twice. Needs a person.
+            logger.error("CRITICAL: Fincra reports a refunded withdrawal as paid; not settled, reconcile manually", { reference, transferCode, walletTransactionId: walletTx.id });
+            return;
+        }
 
         try {
             const settled = await withTransaction(async (tx) => {
                 const claimed = await walletTransactionRepository.claim(
                     walletTx.id,
-                    [WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful"],
+                    WITHDRAWAL_SETTLED,
                     { status: WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful" },
                     tx
                 );
@@ -718,6 +748,11 @@ class WalletService {
             logger.info("Withdrawal already marked failed/reversed (idempotent)", { reference });
             return;
         }
+        if (walletTx.status === WALLET_TRANSACTION_STATUS.SUCCESSFUL) {
+            // Paid already: refunding now would pay the user twice. Needs a person.
+            logger.error("CRITICAL: Fincra reports a paid withdrawal as failed; not refunded, reconcile manually", { reference, transferCode, reason, walletTransactionId: walletTx.id });
+            return;
+        }
 
         const reversalRef = this.walletTransactionService.generateReference("REV");
         let reversed: boolean;
@@ -725,7 +760,7 @@ class WalletService {
             reversed = await withTransaction(async (tx) => {
                 const claimed = await walletTransactionRepository.claim(
                     walletTx.id,
-                    [WALLET_TRANSACTION_STATUS.FAILED as "failed", WALLET_TRANSACTION_STATUS.REVERSED as "reversed"],
+                    WITHDRAWAL_SETTLED,
                     { status: WALLET_TRANSACTION_STATUS.FAILED as "failed", failureReason: withoutProviderName(reason, "Transfer failed") },
                     tx
                 );

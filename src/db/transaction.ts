@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { getDb, type Executor } from "./client";
 import { isRetryableTransactionError } from "./errors";
 import logger from "../utils/logger.utils";
@@ -34,4 +35,13 @@ export async function withTransaction<T>(fn: (tx: Executor) => Promise<T>, optio
 /** Uses the caller's transaction when given one, otherwise opens a new one */
 export async function inTransaction<T>(tx: Executor | undefined, fn: (tx: Executor) => Promise<T>): Promise<T> {
     return tx ? fn(tx) : withTransaction(fn);
+}
+
+/**
+ * Serialise work on one key (e.g. a provider's reference) until the
+ * transaction ends: a second caller with the same key waits, then sees what
+ * the first one wrote. For checks that no unique index can express.
+ */
+export async function lockKey(tx: Executor, key: string): Promise<void> {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${key}))`);
 }

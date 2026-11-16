@@ -3,6 +3,7 @@ import transactionDetailRepository from "../repositories/transaction-detail.repo
 import userRepository from "../repositories/user.repository";
 import walletTransactionRepository from "../repositories/wallet-transaction.repository";
 import { withTransaction } from "../db/transaction";
+import type { Executor } from "../db/client";
 import type { PageRequest, Paginated } from "../db/pagination";
 import type { Transaction, TransactionDetail, TransactionView } from "../types/entities";
 import type { DetailType, TransactionStatus } from "../types/enums";
@@ -1766,9 +1767,9 @@ class TransactionService {
      * Returns false when a webhook, status check or the sweeper got there
      * first, so the caller skips the wallet movement that goes with it.
      */
-    private claimStatus = async (transaction: Transaction, to: TransactionStatus, extra: { completedAt?: Date; failedAt?: Date } = {}) => {
+    private claimStatus = async (transaction: Transaction, to: TransactionStatus, extra: { completedAt?: Date; failedAt?: Date } = {}, tx?: Executor) => {
         if (!transactionStateMachine.canTransition(transaction.status, to)) return false;
-        const claimed = await transactionRepository.updateIfStatus(transaction.id, transaction.status, { status: to, ...extra });
+        const claimed = await transactionRepository.updateIfStatus(transaction.id, transaction.status, { status: to, ...extra }, tx);
         return !!claimed;
     };
 
@@ -2160,65 +2161,59 @@ class TransactionService {
      * locked rate, less the fee. The GHS sits in the platform's Fincra GHS
      * balance (CASH_FINCRA_GHS, booked at NGN value).
      */
-    private creditWalletFromGhsCollection = async (transaction: Transaction, detail: TransactionDetail) => {
+    private creditWalletFromGhsCollection = async (transaction: Transaction, detail: TransactionDetail, walletId: string, tx: Executor) => {
         const userId = transaction.user;
         const ngnAmount = detail.fromAmount || 0;
         const feeAmount = detail.feeAmount || 0;
         const grossNgn = Math.round((ngnAmount + feeAmount) * 100) / 100;
         if (!(ngnAmount > 0)) {
-            logger.error("CRITICAL: GHS collection has no NGN amount to credit", { transactionId: transaction.id });
-            return;
+            throw errorResponseMessage.createError(500, `GHS collection ${transaction.id} has no NGN amount to credit`, ErrorSeverity.CRITICAL);
         }
 
-        try {
-            const wallet = await this.walletService.getOrCreateWallet(userId);
-            await withTransaction(async (tx) => {
-                const credited = await this.walletService.creditBalance(wallet.id, ngnAmount, tx);
-                if (!credited) throw errorResponseMessage.createError(500, "Wallet not found for collection credit", ErrorSeverity.CRITICAL);
+        const credited = await this.walletService.creditBalance(walletId, ngnAmount, tx);
+        if (!credited) throw errorResponseMessage.createError(500, "Wallet not found for collection credit", ErrorSeverity.CRITICAL);
 
-                const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
-                    { accountCode: fincraCashCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: grossNgn },
-                    { accountCode: userWalletAccountCode(userId, wallet.currency), direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
-                ];
-                if (feeAmount > 0) legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
-                await ledgerService.post({
-                    legs,
-                    source: JOURNAL_SOURCE.FINCRA_COLLECT,
-                    reference: transaction.reference,
-                    description: `GHS received — ${transaction.amount} GHS → ₦${ngnAmount.toFixed(2)} (fee ₦${feeAmount.toFixed(2)})`,
-                    externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: transaction.reference },
-                    metadata: { fromAmount: transaction.amount, fromCurrency: 'GHS', feeAmount, grossNgn },
-                    tx,
-                });
+        const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
+            { accountCode: fincraCashCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: grossNgn },
+            { accountCode: userWalletAccountCode(userId, credited.currency), direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
+        ];
+        if (feeAmount > 0) legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
+        await ledgerService.post({
+            legs,
+            source: JOURNAL_SOURCE.FINCRA_COLLECT,
+            reference: transaction.reference,
+            description: `GHS received — ${transaction.amount} GHS → ₦${ngnAmount.toFixed(2)} (fee ₦${feeAmount.toFixed(2)})`,
+            externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: transaction.reference },
+            metadata: { fromAmount: transaction.amount, fromCurrency: 'GHS', feeAmount, grossNgn },
+            tx,
+        });
 
-                await walletTransactionRepository.create({
-                    wallet: wallet.id,
-                    user: userId,
-                    type: WALLET_TRANSACTION_TYPE.FUNDING as "funding",
-                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful",
-                    amount: ngnAmount,
-                    reference: this.walletTransactionService.generateReference('COL'),
-                    balanceBefore: Math.round((credited.balance - ngnAmount) * 100) / 100,
-                    balanceAfter: credited.balance,
-                    description: `Received ${transaction.amount} GHS → ₦${ngnAmount.toLocaleString()}`,
-                    currency: wallet.currency,
-                    paystackReference: transaction.reference,
-                    transactionId: transaction.id,
-                }, tx);
+        // The unique funding reference is a second guard against crediting twice
+        await walletTransactionRepository.create({
+            wallet: walletId,
+            user: userId,
+            type: WALLET_TRANSACTION_TYPE.FUNDING as "funding",
+            status: WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful",
+            amount: ngnAmount,
+            reference: this.walletTransactionService.generateReference('COL'),
+            balanceBefore: Math.round((credited.balance - ngnAmount) * 100) / 100,
+            balanceAfter: credited.balance,
+            description: `Received ${transaction.amount} GHS → ₦${ngnAmount.toLocaleString()}`,
+            currency: credited.currency,
+            paystackReference: transaction.reference,
+            transactionId: transaction.id,
+        }, tx);
 
-                await this.walletService.adjustLedgerBalance(wallet.id, ngnAmount, tx);
-            });
-            logger.info("Wallet credited from GHS collection", { userId, ngnAmount, ghsAmount: transaction.amount });
-        } catch (error: any) {
-            // The unique funding reference makes a second credit impossible; anything else needs ops
-            logger.error("CRITICAL: Failed to credit wallet from GHS collection", { userId, transactionId: transaction.id, ngnAmount, error: error?.message });
-        }
+        await this.walletService.adjustLedgerBalance(walletId, ngnAmount, tx);
     };
 
     /**
      * A payout's outcome, from Fincra's payout.* webhook or a status check.
-     * Only the caller that moves the transaction's status settles or refunds,
-     * so a webhook and a poll arriving together act once.
+     * Safe to call any number of times, in any order, concurrently: the
+     * status claim and the money movement it unlocks commit together, so a
+     * retried webhook, a poll and the sweeper act once between them, and a
+     * crash part-way leaves nothing behind for the retry to trip over. A
+     * payout that has settled one way is never moved the other way.
      */
     public handleFincraPayout = async (data: { customerReference?: string; reference?: string; status?: string; reason?: string; message?: string; [key: string]: unknown }) => {
         const reference = String(data.customerReference || '');
@@ -2229,37 +2224,63 @@ class TransactionService {
         if (!transaction) return false;
 
         const status = String(data.status || '').toLowerCase();
+        const succeeded = status === 'successful' || status === 'success';
+        const failed = status === 'failed' || status === 'cancelled' || status === 'reversed';
+
+        // Already settled: a retry agrees and changes nothing; a contradiction needs a person
+        if (transaction.status === TRANSACTION_STATUS.COMPLETED || transaction.status === TRANSACTION_STATUS.FAILED) {
+            const agrees = (transaction.status === TRANSACTION_STATUS.COMPLETED && succeeded) || (transaction.status === TRANSACTION_STATUS.FAILED && !succeeded);
+            if (!agrees && (succeeded || failed)) {
+                logger.error("CRITICAL: Fincra payout status contradicts a settled transaction; left as is, reconcile manually", {
+                    transactionId: transaction.id, reference, ours: transaction.status, fincra: status,
+                });
+            }
+            // A failure whose refund didn't finish (crash) is completed here; the refund is idempotent
+            if (transaction.status === TRANSACTION_STATUS.FAILED && failed) {
+                const walletTx = await walletTransactionRepository.findByPaystackReference(transaction.reference, WALLET_TRANSACTION_TYPE.TRANSFER as "transfer");
+                if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.FAILED && walletTx.status !== WALLET_TRANSACTION_STATUS.REVERSED) {
+                    await this.refundGhsPayout(walletTx.id, walletTx.reference, 'Payment failed');
+                }
+            }
+            return true;
+        }
+
         await transactionDetailRepository.update(detail.id, {
             providerStatus: status || detail.providerStatus,
             providerId: data.reference ? String(data.reference) : detail.providerId,
             providerPayload: data,
         });
-        const findWalletTx = () => walletTransactionRepository.findByPaystackReference(transaction.reference, WALLET_TRANSACTION_TYPE.TRANSFER as "transfer");
 
-        if (status === 'successful' || status === 'success') {
-            if (await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() })) {
+        if (succeeded) {
+            const settled = await withTransaction(async (tx) => {
+                if (!(await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() }, tx))) return false;
                 const convertedNgn = Math.round(((detail.fromAmount || 0) - (detail.feeAmount || 0)) * 100) / 100;
                 if (convertedNgn > 0) {
-                    try {
-                        await ledgerService.postStandalone({
-                            legs: [
-                                { accountCode: fincraPayoutInflightCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: convertedNgn },
-                                { accountCode: fincraCashCode('GHS'), direction: JOURNAL_DIRECTION.CREDIT, amount: convertedNgn },
-                            ],
-                            source: JOURNAL_SOURCE.FINCRA_SEND,
-                            reference: transaction.reference,
-                            description: `GHS payout settled by Fincra`,
-                            externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: transaction.reference },
-                        });
-                    } catch (error) {
-                        logger.error("GHS payout settlement journal post failed", { reference, error: (error as any)?.message });
-                    }
+                    await ledgerService.post({
+                        legs: [
+                            { accountCode: fincraPayoutInflightCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: convertedNgn },
+                            { accountCode: fincraCashCode('GHS'), direction: JOURNAL_DIRECTION.CREDIT, amount: convertedNgn },
+                        ],
+                        source: JOURNAL_SOURCE.FINCRA_SEND,
+                        reference: transaction.reference,
+                        description: `GHS payout settled by Fincra`,
+                        externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: transaction.reference },
+                        tx,
+                    });
                 }
-                const walletTx = await findWalletTx();
+                const walletTx = await walletTransactionRepository.findByPaystackReference(transaction.reference, WALLET_TRANSACTION_TYPE.TRANSFER as "transfer", tx);
                 if (walletTx) {
-                    await walletTransactionRepository.update(walletTx.id, { status: WALLET_TRANSACTION_STATUS.SUCCESSFUL });
-                    await this.walletService.adjustLedgerBalance(walletTx.wallet, -walletTx.amount);
+                    const claimed = await walletTransactionRepository.claim(
+                        walletTx.id,
+                        [WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful", WALLET_TRANSACTION_STATUS.FAILED as "failed", WALLET_TRANSACTION_STATUS.REVERSED as "reversed"],
+                        { status: WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful" },
+                        tx
+                    );
+                    if (claimed) await this.walletService.adjustLedgerBalance(claimed.wallet, -claimed.amount, tx);
                 }
+                return true;
+            });
+            if (settled) {
                 const user = await userRepository.findById(transaction.user);
                 if (user?.email) {
                     try {
@@ -2277,10 +2298,13 @@ class TransactionService {
             return true;
         }
 
-        if (status === 'failed' || status === 'cancelled' || status === 'reversed') {
-            await this.claimStatus(transaction, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date() });
-            const walletTx = await findWalletTx();
-            if (walletTx) await this.refundGhsPayout(walletTx.id, walletTx.reference, 'Payment failed');
+        if (failed) {
+            // Refund only after winning the move to FAILED, so a payout that
+            // completed in the meantime is never refunded
+            if (await this.claimStatus(transaction, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date() })) {
+                const walletTx = await walletTransactionRepository.findByPaystackReference(transaction.reference, WALLET_TRANSACTION_TYPE.TRANSFER as "transfer");
+                if (walletTx) await this.refundGhsPayout(walletTx.id, walletTx.reference, 'Payment failed');
+            }
             return true;
         }
 
@@ -2292,13 +2316,15 @@ class TransactionService {
      * A checkout's outcome (charge.successful webhook or a status check). The
      * status is always confirmed with Fincra by our reference, so only a
      * payment Fincra itself reports as successful, for the full amount,
-     * credits anything.
+     * credits anything. The claim and the credit commit together: retries
+     * and polls credit once, and a failure throws so the webhook is retried.
      */
     public handleFincraCheckout = async (reference: string) => {
         const detail = await transactionDetailRepository.findByProviderReference(reference);
         if (!detail || !detail.checkoutUrl) return false;
         const transaction = await transactionRepository.findById(detail.transactionId);
         if (!transaction) return false;
+        if (transaction.status === TRANSACTION_STATUS.COMPLETED) return true; // credited already
 
         let checkout: any;
         try {
@@ -2308,19 +2334,32 @@ class TransactionService {
             throw error;
         }
         const status = String(checkout?.status || '').toLowerCase();
-        await transactionDetailRepository.update(detail.id, { providerStatus: status || detail.providerStatus, providerPayload: checkout });
 
         if (status === 'success' || status === 'successful') {
             const paid = Number(checkout?.amount ?? checkout?.amountReceived ?? 0);
             if (String(checkout?.currency || 'GHS').toUpperCase() !== 'GHS' || paid + 0.001 < transaction.amount) {
                 logger.error("CRITICAL: GHS checkout paid a different amount; not credited", { reference, expected: transaction.amount, paid, currency: checkout?.currency });
+                await transactionDetailRepository.update(detail.id, { providerStatus: status, providerPayload: checkout });
                 return true;
             }
-            if (await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() })) {
-                await this.creditWalletFromGhsCollection(transaction, detail);
+            if (transaction.status === TRANSACTION_STATUS.FAILED) {
+                // Paid after we expired the link: money arrived, so a person decides
+                logger.error("CRITICAL: GHS payment link paid after it was marked failed; not credited, reconcile manually", { reference, transactionId: transaction.id });
+                await transactionDetailRepository.update(detail.id, { providerStatus: status, providerPayload: checkout });
+                return true;
             }
+            const wallet = await this.walletService.getOrCreateWallet(transaction.user);
+            const credited = await withTransaction(async (tx) => {
+                if (!(await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() }, tx))) return false;
+                await this.creditWalletFromGhsCollection(transaction, detail, wallet.id, tx);
+                await transactionDetailRepository.update(detail.id, { providerStatus: status, providerPayload: checkout }, tx);
+                return true;
+            });
+            if (credited) logger.info("Wallet credited from GHS collection", { userId: transaction.user, transactionId: transaction.id, ghsAmount: transaction.amount });
             return true;
         }
+
+        await transactionDetailRepository.update(detail.id, { providerStatus: status || detail.providerStatus, providerPayload: checkout });
         if (status === 'failed' || status === 'expired' || status === 'cancelled') {
             await this.claimStatus(transaction, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date() });
         }

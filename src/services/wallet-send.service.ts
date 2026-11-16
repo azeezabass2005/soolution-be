@@ -209,9 +209,11 @@ class WalletSendService {
     ): Promise<boolean> {
         try {
             const refunded = await withTransaction(async (tx) => {
+                // Never refund a send that already went through (a late or
+                // out-of-order provider event), nor one refunded before
                 const walletTx = await walletTransactionRepository.claim(
                     walletTransactionId,
-                    [WALLET_TRANSACTION_STATUS.FAILED as "failed", WALLET_TRANSACTION_STATUS.REVERSED as "reversed"],
+                    [WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful", WALLET_TRANSACTION_STATUS.FAILED as "failed", WALLET_TRANSACTION_STATUS.REVERSED as "reversed"],
                     { status: WALLET_TRANSACTION_STATUS.FAILED as "failed", failureReason: reason },
                     tx
                 );

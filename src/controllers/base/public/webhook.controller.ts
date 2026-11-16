@@ -136,7 +136,7 @@ class WebhookController extends BaseController {
      * Fincra webhook. The signature (HMAC-SHA512 with the webhook key, header
      * `signature`) is checked before anything happens; every event is stored
      * first so rejected and failed deliveries are visible to admins and can be
-     * replayed. Fincra gets its 200 at once and processing continues after.
+     * replayed.
      */
     private async fincraCallback(req: Request, res: Response, next: NextFunction): Promise<void> {
         const rawBody = (req as any).rawBody || JSON.stringify(req.body);
@@ -171,17 +171,22 @@ class WebhookController extends BaseController {
             return;
         }
 
-        res.status(200).json({ received: true });
         logger.info("Fincra webhook received", { event, reference: externalId });
 
+        // Processed before answering: a 200 means it's done, and a failure
+        // answers 500 so Fincra's auto-retry delivers it again. Every handler
+        // is idempotent, so retries (even concurrent ones) act once.
         try {
             const result = await fincraWebhookService.handle(req.body);
-            if (!eventId) return;
-            if (result.outcome === "ignored") await webhookEventService.markIgnored(eventId, result.note || "ignored");
-            else await webhookEventService.markProcessed(eventId);
+            if (eventId) {
+                if (result.outcome === "ignored") await webhookEventService.markIgnored(eventId, result.note || "ignored");
+                else await webhookEventService.markProcessed(eventId);
+            }
+            res.status(200).json({ received: true });
         } catch (error: any) {
             logger.error("Fincra webhook processing error", { event, error: error?.message || error });
             if (eventId) await webhookEventService.markFailed(eventId, error);
+            if (!res.headersSent) res.status(500).json({ received: false, error: "Processing failed; please retry" });
         }
     }
 }
