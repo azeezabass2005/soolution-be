@@ -74,7 +74,7 @@ class RoleMiddleware {
             }
 
             // Check if user is the owner
-            if (user._id.toString() !== resourceUserId) {
+            if (String(user.id) !== resourceUserId) {
                 return next(errorResponseMessage.createError(
                     403,
                     "You don't have permission to perform this action",

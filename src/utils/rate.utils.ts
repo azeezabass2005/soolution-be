@@ -17,10 +17,7 @@ class RateUtils {
      * @throws Error if rate doesn't exist or is inactive
      */
     public async validateExchangeRate(): Promise<void> {
-        const exchangeRate = await this.exchangeRateService.findOne({
-            from: this.fromCurrency,
-            to: this.toCurrency
-        });
+        const exchangeRate = await this.exchangeRateService.findPair(this.fromCurrency, this.toCurrency);
 
         if (!exchangeRate) {
             throw errorResponseMessage.resourceNotFound(`Exchange rate from ${this.fromCurrency} to ${this.toCurrency}`);
@@ -39,11 +36,7 @@ class RateUtils {
         // Validate exchange rate exists and is active
         await this.validateExchangeRate();
 
-        const exchangeRate = await this.exchangeRateService.findOne({
-            from: this.fromCurrency,
-            to: this.toCurrency,
-            isActive: true
-        });
+        const exchangeRate = await this.exchangeRateService.findPair(this.fromCurrency, this.toCurrency, { activeOnly: true });
 
         if(!exchangeRate) {
             throw errorResponseMessage.resourceNotFound(`Active exchange rate from ${this.fromCurrency} to ${this.toCurrency}`);
@@ -70,11 +63,7 @@ class RateUtils {
         // Example: KES→NGN rate = 240, so 120,000 NGN / 240 = 500 KES.
         await this.validateExchangeRate();
 
-        const forwardRate = await this.exchangeRateService.findOne({
-            from: this.fromCurrency,
-            to: this.toCurrency,
-            isActive: true
-        });
+        const forwardRate = await this.exchangeRateService.findPair(this.fromCurrency, this.toCurrency, { activeOnly: true });
 
         if (forwardRate) {
             // Formula: amount_in_toCurrency / forwardRate = amount_in_fromCurrency
@@ -83,11 +72,7 @@ class RateUtils {
         }
 
         // Fallback: use stored reverse rate with multiplication only when forward rate is absent.
-        const reverseRate = await this.exchangeRateService.findOne({
-            from: this.toCurrency,
-            to: this.fromCurrency,
-            isActive: true
-        });
+        const reverseRate = await this.exchangeRateService.findPair(this.toCurrency, this.fromCurrency, { activeOnly: true });
 
         if (reverseRate) {
             const converted = reverseRate.rate * amount;

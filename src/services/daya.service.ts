@@ -57,8 +57,8 @@ class DayaService {
 
     get mode(): "live" | "sandbox" | null {
         const key = config.DAYA_SECRET_KEY;
-        if (key.startsWith("sk_live_")) return "live";
-        if (key.startsWith("sk_sandbox_")) return "sandbox";
+        if (key.startsWith("daya_sk_live_")) return "live";
+        if (key.startsWith("daya_sk_test_")) return "sandbox";
         return null;
     }
 

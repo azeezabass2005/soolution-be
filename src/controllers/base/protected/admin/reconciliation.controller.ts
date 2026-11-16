@@ -2,8 +2,6 @@ import { Request, Response, NextFunction } from 'express';
 import BaseController from '../../base-controller';
 import RoleMiddleware from '../../../../middlewares/role.middleware';
 import reconciliationService from '../../../../services/reconciliation.service';
-import ReconciliationReport from '../../../../models/reconciliation-report.model';
-import LedgerAlert from '../../../../models/ledger-alert.model';
 import errorResponseMessage from '../../../../common/messages/error-response-message';
 
 class AdminReconciliationController extends BaseController {
@@ -27,15 +25,7 @@ class AdminReconciliationController extends BaseController {
         try {
             const page = parseInt(req.query.page as string) || 1;
             const limit = parseInt(req.query.limit as string) || 20;
-            // @ts-ignore — paginate plugin
-            const result = await ReconciliationReport.paginate({}, {
-                page, limit, sort: { startedAt: -1 },
-                customLabels: {
-                    totalDocs: 'itemsCount', docs: 'data', limit: 'perPage',
-                    page: 'currentPage', nextPage: 'next', prevPage: 'prev',
-                    totalPages: 'pageCount', pagingCounter: 'serialNumber', meta: 'paginator',
-                },
-            });
+            const result = await reconciliationService.listReports({ page, limit });
             return this.sendSuccess(res, result);
         } catch (error) {
             return next(error);
@@ -44,7 +34,7 @@ class AdminReconciliationController extends BaseController {
 
     private async getReport(req: Request, res: Response, next: NextFunction) {
         try {
-            const report = await ReconciliationReport.findById(req.params.id);
+            const report = await reconciliationService.getReport(req.params.id);
             if (!report) throw errorResponseMessage.resourceNotFound('Reconciliation report');
             return this.sendSuccess(res, { report });
         } catch (error) {
@@ -61,7 +51,7 @@ class AdminReconciliationController extends BaseController {
             const adminUser = res.locals.user;
             const report = await reconciliationService.runFullReconciliation({
                 runMode: 'on_demand',
-                runBy: adminUser?._id?.toString(),
+                runBy: adminUser?.id,
             });
             return this.sendSuccess(res, { report }, 201);
         } catch (error) {
@@ -71,23 +61,16 @@ class AdminReconciliationController extends BaseController {
 
     private async listAlerts(req: Request, res: Response, next: NextFunction) {
         try {
-            const filter: any = {};
-            if (typeof req.query.severity === 'string') filter.severity = req.query.severity;
-            if (typeof req.query.code === 'string') filter.code = req.query.code;
-            if (req.query.acknowledged === 'false') filter.acknowledgedAt = { $exists: false };
-            if (req.query.acknowledged === 'true') filter.acknowledgedAt = { $exists: true };
-
             const page = parseInt(req.query.page as string) || 1;
             const limit = parseInt(req.query.limit as string) || 25;
-            // @ts-ignore — paginate plugin
-            const result = await LedgerAlert.paginate(filter, {
-                page, limit, sort: { createdAt: -1 },
-                customLabels: {
-                    totalDocs: 'itemsCount', docs: 'data', limit: 'perPage',
-                    page: 'currentPage', nextPage: 'next', prevPage: 'prev',
-                    totalPages: 'pageCount', pagingCounter: 'serialNumber', meta: 'paginator',
+            const result = await reconciliationService.listAlerts(
+                {
+                    severity: typeof req.query.severity === 'string' ? req.query.severity : undefined,
+                    code: typeof req.query.code === 'string' ? req.query.code : undefined,
+                    acknowledged: req.query.acknowledged === 'true' ? true : req.query.acknowledged === 'false' ? false : undefined,
                 },
-            });
+                { page, limit }
+            );
             return this.sendSuccess(res, result);
         } catch (error) {
             return next(error);
@@ -97,11 +80,7 @@ class AdminReconciliationController extends BaseController {
     private async acknowledgeAlert(req: Request, res: Response, next: NextFunction) {
         try {
             const adminUser = res.locals.user;
-            const updated = await LedgerAlert.findByIdAndUpdate(
-                req.params.id,
-                { acknowledgedAt: new Date(), acknowledgedBy: adminUser?._id },
-                { new: true }
-            );
+            const updated = await reconciliationService.acknowledgeAlert(req.params.id, adminUser?.id);
             if (!updated) throw errorResponseMessage.resourceNotFound('Alert');
             return this.sendSuccess(res, { alert: updated });
         } catch (error) {

@@ -55,15 +55,15 @@ class WalletController extends BaseController {
     private async getWallet(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            let wallet = await this.walletService.getOrCreateWallet(user._id!);
+            let wallet = await this.walletService.getOrCreateWallet(user.id);
 
             // Lazy DVA provisioning — non-blocking: if it fails, still return the wallet
             if (!wallet.isDVAProvisioned) {
                 try {
-                    wallet = await this.walletService.provisionDVA(wallet._id as string, user);
+                    wallet = await this.walletService.provisionDVA(wallet.id, user);
                 } catch (dvaError: any) {
                     logger.error("DVA provisioning failed — returning wallet without DVA", {
-                        walletId: wallet._id,
+                        walletId: wallet.id,
                         error: dvaError?.message || dvaError,
                         response: dvaError?.response?.data,
                     });
@@ -79,7 +79,7 @@ class WalletController extends BaseController {
 
     private async listWallets(req: Request, res: Response, next: NextFunction) {
         try {
-            const wallets = await this.walletService.listWallets(String(res.locals.user._id));
+            const wallets = await this.walletService.listWallets(res.locals.user.id);
             return this.sendSuccess(res, { wallets });
         } catch (error) {
             return next(error);
@@ -96,9 +96,9 @@ class WalletController extends BaseController {
 
     private async createWallet(req: Request, res: Response, next: NextFunction) {
         try {
-            const wallet = await this.walletService.createWallet(String(res.locals.user._id), req.body?.currency);
+            const wallet = await this.walletService.createWallet(res.locals.user.id, req.body?.currency);
             return this.sendSuccess(res, {
-                wallet: { _id: wallet._id, currency: wallet.currency, balance: wallet.balance, ledgerBalance: wallet.ledgerBalance, status: wallet.status, createdAt: (wallet as any).createdAt },
+                wallet: { id: wallet.id, currency: wallet.currency, balance: wallet.balance, ledgerBalance: wallet.ledgerBalance, status: wallet.status, createdAt: wallet.createdAt },
                 message: `${wallet.currency} wallet created`,
             }, 201);
         } catch (error) {
@@ -108,7 +108,7 @@ class WalletController extends BaseController {
 
     private async quoteExchange(req: Request, res: Response, next: NextFunction) {
         try {
-            const quote = await fxExchangeService.quote(String(res.locals.user._id), req.body ?? {});
+            const quote = await fxExchangeService.quote(res.locals.user.id, req.body ?? {});
             return this.sendSuccess(res, { quote });
         } catch (error) {
             return next(error);
@@ -117,7 +117,7 @@ class WalletController extends BaseController {
 
     private async exchange(req: Request, res: Response, next: NextFunction) {
         try {
-            const result = await fxExchangeService.execute(String(res.locals.user._id), req.body?.quoteId, req.body?.pin);
+            const result = await fxExchangeService.execute(res.locals.user.id, req.body?.quoteId, req.body?.pin);
             return this.sendSuccess(res, { ...result, message: "Exchange complete" });
         } catch (error) {
             return next(error);
@@ -127,7 +127,7 @@ class WalletController extends BaseController {
     private async getBalance(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            const balance = await this.walletService.getWalletBalance(user._id!);
+            const balance = await this.walletService.getWalletBalance(user.id);
             return this.sendSuccess(res, balance);
         } catch (error) {
             return next(error);
@@ -137,7 +137,7 @@ class WalletController extends BaseController {
     private async setPin(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            await this.walletService.setPin(user._id!, req.body.pin);
+            await this.walletService.setPin(user.id, req.body.pin);
             return this.sendSuccess(res, { message: "PIN set successfully" });
         } catch (error) {
             return next(error);
@@ -147,7 +147,7 @@ class WalletController extends BaseController {
     private async changePin(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            await this.walletService.changePin(user._id!, req.body.oldPin, req.body.newPin);
+            await this.walletService.changePin(user.id, req.body.oldPin, req.body.newPin);
             return this.sendSuccess(res, { message: "PIN changed successfully" });
         } catch (error) {
             return next(error);
@@ -160,7 +160,7 @@ class WalletController extends BaseController {
             const { amount, bankCode, accountNumber, accountName, pin } = req.body;
 
             const transaction = await this.walletService.initiateWithdrawal(
-                user._id!,
+                user.id,
                 amount,
                 bankCode,
                 accountNumber,
@@ -204,7 +204,7 @@ class WalletController extends BaseController {
             const user = res.locals.user;
             const { page, limit, type, currency } = req.query;
 
-            const transactions = await this.walletService.getTransactionHistory(user._id!, {
+            const transactions = await this.walletService.getTransactionHistory(user.id, {
                 page: parseInt(page as string) || 1,
                 limit: parseInt(limit as string) || 10,
                 type: type as string | undefined,
@@ -220,7 +220,7 @@ class WalletController extends BaseController {
         try {
             const user = res.locals.user;
             const { transactionId } = req.params;
-            const result = await this.walletService.verifyAndUpdateTransfer(user._id!, transactionId);
+            const result = await this.walletService.verifyAndUpdateTransfer(user.id, transactionId);
             return this.sendSuccess(res, result);
         } catch (error) {
             return next(error);
@@ -230,13 +230,13 @@ class WalletController extends BaseController {
     private async provisionDVA(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            let wallet = await this.walletService.getOrCreateWallet(user._id!);
+            let wallet = await this.walletService.getOrCreateWallet(user.id);
 
             if (wallet.isDVAProvisioned) {
                 return this.sendSuccess(res, { wallet, message: "Account already provisioned" });
             }
 
-            wallet = await this.walletService.provisionDVA(wallet._id as string, user);
+            wallet = await this.walletService.provisionDVA(wallet.id, user);
             return this.sendSuccess(res, { wallet, message: "Account set up successfully" });
         } catch (error: any) {
             logger.error("DVA provisioning failed", {

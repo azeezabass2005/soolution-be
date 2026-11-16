@@ -15,7 +15,7 @@ class YellowCardTransactionController extends BaseController {
 
     constructor() {
         super();
-        this.transactionService = new TransactionService(["details", "user"]);
+        this.transactionService = new TransactionService();
         this.setupRoutes();
     }
 
@@ -70,9 +70,9 @@ class YellowCardTransactionController extends BaseController {
 
             const idempotencyKey = req.body.idempotencyKey || req.headers["idempotency-key"] as string;
 
-            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createYellowCardTransaction(
+            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createYellowCardTransaction(
                 { ...req.body, idempotencyKey },
-                user._id!,
+                user.id,
                 req.ip,
                 req.headers["user-agent"]
             ));
@@ -238,9 +238,9 @@ class YellowCardTransactionController extends BaseController {
             const user = res.locals.user;
             const idempotencyKey = req.body.idempotencyKey || req.headers["idempotency-key"] as string;
 
-            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createYellowCardCollectionTransaction(
+            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createYellowCardCollectionTransaction(
                 { ...req.body, idempotencyKey },
-                user._id!,
+                user.id,
             ));
 
             return this.sendSuccess(res, {

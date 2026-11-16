@@ -1,14 +1,9 @@
 import { Request, Response, NextFunction } from "express";
 import errorResponseMessage, { ErrorResponse, ErrorSeverity } from "../common/messages/error-response-message";
 import { ROLE_MAP } from "../common/constant";
-import TransactionService from "../services/transaction.service";
+import transactionRepository from "../repositories/transaction.repository";
 
 class TransactionMiddleware {
-    private transactionService: TransactionService;
-
-    constructor() {
-        this.transactionService = new TransactionService(['user']);
-    }
 
     /**
      * Verifies that the user owns the transaction or is an admin
@@ -39,18 +34,14 @@ class TransactionMiddleware {
             }
 
             // Fetch transaction to verify ownership
-            const transaction = await this.transactionService.findById(transactionId);
+            const transaction = await transactionRepository.findById(transactionId);
 
             if (!transaction) {
                 return next(errorResponseMessage.resourceNotFound("Transaction"));
             }
 
             // Check if user is the owner
-            const transactionUserId = typeof transaction.user === 'object' && transaction.user !== null
-                ? (transaction.user as any)._id?.toString() || (transaction.user as any).toString()
-                : transaction.user.toString();
-
-            if (user._id.toString() !== transactionUserId) {
+            if (String(user.id) !== transaction.user) {
                 return next(errorResponseMessage.createError(
                     403,
                     "You don't have permission to perform this action on this transaction",

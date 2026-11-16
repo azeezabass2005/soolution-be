@@ -2,7 +2,7 @@ import BaseController from "../base-controller";
 import TransactionService from "../../../services/transaction.service";
 import ogatewayService from "../../../services/ogateway.service";
 import { Request, Response, NextFunction } from "express";
-import mongoose from "mongoose";
+import { isUuid } from "../../../utils/id.utils";
 import {
     validateCreateOGatewayPayout,
     validateCreateOGatewayCollection,
@@ -21,7 +21,7 @@ class OGatewayTransactionController extends BaseController {
 
     constructor() {
         super();
-        this.transactionService = new TransactionService(["details", "user"]);
+        this.transactionService = new TransactionService();
         this.setupRoutes();
     }
 
@@ -57,9 +57,9 @@ class OGatewayTransactionController extends BaseController {
             const user = res.locals.user;
             const idempotencyKey =
                 req.body.idempotencyKey || (req.headers["idempotency-key"] as string);
-            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createOGatewayPayoutTransaction(
+            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createOGatewayPayoutTransaction(
                 { ...req.body, idempotencyKey },
-                user._id!,
+                user.id,
             ));
             return this.sendSuccess(
                 res,
@@ -79,9 +79,9 @@ class OGatewayTransactionController extends BaseController {
             const user = res.locals.user;
             const idempotencyKey =
                 req.body.idempotencyKey || (req.headers["idempotency-key"] as string);
-            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createOGatewayCollectionTransaction(
+            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createOGatewayCollectionTransaction(
                 { ...req.body, idempotencyKey },
-                user._id!,
+                user.id,
             ));
             return this.sendSuccess(
                 res,
@@ -101,7 +101,7 @@ class OGatewayTransactionController extends BaseController {
             const user = res.locals.user;
             const { transactionId } = req.params;
 
-            if (!mongoose.Types.ObjectId.isValid(transactionId)) {
+            if (!isUuid(transactionId)) {
                 return next(errorResponseMessage.createError(
                     400,
                     "Invalid transaction id",
@@ -109,13 +109,13 @@ class OGatewayTransactionController extends BaseController {
                 ));
             }
 
-            const transaction = await this.transactionService.findById(transactionId);
+            const transaction = await this.transactionService.findView(transactionId);
             if (!transaction) {
                 return next(errorResponseMessage.resourceNotFound("Transaction"));
             }
 
-            const ownerId = String((transaction.user as any)?._id || transaction.user);
-            if (ownerId !== String(user._id)) {
+            const ownerId = typeof transaction.user === "string" ? transaction.user : transaction.user.id;
+            if (ownerId !== String(user.id)) {
                 return next(errorResponseMessage.createError(
                     403,
                     "You are not allowed to poll this transaction",
@@ -133,14 +133,9 @@ class OGatewayTransactionController extends BaseController {
 
             const finalStatuses = [TRANSACTION_STATUS.COMPLETED, TRANSACTION_STATUS.FAILED];
             if (finalStatuses.includes(transaction.status as any)) {
-                const detail = await this.transactionService.transactionDetailsService.findOne({
-                    transactionId: transaction._id,
-                });
+                const detail = transaction.details;
                 return this.sendSuccess(res, {
-                    transaction: {
-                        ...transaction.toObject(),
-                        details: detail ? detail.toObject() : {},
-                    },
+                    transaction: { ...transaction, details: detail ?? {} },
                     ogStatus: detail?.ogStatus || transaction.status,
                     message: "Transaction is already final.",
                 });

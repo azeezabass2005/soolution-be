@@ -1,8 +1,10 @@
 import crypto from "crypto";
-import Transaction from "../models/transaction.model";
-import TransactionDetail from "../models/transaction-details.model";
+import transactionRepository from "../repositories/transaction.repository";
+import transactionDetailRepository from "../repositories/transaction-detail.repository";
+import { isUniqueViolation } from "../db/errors";
 import { TRANSACTION_STATUS } from "../common/constant";
 import logger from "../utils/logger.utils";
+import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const TOKEN_LENGTH = 22;
@@ -41,33 +43,31 @@ class ReceiptService {
      * user id and it is checked against the transaction.
      */
     public async getOrCreateToken(transactionId: string, userId: string): Promise<string> {
-        const tx = await Transaction.findById(transactionId);
+        const tx = await transactionRepository.findById(transactionId);
         if (!tx) {
-            throw Object.assign(new Error("Transaction not found"), { response_code: 404 });
+            throw errorResponseMessage.resourceNotFound("Transaction");
         }
         if (String(tx.user) !== String(userId)) {
             // Same shape as not-found so this can't be used as an oracle.
-            throw Object.assign(new Error("Transaction not found"), { response_code: 404 });
+            throw errorResponseMessage.resourceNotFound("Transaction");
         }
         if (tx.status !== TRANSACTION_STATUS.COMPLETED) {
-            throw Object.assign(
-                new Error("A receipt is only available once the transaction has completed"),
-                { response_code: 409 },
-            );
+            throw errorResponseMessage.createError(409, "A receipt is only available once the transaction has completed", ErrorSeverity.LOW);
         }
         if (tx.receiptToken) return tx.receiptToken;
 
         // Retry on the astronomically unlikely unique-index collision rather
-        // than failing the user's request.
+        // than failing the user's request. Two concurrent requests both get the
+        // token that was stored first.
         for (let attempt = 0; attempt < 3; attempt++) {
             const token = this.generateToken();
             try {
-                tx.receiptToken = token;
-                await tx.save();
-                logger.info("Receipt token minted", { transactionId, attempt });
-                return token;
+                const stored = await transactionRepository.setReceiptTokenIfMissing(tx.id, token);
+                if (!stored) throw new Error("Could not allocate a receipt token");
+                if (stored === token) logger.info("Receipt token minted", { transactionId, attempt });
+                return stored;
             } catch (error: any) {
-                if (error?.code === 11000 && attempt < 2) continue;
+                if (isUniqueViolation(error, "transactions_receipt_token_key") && attempt < 2) continue;
                 throw error;
             }
         }
@@ -110,11 +110,11 @@ class ReceiptService {
         if (!token || typeof token !== "string" || token.length !== TOKEN_LENGTH) {
             return { verified: false };
         }
-        const tx = await Transaction.findOne({ receiptToken: token });
+        const tx = await transactionRepository.findByReceiptToken(token);
         if (!tx || tx.status !== TRANSACTION_STATUS.COMPLETED) {
             return { verified: false };
         }
-        const detail: any = await TransactionDetail.findOne({ transactionId: tx._id });
+        const detail = await transactionDetailRepository.findByTransactionId(tx.id);
 
         return {
             verified: true,

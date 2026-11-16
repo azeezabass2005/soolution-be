@@ -1,8 +1,7 @@
 import { randomUUID } from "crypto";
-import { Types } from "mongoose";
-import User from "../models/user.model";
-import Transaction from "../models/transaction.model";
-import TransactionLimitLock from "../models/transaction-limit-lock.model";
+import userRepository from "../repositories/user.repository";
+import transactionRepository from "../repositories/transaction.repository";
+import transactionLimitLockRepository from "../repositories/transaction-limit-lock.repository";
 import yellowCardService from "./yellowcard.service";
 import platformSettingsService from "./platform-settings.service";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
@@ -20,7 +19,7 @@ const LOCK_WAIT_MS = 20 * 1000;
 const LOCK_POLL_MS = 150;
 
 /** Statuses that no longer count towards the daily limit */
-const RELEASED_STATUSES = [TRANSACTION_STATUS.FAILED, TRANSACTION_STATUS.CANCELLED];
+const RELEASED_STATUSES = [TRANSACTION_STATUS.FAILED, TRANSACTION_STATUS.CANCELLED] as ("failed" | "cancelled")[];
 
 /** Error code the frontend uses to offer "Upgrade tier" */
 export const TIER_LIMIT_CODE = "TIER_LIMIT_EXCEEDED";
@@ -116,18 +115,14 @@ class TransactionLimitService {
     }
 
     private async getTier(userId: string): Promise<UserTier> {
-        const user = await User.findById(userId).select("tier").lean();
+        const user = await userRepository.findById(userId);
         if (!user) throw errorResponseMessage.resourceNotFound("User");
         return isUserTier(user.tier) ? user.tier : USER_TIER.UNVERIFIED;
     }
 
     /** USD already used today (transactions created before usdValue was stored are valued now) */
     async getUsedTodayUsd(userId: string): Promise<number> {
-        const transactions = await Transaction.find({
-            user: new Types.ObjectId(userId),
-            createdAt: { $gte: this.dayStart() },
-            status: { $nin: RELEASED_STATUSES },
-        }).select("usdValue amount currency").lean();
+        const transactions = await transactionRepository.listForLimit(userId, this.dayStart(), RELEASED_STATUSES);
 
         let used = 0;
         for (const transaction of transactions) {
@@ -234,25 +229,14 @@ class TransactionLimitService {
         try {
             return await fn();
         } finally {
-            await TransactionLimitLock.deleteOne({ _id: key, token }).catch((error) =>
+            await transactionLimitLockRepository.release(key, token).catch((error) =>
                 logger.warn("Transaction limit: failed to release lock", { userId: key, error: error?.message }));
         }
     }
 
+    /** Takes the lock if it's free or its holder's time ran out (one atomic upsert) */
     private async tryLock(key: string, token: string): Promise<boolean> {
-        const now = new Date();
-        try {
-            // Takes the lock if it's free or expired; an unexpired lock makes the upsert collide
-            await TransactionLimitLock.findOneAndUpdate(
-                { _id: key, expiresAt: { $lte: now } },
-                { $set: { token, expiresAt: new Date(now.getTime() + LOCK_TTL_MS) } },
-                { upsert: true }
-            );
-            return true;
-        } catch (error: any) {
-            if (error?.code === 11000) return false;
-            throw error;
-        }
+        return transactionLimitLockRepository.tryAcquire(key, token, LOCK_TTL_MS);
     }
 }
 

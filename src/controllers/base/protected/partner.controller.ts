@@ -1,7 +1,6 @@
 import BaseController from "../base-controller";
 import PartnerService from "../../../services/partner.service";
 import {Request, Response, NextFunction} from "express";
-import {IPartner} from "../../../models/interface";
 import errorResponseMessage from "../../../common/messages/error-response-message";
 import {MulterMiddleware} from "../../../middlewares/multer.middleware";
 import {validateCreatePartner, validateUpdatePartner} from "../../../validators/z-partners";
@@ -40,31 +39,19 @@ class PartnerController extends BaseController {
     private async getPartners(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const { page, limit, searchTerm, ...otherQueries } = req.query;
-            const user = res.locals;
+            const user = res.locals.user;
 
-            if (otherQueries.status && user?.role === ROLE_MAP.USER) {
-                otherQueries.status = 'active';
+            // Only known filters reach the database
+            const filter = this.partnerService.toFilter(otherQueries);
+            // Customers only ever see active partners when filtering by status
+            if (filter.status && user?.role === ROLE_MAP.USER) {
+                filter.status = 'active';
             }
 
-            let partners;
-
-            if (searchTerm) {
-                partners = await this.partnerService.searchPartners(
-                    searchTerm.toString(),
-                    otherQueries,
-                    {
-                        page: parseInt(page as string) || 1,
-                        limit: parseInt(limit as string) || 10,
-                        useTextSearch: false
-                    }
-                );
-            } else {
-                partners = await this.partnerService.paginate(otherQueries, {
-                    page: parseInt(page as string) || 1,
-                    limit: parseInt(limit as string) || 10,
-                    sort: { createdAt: -1 }
-                });
-            }
+            const pageRequest = { page: parseInt(page as string) || 1, limit: parseInt(limit as string) || 10 };
+            const partners = typeof searchTerm === 'string' && searchTerm
+                ? await this.partnerService.searchPartners(searchTerm, filter, pageRequest)
+                : await this.partnerService.list(filter, pageRequest);
 
             return this.sendSuccess(res, partners)
 
@@ -79,7 +66,7 @@ class PartnerController extends BaseController {
      */
     private async createPartner(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const partnerData: Partial<IPartner> = req.body;
+            const partnerData: Record<string, any> = req.body;
 
             if(!req.file) {
                  next(errorResponseMessage.payloadIncorrect("Profile Image is required"));

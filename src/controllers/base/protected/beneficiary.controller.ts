@@ -42,7 +42,7 @@ class BeneficiaryController extends BaseController {
     private async markUsed(req: Request, res: Response, next: NextFunction) {
         try {
             const beneficiary = await beneficiaryService.getOwned(res.locals.userId, req.params.id);
-            await beneficiaryService.markUsed(String(beneficiary._id));
+            await beneficiaryService.markUsed(beneficiary.id);
             this.sendSuccess(res, { message: "Updated" });
         } catch (error) {
             next(error);

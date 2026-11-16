@@ -1,4 +1,5 @@
-import Account, { AccountType } from '../models/account.model';
+import accountRepository from '../repositories/account.repository';
+import type { AccountType } from '../types/enums';
 import {
     ACCOUNT_TYPE,
     SYSTEM_ACCOUNT_CODES,
@@ -169,17 +170,9 @@ export async function bootstrapSystemAccounts(): Promise<{ created: number; exis
     let existing = 0;
 
     for (const spec of specs) {
-        const existingDoc = await Account.findOne({ code: spec.code });
-        if (existingDoc) {
-            existing += 1;
-            continue;
-        }
-        await Account.create({
-            ...spec,
-            isSystem: true,
-            balance: 0,
-        });
-        created += 1;
+        const wasCreated = await accountRepository.createIfMissing({ ...spec, isSystem: true, balance: 0 });
+        if (wasCreated) created += 1;
+        else existing += 1;
     }
 
     logger.info('System ledger accounts bootstrapped', {

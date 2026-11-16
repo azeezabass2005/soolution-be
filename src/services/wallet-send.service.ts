@@ -1,8 +1,10 @@
 import crypto from "crypto";
-import mongoose, { ClientSession } from "mongoose";
-import Wallet from "../models/wallet.model";
-import WalletTransaction from "../models/wallet-transaction.model";
-import { IWallet, IWalletTransaction } from "../models/interface";
+import type { Executor } from "../db/client";
+import { withTransaction } from "../db/transaction";
+import walletRepository from "../repositories/wallet.repository";
+import walletTransactionRepository from "../repositories/wallet-transaction.repository";
+import type { Wallet, WalletTransaction } from "../types/entities";
+import type { JournalSource } from "../types/enums";
 import ledgerService, { JournalLeg } from "./ledger.service";
 import WalletService from "./wallet.service";
 import WalletTransactionService from "./wallet-transaction.service";
@@ -16,8 +18,7 @@ import {
     WALLET_TRANSACTION_TYPE,
     userWalletAccountCode,
 } from "../common/constant";
-import { BASE_WALLET_CURRENCY, fxPositionCode, isWalletCurrency, manualPayoutPendingCode } from "../common/wallet.constants";
-import { JournalSource } from "../models/journal-entry.model";
+import { BASE_WALLET_CURRENCY, fxPositionCode, isWalletCurrency, manualPayoutPendingCode, type WalletCurrency } from "../common/wallet.constants";
 import logger from "../utils/logger.utils";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -49,8 +50,8 @@ export interface SendCharge {
 }
 
 export interface SendChargeResult {
-    wallet: IWallet;
-    walletTransaction: IWalletTransaction;
+    wallet: Wallet;
+    walletTransaction: WalletTransaction;
     /** Total taken from the wallet, in its currency */
     walletDebit: number;
     /** Fee part of walletDebit, in the wallet's currency */
@@ -82,11 +83,7 @@ class WalletSendService {
         if (requested === undefined || requested === null || requested === "") return BASE_WALLET_CURRENCY;
         const currency = String(requested).toUpperCase();
         if (currency !== BASE_WALLET_CURRENCY && currency !== destinationCurrency) {
-            throw errorResponseMessage.createError(
-                400,
-                `Pay from your NGN wallet or your ${destinationCurrency} wallet`,
-                ErrorSeverity.LOW
-            );
+            throw errorResponseMessage.createError(400, `Pay from your NGN wallet or your ${destinationCurrency} wallet`, ErrorSeverity.LOW);
         }
         if (!isWalletCurrency(currency)) {
             throw errorResponseMessage.createError(400, `${currency} wallets aren't supported`, ErrorSeverity.LOW);
@@ -100,8 +97,8 @@ class WalletSendService {
     }
 
     /** Throws a clear error unless the wallet can cover the charge (call before side effects) */
-    async assertCanPay(userId: string, walletCurrency: string, total: number): Promise<IWallet> {
-        const wallet = await this.walletService.findOne({ user: userId, currency: walletCurrency });
+    async assertCanPay(userId: string, walletCurrency: string, total: number, tx?: Executor): Promise<Wallet> {
+        const wallet = await this.walletService.findWallet(userId, walletCurrency, tx);
         if (!wallet) {
             throw errorResponseMessage.createError(
                 400,
@@ -132,48 +129,40 @@ class WalletSendService {
             throw errorResponseMessage.createError(500, "A send can only be paid from NGN or its destination wallet", ErrorSeverity.CRITICAL);
         }
         const walletFee = fromBase ? params.ngnFee : this.walletFeeFor(params.destinationAmount, params.feePercent);
-        const walletDebit = fromBase
-            ? round2(params.ngnAmount + params.ngnFee)
-            : round2(params.destinationAmount + walletFee);
+        const walletDebit = fromBase ? round2(params.ngnAmount + params.ngnFee) : round2(params.destinationAmount + walletFee);
 
         const wallet = await this.assertCanPay(params.userId, params.walletCurrency, walletDebit);
-        await this.walletService.getOrCreateWallet(params.userId, params.walletCurrency as any);
+        await this.walletService.getOrCreateWallet(params.userId, params.walletCurrency as WalletCurrency);
 
-        const session = await mongoose.startSession();
-        session.startTransaction();
-        try {
-            const updated = (await this.walletService.debitBalance(String(wallet._id), walletDebit, session)) as unknown as IWallet;
-            const txGroupId = crypto.randomUUID();
-            await this.postCharge(params, walletDebit, txGroupId, session);
+        return withTransaction(async (tx) => {
+            const updated = await this.walletService.debitBalance(wallet.id, walletDebit, tx);
+            await this.postCharge(params, walletDebit, crypto.randomUUID(), tx);
 
-            const [walletTransaction] = await WalletTransaction.create([{
-                wallet: wallet._id,
-                user: params.userId,
-                type: WALLET_TRANSACTION_TYPE.TRANSFER,
-                status: WALLET_TRANSACTION_STATUS.PENDING,
-                amount: walletDebit,
-                currency: params.walletCurrency,
-                reference: this.walletTransactionService.generateReference("TRF"),
-                balanceBefore: round2(updated.balance + walletDebit),
-                balanceAfter: updated.balance,
-                description: params.walletTxDescription,
-                sendNgnAmount: params.ngnAmount,
-                sendNgnFee: params.ngnFee,
-                sendFee: walletFee,
-                providerAccountCode: params.providerAccountCode,
-            }], { session });
+            const walletTransaction = await walletTransactionRepository.create(
+                {
+                    wallet: wallet.id,
+                    user: params.userId,
+                    type: WALLET_TRANSACTION_TYPE.TRANSFER,
+                    status: WALLET_TRANSACTION_STATUS.PENDING,
+                    amount: walletDebit,
+                    currency: params.walletCurrency,
+                    reference: this.walletTransactionService.generateReference("TRF"),
+                    balanceBefore: round2(updated.balance + walletDebit),
+                    balanceAfter: updated.balance,
+                    description: params.walletTxDescription,
+                    sendNgnAmount: params.ngnAmount,
+                    sendNgnFee: params.ngnFee,
+                    sendFee: walletFee,
+                    providerAccountCode: params.providerAccountCode,
+                },
+                tx
+            );
 
-            await session.commitTransaction();
             return { wallet: updated, walletTransaction, walletDebit, walletFee };
-        } catch (error) {
-            if (session.inTransaction()) await session.abortTransaction();
-            throw error;
-        } finally {
-            session.endSession();
-        }
+        });
     }
 
-    private async postCharge(params: SendCharge, walletDebit: number, txGroupId: string, session: ClientSession) {
+    private async postCharge(params: SendCharge, walletDebit: number, txGroupId: string, tx: Executor) {
         const { userId, walletCurrency, ngnAmount, ngnFee, providerAccountCode } = params;
         const common = {
             source: params.source,
@@ -182,7 +171,7 @@ class WalletSendService {
             externalRef: params.externalRef,
             metadata: { ...params.metadata, walletCurrency, walletDebit },
             txGroupId,
-            session,
+            tx,
         };
         const providerLegs: JournalLeg[] = [{ accountCode: providerAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount }];
         if (ngnFee > 0) providerLegs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnFee });
@@ -210,98 +199,94 @@ class WalletSendService {
 
     /**
      * Return a failed send's money to the wallet that paid for it. Idempotent:
-     * the wallet transaction is claimed in the same session, so a webhook and a
-     * poll racing each other refund once. Rows created before multi-currency
-     * wallets don't store the NGN split, so callers pass the legacy fee and
-     * provider account.
+     * the wallet transaction is claimed in the same database transaction, so a
+     * webhook and a poll racing each other refund once.
      */
     async refund(
         walletTransactionId: string,
         reason: string,
         legacy: { feeAmount?: number; providerAccountCode: string; externalRef?: { provider: string; id: string } }
     ): Promise<boolean> {
-        const session = await mongoose.startSession();
-        session.startTransaction();
         try {
-            const walletTx = await WalletTransaction.findOneAndUpdate(
-                {
-                    _id: walletTransactionId,
-                    status: { $nin: [WALLET_TRANSACTION_STATUS.FAILED, WALLET_TRANSACTION_STATUS.REVERSED] },
-                },
-                { $set: { status: WALLET_TRANSACTION_STATUS.FAILED, failureReason: reason } },
-                { new: true, session }
-            );
-            if (!walletTx) {
-                await session.abortTransaction();
+            const refunded = await withTransaction(async (tx) => {
+                const walletTx = await walletTransactionRepository.claim(
+                    walletTransactionId,
+                    [WALLET_TRANSACTION_STATUS.FAILED as "failed", WALLET_TRANSACTION_STATUS.REVERSED as "reversed"],
+                    { status: WALLET_TRANSACTION_STATUS.FAILED as "failed", failureReason: reason },
+                    tx
+                );
+                if (!walletTx) return false;
+
+                const userId = walletTx.user;
+                const currency = walletTx.currency || BASE_WALLET_CURRENCY;
+                const amount = walletTx.amount;
+                const ngnFee = walletTx.sendNgnFee ?? legacy.feeAmount ?? 0;
+                const ngnAmount = walletTx.sendNgnAmount ?? round2(amount - ngnFee);
+                const providerAccountCode = walletTx.providerAccountCode || legacy.providerAccountCode;
+                const common = {
+                    source: JOURNAL_SOURCE.REVERSAL,
+                    reference: walletTx.reference,
+                    description: `Reversal — send refund (${reason})`,
+                    externalRef: legacy.externalRef,
+                    metadata: { reverses: walletTx.reference, reason, walletCurrency: currency },
+                    txGroupId: crypto.randomUUID(),
+                    tx,
+                };
+                const providerLegs: JournalLeg[] = [{ accountCode: providerAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount: ngnAmount }];
+                if (ngnFee > 0) providerLegs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: ngnFee });
+
+                if (currency === BASE_WALLET_CURRENCY) {
+                    await ledgerService.post({
+                        ...common,
+                        legs: [...providerLegs, { accountCode: userWalletAccountCode(userId, currency), direction: JOURNAL_DIRECTION.CREDIT, amount }],
+                    });
+                } else {
+                    await ledgerService.post({
+                        ...common,
+                        legs: [...providerLegs, { accountCode: fxPositionCode(BASE_WALLET_CURRENCY), direction: JOURNAL_DIRECTION.CREDIT, amount: round2(ngnAmount + ngnFee) }],
+                    });
+                    await ledgerService.post({
+                        ...common,
+                        perCurrency: true,
+                        legs: [
+                            { accountCode: fxPositionCode(currency), direction: JOURNAL_DIRECTION.DEBIT, amount },
+                            { accountCode: userWalletAccountCode(userId, currency), direction: JOURNAL_DIRECTION.CREDIT, amount },
+                        ],
+                    });
+                }
+
+                const wallet = await walletRepository.credit(walletTx.wallet, amount, tx);
+                if (!wallet) throw errorResponseMessage.createError(500, "Wallet not found for refund", ErrorSeverity.CRITICAL);
+
+                await walletTransactionRepository.create(
+                    {
+                        wallet: walletTx.wallet,
+                        user: walletTx.user,
+                        type: WALLET_TRANSACTION_TYPE.REVERSAL,
+                        status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                        amount,
+                        currency,
+                        reference: this.walletTransactionService.generateReference("REV"),
+                        balanceBefore: round2(wallet.balance - amount),
+                        balanceAfter: wallet.balance,
+                        description: `Reversal: ${reason} (${walletTx.reference})`,
+                        reversedTransactionId: walletTx.id,
+                        transactionId: walletTx.transactionId,
+                    },
+                    tx
+                );
+                return true;
+            });
+
+            if (!refunded) {
                 logger.info("Send refund skipped: already refunded or not found", { walletTransactionId });
                 return false;
             }
-
-            const userId = String(walletTx.user);
-            const currency = walletTx.currency || BASE_WALLET_CURRENCY;
-            const amount = walletTx.amount;
-            const ngnFee = walletTx.sendNgnFee ?? legacy.feeAmount ?? 0;
-            const ngnAmount = walletTx.sendNgnAmount ?? round2(amount - ngnFee);
-            const providerAccountCode = walletTx.providerAccountCode || legacy.providerAccountCode;
-            const common = {
-                source: JOURNAL_SOURCE.REVERSAL,
-                reference: walletTx.reference,
-                description: `Reversal — send refund (${reason})`,
-                externalRef: legacy.externalRef,
-                metadata: { reverses: walletTx.reference, reason, walletCurrency: currency },
-                txGroupId: crypto.randomUUID(),
-                session,
-            };
-            const providerLegs: JournalLeg[] = [{ accountCode: providerAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount: ngnAmount }];
-            if (ngnFee > 0) providerLegs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: ngnFee });
-
-            if (currency === BASE_WALLET_CURRENCY) {
-                await ledgerService.post({
-                    ...common,
-                    legs: [...providerLegs, { accountCode: userWalletAccountCode(userId, currency), direction: JOURNAL_DIRECTION.CREDIT, amount }],
-                });
-            } else {
-                await ledgerService.post({
-                    ...common,
-                    legs: [...providerLegs, { accountCode: fxPositionCode(BASE_WALLET_CURRENCY), direction: JOURNAL_DIRECTION.CREDIT, amount: round2(ngnAmount + ngnFee) }],
-                });
-                await ledgerService.post({
-                    ...common,
-                    perCurrency: true,
-                    legs: [
-                        { accountCode: fxPositionCode(currency), direction: JOURNAL_DIRECTION.DEBIT, amount },
-                        { accountCode: userWalletAccountCode(userId, currency), direction: JOURNAL_DIRECTION.CREDIT, amount },
-                    ],
-                });
-            }
-
-            const wallet = await Wallet.findOneAndUpdate({ _id: walletTx.wallet }, { $inc: { balance: amount } }, { new: true, session });
-            if (!wallet) throw errorResponseMessage.createError(500, "Wallet not found for refund", ErrorSeverity.CRITICAL);
-
-            await WalletTransaction.create([{
-                wallet: walletTx.wallet,
-                user: walletTx.user,
-                type: WALLET_TRANSACTION_TYPE.REVERSAL,
-                status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
-                amount,
-                currency,
-                reference: this.walletTransactionService.generateReference("REV"),
-                balanceBefore: round2(wallet.balance - amount),
-                balanceAfter: wallet.balance,
-                description: `Reversal: ${reason} (${walletTx.reference})`,
-                reversedTransactionId: walletTx._id,
-                transactionId: walletTx.transactionId,
-            }], { session });
-
-            await session.commitTransaction();
-            logger.info("Send refunded to wallet", { walletTransactionId, currency, amount, reason });
+            logger.info("Send refunded to wallet", { walletTransactionId, reason });
             return true;
         } catch (error: any) {
-            if (session.inTransaction()) await session.abortTransaction();
             logger.error("CRITICAL: send refund failed", { walletTransactionId, reason, error: error?.message });
             throw error;
-        } finally {
-            session.endSession();
         }
     }
 
@@ -310,16 +295,16 @@ class WalletSendService {
     /**
      * Take a manual send's amount from the matching currency wallet and hold
      * it in MANUAL_PAYOUT_PENDING_{CUR} until ops completes or rejects it.
-     * Pass the caller's session so the debit commits with the transaction.
+     * Runs in the caller's transaction so the debit commits with the transaction.
      */
     async holdForManualPayout(
         params: { userId: string; currency: string; amount: number; transactionId: string; reference: string; description: string },
-        session: ClientSession
-    ): Promise<IWalletTransaction> {
+        tx: Executor
+    ): Promise<WalletTransaction> {
         const { userId, currency, amount } = params;
-        const wallet = await this.assertCanPay(userId, currency, amount);
-        await this.walletService.getOrCreateWallet(userId, currency as any);
-        const updated = (await this.walletService.debitBalance(String(wallet._id), amount, session)) as unknown as IWallet;
+        const wallet = await this.assertCanPay(userId, currency, amount, tx);
+        await this.walletService.getOrCreateWallet(userId, currency as WalletCurrency, tx);
+        const updated = await this.walletService.debitBalance(wallet.id, amount, tx);
         await ledgerService.post({
             perCurrency: true,
             legs: [
@@ -330,39 +315,36 @@ class WalletSendService {
             reference: params.reference,
             description: params.description,
             metadata: { transactionId: params.transactionId },
-            session,
+            tx,
         });
-        const [walletTransaction] = await WalletTransaction.create([{
-            wallet: wallet._id,
-            user: userId,
-            type: WALLET_TRANSACTION_TYPE.TRANSFER,
-            status: WALLET_TRANSACTION_STATUS.PENDING,
-            amount,
-            currency,
-            reference: this.walletTransactionService.generateReference("TRF"),
-            balanceBefore: round2(updated.balance + amount),
-            balanceAfter: updated.balance,
-            description: params.description,
-            providerAccountCode: manualPayoutPendingCode(currency),
-            transactionId: params.transactionId,
-        }], { session });
-        return walletTransaction;
+        return walletTransactionRepository.create(
+            {
+                wallet: wallet.id,
+                user: userId,
+                type: WALLET_TRANSACTION_TYPE.TRANSFER,
+                status: WALLET_TRANSACTION_STATUS.PENDING,
+                amount,
+                currency,
+                reference: this.walletTransactionService.generateReference("TRF"),
+                balanceBefore: round2(updated.balance + amount),
+                balanceAfter: updated.balance,
+                description: params.description,
+                providerAccountCode: manualPayoutPendingCode(currency),
+                transactionId: params.transactionId,
+            },
+            tx
+        );
     }
 
     /** Ops paid the recipient: the held money leaves the platform's FX position */
     async completeManualPayout(transactionId: string): Promise<void> {
-        const session = await mongoose.startSession();
-        session.startTransaction();
-        try {
-            const walletTx = await WalletTransaction.findOneAndUpdate(
-                { transactionId, type: WALLET_TRANSACTION_TYPE.TRANSFER, status: WALLET_TRANSACTION_STATUS.PENDING },
-                { $set: { status: WALLET_TRANSACTION_STATUS.SUCCESSFUL } },
-                { new: true, session }
+        await withTransaction(async (tx) => {
+            const walletTx = await walletTransactionRepository.claimPendingTransferFor(
+                transactionId,
+                { status: WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful" },
+                tx
             );
-            if (!walletTx) {
-                await session.abortTransaction();
-                return;
-            }
+            if (!walletTx) return;
             const currency = walletTx.currency || BASE_WALLET_CURRENCY;
             await ledgerService.post({
                 perCurrency: true,
@@ -374,70 +356,55 @@ class WalletSendService {
                 reference: walletTx.reference,
                 description: "Manual payout completed",
                 metadata: { transactionId },
-                session,
+                tx,
             });
-            await Wallet.updateOne({ _id: walletTx.wallet }, { $inc: { ledgerBalance: -walletTx.amount } }, { session });
-            await session.commitTransaction();
-        } catch (error) {
-            if (session.inTransaction()) await session.abortTransaction();
-            throw error;
-        } finally {
-            session.endSession();
-        }
+            await walletRepository.adjustLedgerBalance(walletTx.wallet, -walletTx.amount, tx);
+        });
     }
 
     /** Ops rejected the payout: the held money goes back to the wallet. Idempotent. */
     async refundManualPayout(transactionId: string, reason: string): Promise<boolean> {
-        const session = await mongoose.startSession();
-        session.startTransaction();
-        try {
-            const walletTx = await WalletTransaction.findOneAndUpdate(
-                { transactionId, type: WALLET_TRANSACTION_TYPE.TRANSFER, status: WALLET_TRANSACTION_STATUS.PENDING },
-                { $set: { status: WALLET_TRANSACTION_STATUS.FAILED, failureReason: reason } },
-                { new: true, session }
+        return withTransaction(async (tx) => {
+            const walletTx = await walletTransactionRepository.claimPendingTransferFor(
+                transactionId,
+                { status: WALLET_TRANSACTION_STATUS.FAILED as "failed", failureReason: reason },
+                tx
             );
-            if (!walletTx) {
-                await session.abortTransaction();
-                return false;
-            }
+            if (!walletTx) return false;
             const currency = walletTx.currency || BASE_WALLET_CURRENCY;
-            const userId = String(walletTx.user);
             await ledgerService.post({
                 perCurrency: true,
                 legs: [
                     { accountCode: manualPayoutPendingCode(currency), direction: JOURNAL_DIRECTION.DEBIT, amount: walletTx.amount },
-                    { accountCode: userWalletAccountCode(userId, currency), direction: JOURNAL_DIRECTION.CREDIT, amount: walletTx.amount },
+                    { accountCode: userWalletAccountCode(walletTx.user, currency), direction: JOURNAL_DIRECTION.CREDIT, amount: walletTx.amount },
                 ],
                 source: JOURNAL_SOURCE.REVERSAL,
                 reference: walletTx.reference,
                 description: `Manual payout rejected — returned to wallet (${reason})`,
                 metadata: { transactionId, reason },
-                session,
+                tx,
             });
-            const wallet = await Wallet.findOneAndUpdate({ _id: walletTx.wallet }, { $inc: { balance: walletTx.amount } }, { new: true, session });
+            const wallet = await walletRepository.credit(walletTx.wallet, walletTx.amount, tx);
             if (!wallet) throw errorResponseMessage.createError(500, "Wallet not found for refund", ErrorSeverity.CRITICAL);
-            await WalletTransaction.create([{
-                wallet: walletTx.wallet,
-                user: walletTx.user,
-                type: WALLET_TRANSACTION_TYPE.REVERSAL,
-                status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
-                amount: walletTx.amount,
-                currency,
-                reference: this.walletTransactionService.generateReference("REV"),
-                balanceBefore: round2(wallet.balance - walletTx.amount),
-                balanceAfter: wallet.balance,
-                description: `Returned: ${reason}`,
-                reversedTransactionId: walletTx._id,
-                transactionId,
-            }], { session });
-            await session.commitTransaction();
+            await walletTransactionRepository.create(
+                {
+                    wallet: walletTx.wallet,
+                    user: walletTx.user,
+                    type: WALLET_TRANSACTION_TYPE.REVERSAL,
+                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                    amount: walletTx.amount,
+                    currency,
+                    reference: this.walletTransactionService.generateReference("REV"),
+                    balanceBefore: round2(wallet.balance - walletTx.amount),
+                    balanceAfter: wallet.balance,
+                    description: `Returned: ${reason}`,
+                    reversedTransactionId: walletTx.id,
+                    transactionId,
+                },
+                tx
+            );
             return true;
-        } catch (error) {
-            if (session.inTransaction()) await session.abortTransaction();
-            throw error;
-        } finally {
-            session.endSession();
-        }
+        });
     }
 }
 

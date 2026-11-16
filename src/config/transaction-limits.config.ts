@@ -1,4 +1,4 @@
-import { CurrencyCode } from "../models/interface";
+import type { CurrencyCode } from "../types/enums";
 
 /**
  * Transaction Limits Configuration

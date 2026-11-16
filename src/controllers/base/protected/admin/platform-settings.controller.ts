@@ -78,7 +78,7 @@ class AdminPlatformSettingsController extends BaseController {
 
             const updated = await platformSettingsService.updateSettings(
                 { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitUsd },
-                String(user._id),
+                user.id,
             );
             return this.sendSuccess(res, { settings: updated });
         } catch (error) {

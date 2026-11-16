@@ -37,7 +37,7 @@ class PinController extends BaseController {
     private async setPin(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            await this.pinService.setPin(user._id!, req.body.pin);
+            await this.pinService.setPin(user.id, req.body.pin);
             return this.sendSuccess(res, { message: "Transaction PIN set successfully" });
         } catch (error) {
             return next(error);
@@ -47,7 +47,7 @@ class PinController extends BaseController {
     private async changePin(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            await this.pinService.changePin(user._id!, req.body.oldPin, req.body.newPin);
+            await this.pinService.changePin(user.id, req.body.oldPin, req.body.newPin);
             return this.sendSuccess(res, { message: "Transaction PIN changed successfully" });
         } catch (error) {
             return next(error);
@@ -76,11 +76,11 @@ class PinController extends BaseController {
                         resetUrl,
                         expiryTime: '30 minutes',
                     });
-                    this.logger.info("Transaction PIN reset email sent", { userId: user._id });
+                    this.logger.info("Transaction PIN reset email sent", { userId: user.id });
                 }
             } catch (sendError) {
                 this.logger.error("Failed to send PIN reset email", {
-                    userId: user._id,
+                    userId: user.id,
                     error: sendError instanceof Error ? sendError.message : String(sendError),
                 });
             }
@@ -92,7 +92,7 @@ class PinController extends BaseController {
     private async getStatus(_req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            const status = await this.pinService.getStatus(user._id!);
+            const status = await this.pinService.getStatus(user.id);
             return this.sendSuccess(res, status);
         } catch (error) {
             return next(error);

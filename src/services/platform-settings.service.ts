@@ -1,6 +1,5 @@
-import DBService from "../utils/db.utils";
-import { IPlatformSettings } from "../models/interface";
-import PlatformSettings from "../models/platform-settings.model";
+import platformSettingsRepository from "../repositories/platform-settings.repository";
+import type { PlatformSettings as IPlatformSettings } from "../types/entities";
 import logger from "../utils/logger.utils";
 import { DEFAULT_TIER_DAILY_LIMIT_USD, USER_TIER, UserTier } from "../common/tier.constants";
 
@@ -13,19 +12,15 @@ export type RateDirection = 'send' | 'receive';
  * Auto-seeds defaults on first read so the rest of the system never has to
  * handle a "settings missing" state. Caches the result for 30s — the read
  * path (rate display + transaction creation) hits this on every keystroke
- * and would otherwise hammer Mongo.
+ * and would otherwise hammer the database.
  *
  * Always go through this service. Reading the model directly will bypass
  * the cache and risk drift between display and journal.
  */
-class PlatformSettingsService extends DBService<IPlatformSettings> {
+class PlatformSettingsService {
     private cache: { value: IPlatformSettings; fetchedAt: number } | null = null;
     private loading: Promise<IPlatformSettings> | null = null;
     private readonly TTL_MS = 30_000;
-
-    constructor() {
-        super(PlatformSettings);
-    }
 
     private bustCache() {
         this.cache = null;
@@ -41,19 +36,10 @@ class PlatformSettingsService extends DBService<IPlatformSettings> {
     }
 
     private async load(): Promise<IPlatformSettings> {
-        let doc = await this.findOne({ kind: 'singleton' }) as IPlatformSettings | null;
-        if (!doc) {
-            try {
-                doc = await this.create({ kind: 'singleton' } as Partial<IPlatformSettings>) as IPlatformSettings;
-                logger.info("PlatformSettings: seeded defaults", { id: (doc as any)?._id });
-            } catch (error) {
-                // Another instance seeded it first
-                doc = await this.findOne({ kind: 'singleton' }) as IPlatformSettings | null;
-                if (!doc) throw error;
-            }
-        }
-        this.cache = { value: doc, fetchedAt: Date.now() };
-        return doc;
+        // Seeds the defaults on first read; safe when several instances race
+        const settings = await platformSettingsRepository.getOrCreate();
+        this.cache = { value: settings, fetchedAt: Date.now() };
+        return settings;
     }
 
     /**
@@ -98,7 +84,7 @@ class PlatformSettingsService extends DBService<IPlatformSettings> {
             tierDailyLimitUsd: this.tierLimits(current),
         };
 
-        const updated = await this.updateById(String(current._id), update);
+        const updated = await platformSettingsRepository.update(update);
         this.bustCache();
 
         logger.info("PlatformSettings: updated", {

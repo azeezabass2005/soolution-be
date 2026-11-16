@@ -1,15 +1,9 @@
 import { Request, Response, NextFunction } from "express";
 import errorResponseMessage from "../common/messages/error-response-message";
-import TransactionService from "../services/transaction.service";
+import transactionRepository from "../repositories/transaction.repository";
 import { ErrorSeverity, ErrorResponseCode } from "../common/messages/error-response-message";
 
 class TransactionRateLimitMiddleware {
-    private transactionService: TransactionService;
-
-    constructor() {
-        this.transactionService = new TransactionService(['user']);
-    }
-
     /**
      * Middleware to limit transaction creation per user and detect duplicates
      * Limits: 5 transactions per user per 15 minutes
@@ -24,18 +18,15 @@ class TransactionRateLimitMiddleware {
                 return next(errorResponseMessage.unauthorized());
             }
 
-            const userId = user._id.toString();
+            const userId = String(user.id);
             const now = new Date();
             const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000);
             const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000);
 
             // Check transaction count in last 15 minutes
-            const recentTransactions = await this.transactionService.find({
-                user: userId,
-                createdAt: { $gte: fifteenMinutesAgo }
-            });
+            const recentCount = await transactionRepository.countCreatedSince(userId, fifteenMinutesAgo);
 
-            if (recentTransactions.length >= 5) {
+            if (recentCount >= 5) {
                 return next(errorResponseMessage.createError(
                     ErrorResponseCode.TOO_MANY_REQUESTS,
                     "Too many transactions. Please wait before creating another transaction.",
@@ -45,16 +36,18 @@ class TransactionRateLimitMiddleware {
 
             // Check for duplicate transactions (same amount, fromCurrency, toCurrency within 5 minutes)
             if (amount && fromCurrency && toCurrency) {
-                const duplicateTransactions = await this.transactionService.find({
-                    user: userId,
-                    amount: Math.round(amount * 100) / 100, // Round to match stored amount
-                    fromCurrency,
-                    currency: toCurrency,
-                    createdAt: { $gte: fiveMinutesAgo },
-                    status: { $in: ['pending_input', 'awaiting_kyc_verification', 'awaiting_confirmation', 'processing'] }
-                });
+                const hasDuplicate = await transactionRepository.hasSimilarSince(
+                    userId,
+                    {
+                        amount: Math.round(Number(amount) * 100) / 100, // Round to match stored amount
+                        fromCurrency: String(fromCurrency).toUpperCase(),
+                        currency: String(toCurrency).toUpperCase(),
+                        statuses: ['pending_input', 'awaiting_kyc_verification', 'awaiting_confirmation', 'processing'],
+                    },
+                    fiveMinutesAgo
+                );
 
-                if (duplicateTransactions.length > 0) {
+                if (hasDuplicate) {
                     return next(errorResponseMessage.createError(
                         ErrorResponseCode.RESOURCE_ALREADY_EXISTS,
                         "A similar transaction was recently created. Please wait a few minutes before creating another transaction with the same details.",

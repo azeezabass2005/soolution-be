@@ -1,10 +1,10 @@
-import { IVerification } from "../models/interface";
-import Verification from "../models/verification.model";
-import DBService from "../utils/db.utils";
+import verificationRepository from "../repositories/verification.repository";
+import type { Verification } from "../types/entities";
 
-class VerificationService extends DBService<IVerification> {
-    constructor (populatedFields: string[] = []) {
-        super(Verification, populatedFields);
+class VerificationService {
+    /** The user's most recent identity check (never the encrypted numbers or hashes) */
+    async latestForUser(userId: string): Promise<Verification | undefined> {
+        return verificationRepository.latestForUser(userId);
     }
 }
 

@@ -1,5 +1,5 @@
 import express, { Express, Request, Response } from 'express';
-import mongoose from 'mongoose';
+import type { Server } from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
@@ -9,13 +9,12 @@ import config from './config/env.config';
 import logger from './utils/logger.utils';
 import routes from './routes';
 import DatabaseService from "./config/db.config";
+import { addLegacyIdAliases } from "./utils/json.utils";
 import ResponseErrorHandler from "./middlewares/error.middleware";
 import providerRedaction from "./middlewares/provider-redaction.middleware";
 import NotificationService from './utils/notification.utils';
 import { bootstrapSystemAccounts } from './services/account.bootstrap';
-import { migrateIdentity, migrateUserTiers, releaseLegacyKycHolds } from './services/tier.bootstrap';
-import { ensureBaseWallets } from './services/wallet.bootstrap';
-import { registerJobs } from './jobs';
+import { registerJobs, unregisterJobs } from './jobs';
 
 
 /**
@@ -26,21 +25,19 @@ class App {
     public app: Express;
     private dbService: DatabaseService;
     private notificationService: NotificationService;
+    private server: Server | null = null;
     /**
      * Creates an instance of App
-     * Initializes Express application and middlewares
+     * Builds the Express application (middlewares, routes, error handling).
+     * Nothing external is touched until `start()`, so tests can use `app` directly.
      */
     constructor() {
         this.app = express();
         this.dbService = DatabaseService.getInstance();
         this.notificationService = new NotificationService();
         this.setupMiddlewares();
-        this.setupDatabase().then(() => {});
-        this.connectWhatsapp().then(() => {});
-        this.verifyEmailService().then(() => {});
         this.setupRoutes();
         this.setupErrorHandling();
-
     }
 
     /**
@@ -94,6 +91,10 @@ class App {
         }));
         this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+        // Responses carry `_id` next to `id` for every record, as they did with
+        // Mongo, so existing clients reading either keep working
+        this.app.set('json replacer', addLegacyIdAliases);
+
         // Compression
         this.app.use(compression());
 
@@ -113,34 +114,12 @@ class App {
      * @private
      */
     private async setupDatabase(): Promise<void> {
+        // Fails fast: the API is useless without its database. Schema changes
+        // are applied by `npm run db:migrate` before the server starts.
         await this.dbService.connect();
         // System ledger accounts must exist before any money path runs.
         // Idempotent — only creates missing accounts.
-        try {
-            await bootstrapSystemAccounts();
-        } catch (error) {
-            logger.error('Failed to bootstrap system ledger accounts', {
-                error: error instanceof Error ? error.message : String(error),
-            });
-        }
-        // Every user has an NGN wallet (idempotent)
-        try {
-            await ensureBaseWallets();
-        } catch (error) {
-            logger.error('Failed to open NGN wallets', {
-                error: error instanceof Error ? error.message : String(error),
-            });
-        }
-        // Accounts created before tiers get one (idempotent)
-        try {
-            await migrateUserTiers();
-            await migrateIdentity();
-            await releaseLegacyKycHolds();
-        } catch (error) {
-            logger.error('Failed to migrate account tiers', {
-                error: error instanceof Error ? error.message : String(error),
-            });
-        }
+        await bootstrapSystemAccounts();
         // Background source-of-truth jobs (reconciliation + stale sweeper).
         // Skipped under tests if needed by setting DISABLE_JOBS=true.
         if (process.env.DISABLE_JOBS !== 'true') {
@@ -188,15 +167,16 @@ class App {
     private setupRoutes(): void {
         // Health check endpoint
         this.app.get('/health', (_req: Request, res: Response) => {
+            const database = this.dbService.isConnected();
             const health = {
-                status: 'healthy',
+                status: database ? 'healthy' : 'unhealthy',
                 timestamp: new Date().toISOString(),
                 environment: config.NODE_ENV,
-                mongodb: mongoose.connection.readyState === 1
+                database,
             };
 
             logger.debug('Health check requested', health);
-            res.status(200).json(health);
+            res.status(database ? 200 : 503).json(health);
         });
 
         // API routes
@@ -254,14 +234,34 @@ class App {
      * Start the application server
      * @public
      */
-    public start(): void {
-        this.app.listen(config.PORT, () => {
-            logger.info(`Server started`, {
-                port: config.PORT,
-                environment: config.NODE_ENV,
-                nodeVersion: process.version
+    public async start(): Promise<void> {
+        await this.setupDatabase();
+        this.connectWhatsapp().catch((error) => logger.error('WhatsApp connection failed', { error: error instanceof Error ? error.message : String(error) }));
+        this.verifyEmailService().then(() => {});
+        await new Promise<void>((resolve) => {
+            this.server = this.app.listen(config.PORT, () => {
+                logger.info(`Server started`, {
+                    port: config.PORT,
+                    environment: config.NODE_ENV,
+                    nodeVersion: process.version
+                });
+                resolve();
             });
         });
+    }
+
+    /**
+     * Stop taking requests, stop the background jobs and close the database pool
+     * @public
+     */
+    public async stop(): Promise<void> {
+        unregisterJobs();
+        if (this.server) {
+            const server = this.server;
+            this.server = null;
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+        await this.dbService.disconnect();
     }
 }
 

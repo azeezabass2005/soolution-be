@@ -7,7 +7,7 @@ Purpose: give AI coding agents the precise context and conventions they need to 
 - Entry points: `src/index.ts` and `src/app.ts`. The compiled entry is `dist/index.js` (see `package.json` `main`).
 
 Big-picture architecture (how things flow)
-- HTTP request -> `src/routes/*` -> `Controller` in `src/controllers/*` -> `Service` in `src/services/*` -> `Model` in `src/models/*` (Mongoose) -> utils/config.
+- HTTP request -> `src/routes/*` -> `Controller` in `src/controllers/*` -> `Service` in `src/services/*` -> `Repository` in `src/repositories/*` -> PostgreSQL (Drizzle ORM, schema in `src/db/schema/*`).
 - Controllers extend `BaseController` (see `src/controllers/base/base-controller.ts`) and set up routes on `this.router`. Use the `bind(this)` pattern when passing controller methods as handlers.
 - Protected vs public controllers: controllers are organized under `src/controllers/base/protected` and `.../public`. Protected controllers commonly use `RoleMiddleware` or `auth.middleware` to guard endpoints.
 
@@ -16,7 +16,7 @@ Key patterns & conventions (project-specific)
   - this.router.get("/dashboard", RoleMiddleware.isAdmin, this.getDashboardData.bind(this));
   - Keep controller methods focused on orchestration; delegate business logic to services.
 - Services: single-responsibility classes or modules in `src/services/*`. Prefer adding DB queries and aggregation pipelines here rather than glueing logic in controllers.
-- Models: Mongoose model files end with `.model.ts` and live in `src/models/`.
+- Data layer: tables are defined in `src/db/schema/*.ts`; all SQL lives in `src/repositories/*.repository.ts` (services and controllers never query directly). Entity types are in `src/types/entities.ts`. Multi-write operations run in `withTransaction()` from `src/db/transaction.ts` and pass `tx` down to repositories and `ledgerService.post`. See `docs/DATABASE.md`.
 - Validation: Zod schemas live in `src/validators` (files named `z-*.ts`) and are applied via `validation.middleware.ts`.
 - Errors: use the centralized error middleware `src/middlewares/error.middleware.ts` and the `app-error.utils.ts` helpers in `src/utils/` for consistent error shapes.
 - File uploads: uses `multer` with `src/middlewares/multer.middleware.ts` and upload config in `src/config/upload.config.ts` and `src/services/file-upload.service.ts`.
@@ -28,14 +28,14 @@ Build, dev & run commands (as discovered)
 - npm start -> `node dist/index.js`
 
 Notable integrations & dependencies
-- Persistence: `mongoose` (MongoDB). Models are in `src/models/`.
+- Persistence: PostgreSQL via `drizzle-orm` + `pg`. Migrations are SQL files in `drizzle/` (generate with `npm run db:generate`, apply with `npm run db:migrate`).
 - Cloud & storage: AWS S3 SDK (`@aws-sdk/*`) and a `r2.config.ts` exists (Cloudflare R2/Worker integration hinted by `wrangler` in devDependencies).
 - Identity / 3rd-party: Smile Identity (`smile-identity-core`) and `whatsapp-web.js` are used in services for onboarding/notifications.
 - Logging: `winston` + `winston-daily-rotate-file`.
 
 Where to make common changes
 - New route: add a controller under `src/controllers/*`, register routes in `src/routes/public/index.ts` or `src/routes/protected/index.ts` depending on exposure, and then add service logic in `src/services/*`.
-- New DB queries: add to a service; if complex, add aggregation pipelines in service files and keep controllers thin.
+- New DB queries: add a method to the relevant repository and call it from a service; keep controllers thin. Schema changes: edit `src/db/schema`, then `npm run db:generate` and commit the new migration.
 - New validation: create a `z-*.ts` schema in `src/validators` and wire it into the route using `validation.middleware.ts`.
 
 Examples (concrete)
@@ -49,11 +49,11 @@ What NOT to change lightly
 - Avoid changing the runtime/tsconfig targets without running a build locally; behavior depends on compiled output under `dist/`.
 
 Missing or limited areas (discoverable gaps)
-- There are no automated tests configured (package.json `test` is a placeholder). If you add tests, follow the project's module boundaries (test services and controllers separately).
+- Tests: `npm test` (Vitest) runs integration tests against an in-memory Postgres (PGlite) — see `test/`. `TEST_DATABASE_URL=... npm run test:pg` runs the same suite against a real PostgreSQL server.
 
 If you're unsure, follow these quick checks
 1. Find the controller for the route in `src/controllers/` and mirror its style when adding new controllers.
-2. Put business logic into `src/services/` and DB models to `src/models/`.
+2. Put business logic into `src/services/` and queries into `src/repositories/`.
 3. Use `validation.middleware.ts` + `src/validators/z-*.ts` for input validation.
 
 If anything here is unclear or you want this adapted (e.g., stricter testing guidance, CI hooks, or examples of aggregation pipelines), tell me which sections to expand and I will iterate.

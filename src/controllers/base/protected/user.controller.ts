@@ -57,14 +57,14 @@ class UserController extends BaseController {
                 return next(errorResponseMessage.unauthorized());
             }
 
-            const { _id, __v, password, ...otherUserData } = user;
+            const { password, transactionPinHash, ...otherUserData } = user;
 
-            const verificationData = await this.verificationService.find({ user: user._id! }, { sort: { createdAt: -1 }, limit: 1 });
+            const verificationData = await this.verificationService.latestForUser(user.id);
 
             const sanitizedUser = {
                 ...otherUserData,
                 role: this.getRoleString(user.role),
-                verificationData: verificationData.length > 0 ? verificationData[0] : null
+                verificationData: verificationData ?? null
             }
             
             return this.sendSuccess(res, {
@@ -82,21 +82,35 @@ class UserController extends BaseController {
      */
     private async getAllUsers(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const users = await this.userService.find({}, {
-                select: ['email', 'firstName', 'lastName', 'isVerified', 'isCompleted', 'tier', 'isKYCDone', 'isKYCRejected', 'kycRejectionReason', 'role', 'status', 'phoneNumber', 'whatsappNumber', 'countryOfOrigin', 'countryOfResidence', 'purpose', 'typeOfBusiness', 'monthlyVolume', 'hearAboutUs', 'hearAboutUsOther', 'createdAt']
-            });
+            const users = await this.userService.listAll();
             const cleanUsers: any = []
             users.forEach(user => {
                 if(user.email === "admin@solutionpay.co") return
                 if(user.email === "test@gmail.com") return
-                const plainUser = user.toObject();
-
-                // I removed __v, I might need to add it back later
-                const { password, _id, ...userData } = plainUser;
 
                 cleanUsers.push({
-                    ...userData,
-                    role: this.getRoleString(userData.role)
+                    id: user.id,
+                    email: user.email,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    isVerified: user.isVerified,
+                    isCompleted: user.isCompleted,
+                    tier: user.tier,
+                    isKYCDone: user.isKYCDone,
+                    isKYCRejected: user.isKYCRejected,
+                    kycRejectionReason: user.kycRejectionReason,
+                    status: user.status,
+                    phoneNumber: user.phoneNumber,
+                    whatsappNumber: user.whatsappNumber,
+                    countryOfOrigin: user.countryOfOrigin,
+                    countryOfResidence: user.countryOfResidence,
+                    purpose: user.purpose,
+                    typeOfBusiness: user.typeOfBusiness,
+                    monthlyVolume: user.monthlyVolume,
+                    hearAboutUs: user.hearAboutUs,
+                    hearAboutUsOther: user.hearAboutUsOther,
+                    createdAt: user.createdAt,
+                    role: this.getRoleString(user.role)
                 });
             });
 
@@ -116,12 +130,12 @@ class UserController extends BaseController {
     private async updateUser(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const { status, role } = req.body;
-            const user = await this.userService.updateById(req.params.id, {
+            const user = await this.userService.update(req.params.id, {
                 status,
                 ...((role && role === "ADMIN") ? { role: ROLE_MAP.ADMIN } : (role && role === "USER") ? { role: ROLE_MAP.USER } : {}),
             });
             if(!user) {
-                next(errorResponseMessage.resourceNotFound("User not found"))
+                return next(errorResponseMessage.resourceNotFound("User not found"))
             }
             return this.sendSuccess(res, {
                 user,

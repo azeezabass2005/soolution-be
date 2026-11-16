@@ -1,13 +1,14 @@
-import mongoose from 'mongoose';
 import logger from '../utils/logger.utils';
 import config from './env.config';
+import { closeDatabase, connectDatabase, isDatabaseConnected } from '../db/client';
+
+/** Hide credentials when logging a connection string */
+const redact = (url: string) => url.replace(/\/\/([^:/@]+):([^@]+)@/, '//***:***@');
 
 class DatabaseService {
     private static instance: DatabaseService;
 
-    private constructor() {
-        this.setupConnectionHandlers();
-    }
+    private constructor() {}
 
     public static getInstance(): DatabaseService {
         if (!DatabaseService.instance) {
@@ -16,51 +17,33 @@ class DatabaseService {
         return DatabaseService.instance;
     }
 
-    private setupConnectionHandlers(): void {
-        mongoose.connection.on('error', (error) => {
-            logger.error('MongoDB connection error', {
-                error: error instanceof Error ? error.message : error
-            });
-        });
-
-        mongoose.connection.on('disconnected', () => {
-            logger.warn('MongoDB disconnected');
-        });
-
-        process.on('SIGINT', async () => {
-            try {
-                await mongoose.connection.close();
-                logger.info('MongoDB connection closed through app termination');
-                process.exit(0);
-            } catch (error) {
-                logger.error('Error during MongoDB connection closure', {
-                    error: error instanceof Error ? error.message : error
-                });
-                process.exit(1);
-            }
-        });
-    }
-
+    /** Opens the PostgreSQL pool; throws (and the server doesn't start) if it can't connect */
     public async connect(): Promise<void> {
         try {
-            await mongoose.connect(config.MONGODB_URI);
-            logger.info('Connected to MongoDB successfully', {
-                uri: config.MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@') // Hide credentials in logs
+            await connectDatabase({
+                url: config.DATABASE_URL,
+                ssl: config.DATABASE_SSL,
+                sslRejectUnauthorized: config.DATABASE_SSL_REJECT_UNAUTHORIZED,
+                poolMax: config.DATABASE_POOL_MAX,
+                statementTimeoutMs: config.DATABASE_STATEMENT_TIMEOUT_MS,
             });
+            logger.info('Connected to PostgreSQL', { url: redact(config.DATABASE_URL), poolMax: config.DATABASE_POOL_MAX });
         } catch (error) {
-            logger.error('MongoDB connection error', {
-                error: error instanceof Error ? error.message : error
+            logger.error('PostgreSQL connection error', {
+                url: redact(config.DATABASE_URL),
+                error: error instanceof Error ? error.message : error,
             });
-            process.exit(1);
+            throw error;
         }
     }
 
     public async disconnect(): Promise<void> {
-        await mongoose.connection.close();
+        await closeDatabase();
+        logger.info('PostgreSQL connection pool closed');
     }
 
     public isConnected(): boolean {
-        return mongoose.connection.readyState === 1;
+        return isDatabaseConnected();
     }
 }
 

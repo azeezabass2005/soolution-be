@@ -1,22 +1,15 @@
-/**
- * Service class for Tag-related database operations
- *
- * @description Extends the generic DBService with Tag-specific configurations
- * @extends {DBService<ITag>}
- */
-import DBService from "../utils/db.utils";
-import {ITag} from "../models/interface";
-import Tag from "../models/tag.model";
+import { tagRepository } from "../repositories/post.repository";
+import type { Tag } from "../types/entities";
 
-class TagService extends DBService<ITag> {
-    /**
-     * Creates an instance of TagService
-     *
-     * @constructor
-     */
-    constructor() {
-        // Initialize the service with the Tag model
-        super(Tag, [])
+/** Tags a post can be related to */
+class TagService {
+    async create(title: string): Promise<Tag> {
+        return tagRepository.create(title);
+    }
+
+    /** Newest first */
+    async list(): Promise<Tag[]> {
+        return tagRepository.list();
     }
 }
 

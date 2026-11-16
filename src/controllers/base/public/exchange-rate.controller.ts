@@ -34,7 +34,7 @@ class ExchangeRateController extends BaseController {
      */
     private async getExchangeRates(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const exchangeRates = await this.exchangeRateService.find({ isActive: true });
+            const exchangeRates = await this.exchangeRateService.list({ isActive: true });
             this.sendSuccess(res, {exchangeRates})
         } catch (error) {
             next(error);

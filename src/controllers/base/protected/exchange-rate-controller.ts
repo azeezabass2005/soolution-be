@@ -1,7 +1,7 @@
 import BaseController from "../base-controller";
 import ExchangeRateService from "../../../services/exchange-rate.service";
 import { Request, Response, NextFunction} from "express";
-import {IExchangeRate} from "../../../models/interface";
+import type { CurrencyCode } from "../../../types/enums";
 import {validateExchangeRateCreate, validateExchangeRateUpdate} from "../../../validators";
 import errorResponseMessage from "../../../common/messages/error-response-message";
 import RoleMiddleware from "../../../middlewares/role.middleware";
@@ -48,7 +48,7 @@ class ExchangeRateController extends BaseController {
      */
     private async getExchangeRates(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const exchangeRates = await this.exchangeRateService.find();
+            const exchangeRates = await this.exchangeRateService.list();
             return this.sendSuccess(res, {exchangeRates})
         } catch (error) {
             return next(error);
@@ -61,9 +61,9 @@ class ExchangeRateController extends BaseController {
      */
     private async createExchangeRate(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const exchangeRateData: Partial<IExchangeRate> = req.body;
+            const exchangeRateData: { from: CurrencyCode; to: CurrencyCode; rate: number; isActive?: boolean } = req.body;
             const {from, to} = exchangeRateData;
-            const exchangeRateExists = await this.exchangeRateService.checkRateExistence(from!, to!)
+            const exchangeRateExists = await this.exchangeRateService.checkRateExistence(from, to)
             if(exchangeRateExists) {
                 return next(errorResponseMessage.resourceAlreadyExist('Exchange Rate'))
             }
@@ -83,7 +83,7 @@ class ExchangeRateController extends BaseController {
      */
     private async updateExchangeRate(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const exchangeRate = await this.exchangeRateService.updateById(req.params.id, req.body);
+            const exchangeRate = await this.exchangeRateService.update(req.params.id, req.body ?? {});
             if (!exchangeRate) {
 
                 next(errorResponseMessage.resourceNotFound('Exchange rate not found.'));

@@ -1,7 +1,7 @@
 import z from "zod";
 import { Request, Response, NextFunction } from "express";
 import zodErrorHandler from "./zod.error";
-import { PARTNER_ROLES, PARTNER_STATUSES, EXPERIENCE_LEVELS } from "../models/partner.model";
+import { PARTNER_ROLES, PARTNER_STATUSES, EXPERIENCE_LEVELS } from "../common/partner.constants";
 
 const ZBasePartner = z.object({
     name: z

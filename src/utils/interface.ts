@@ -4,8 +4,8 @@
 export interface ITokenPayload {
     userId: string;
     email: string;
-    role: number;
-    username: string;
+    role?: number;
+    username?: string;
     /** Password-reset tokens: fingerprint of the password they were issued against, so they work once */
     pfp?: string;
 }

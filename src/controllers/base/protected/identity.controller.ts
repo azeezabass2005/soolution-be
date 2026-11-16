@@ -40,7 +40,7 @@ class IdentityController extends BaseController {
 
     private async getStatus(_req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            this.sendSuccess(res, await identityService.getStatus(String(res.locals.user._id)));
+            this.sendSuccess(res, await identityService.getStatus(res.locals.user.id));
         } catch (error) {
             next(error);
         }
@@ -57,7 +57,7 @@ class IdentityController extends BaseController {
 
     private async getTransferDetails(_req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            this.sendSuccess(res, await identityService.transferDetails(String(res.locals.user._id)));
+            this.sendSuccess(res, await identityService.transferDetails(res.locals.user.id));
         } catch (error) {
             next(error);
         }
@@ -78,7 +78,7 @@ class IdentityController extends BaseController {
         try {
             const user = await this.userService.findById(req.params.userId);
             if (!user) return next(errorResponseMessage.resourceNotFound("User"));
-            this.sendSuccess(res, await identityService.adminSummary(String(user._id)));
+            this.sendSuccess(res, await identityService.adminSummary(user.id));
         } catch (error) {
             next(error);
         }
@@ -90,7 +90,7 @@ class IdentityController extends BaseController {
             if (reason.length < 3) return next(errorResponseMessage.createError(400, "Please give a reason", ErrorSeverity.LOW));
             const user = await this.userService.findById(req.params.userId);
             if (!user) return next(errorResponseMessage.resourceNotFound("User"));
-            this.sendSuccess(res, { message: "Verification reset", ...(await identityService.adminResetVerification(res.locals.user, String(user._id), reason.slice(0, 500))) });
+            this.sendSuccess(res, { message: "Verification reset", ...(await identityService.adminResetVerification(res.locals.user, user.id, reason.slice(0, 500))) });
         } catch (error) {
             next(error);
         }
@@ -102,7 +102,7 @@ class IdentityController extends BaseController {
             if (reason.length < 3) return next(errorResponseMessage.createError(400, "Please give a reason", ErrorSeverity.LOW));
             const user = await this.userService.findById(req.params.userId);
             if (!user) return next(errorResponseMessage.resourceNotFound("User"));
-            this.sendSuccess(res, { message: "Attempts reset", ...(await identityService.adminResetAttempts(res.locals.user, String(user._id), reason.slice(0, 500))) });
+            this.sendSuccess(res, { message: "Attempts reset", ...(await identityService.adminResetAttempts(res.locals.user, user.id, reason.slice(0, 500))) });
         } catch (error) {
             next(error);
         }

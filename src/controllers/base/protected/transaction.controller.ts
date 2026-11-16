@@ -1,8 +1,7 @@
 import BaseController from "../base-controller";
-import TransactionService from "../../../services/transaction.service";
+import TransactionService, { type TransactionListFilter } from "../../../services/transaction.service";
 import beneficiaryService from "../../../services/beneficiary.service";
 import {Request, Response, NextFunction} from "express";
-import {DetailType, ITransaction, ITransactionDetail} from "../../../models/interface";
 import errorResponseMessage from "../../../common/messages/error-response-message";
 import {validateCreateAlipayTransaction, validateCreateBankTransferTransaction} from "../../../validators/z-transaction";
 import {ROLE_MAP, TRANSACTION_STATUS} from "../../../common/constant";
@@ -20,7 +19,7 @@ class TransactionController extends BaseController {
 
     constructor() {
         super();
-        this.transactionService = new TransactionService(['details', 'user']);
+        this.transactionService = new TransactionService();
         this.setupRoutes()
     }
 
@@ -70,7 +69,7 @@ class TransactionController extends BaseController {
     private async getReceiptToken(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            const token = await receiptService.getOrCreateToken(req.params.id, String(user._id));
+            const token = await receiptService.getOrCreateToken(req.params.id, user.id);
             return this.sendSuccess(res, { token });
         } catch (error) {
             return next(error);
@@ -79,7 +78,7 @@ class TransactionController extends BaseController {
 
     private async createAlipayTransaction(req: Request, res: Response, next: NextFunction) {
         try {
-            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string; pin?: string }> = req.body;
+            const transactionData = req.body as Record<string, any>;
 
             // Extract idempotency key from header if not in body
             const idempotencyKey = transactionData.idempotencyKey || req.headers['idempotency-key'] as string;
@@ -90,7 +89,7 @@ class TransactionController extends BaseController {
             const beneficiaryId = (req.body as any)?.beneficiaryId;
             let savedQrCodeUrl: string | undefined;
             if (beneficiaryId) {
-                const beneficiary = await beneficiaryService.getOwned(String(user._id), String(beneficiaryId));
+                const beneficiary = await beneficiaryService.getOwned(user.id, String(beneficiaryId));
                 if (beneficiary.currency !== "RMB" || beneficiary.kind !== transactionData.paymentMethod || !beneficiary.qrCodeUrl) {
                     next(errorResponseMessage.payloadIncorrect("This beneficiary can't receive this payment method"));
                     return;
@@ -106,10 +105,10 @@ class TransactionController extends BaseController {
                 return;
             }
 
-            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createAlipayTransaction(
+            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createAlipayTransaction(
                 { ...transactionData, idempotencyKey },
                 req.file ?? { qrCodeUrl: savedQrCodeUrl! },
-                user._id!,
+                user.id,
                 req.ip,
                 req.headers['user-agent']
             ))
@@ -127,16 +126,16 @@ class TransactionController extends BaseController {
 
     private async createBankTransferTransaction(req: Request, res: Response, next: NextFunction) {
         try {
-            const transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string; idempotencyKey?: string; transactionType?: 'send' | 'receive'; pin?: string }> = req.body;
+            const transactionData = req.body as Record<string, any>;
 
             // Extract idempotency key from header if not in body
             const idempotencyKey = transactionData.idempotencyKey || req.headers['idempotency-key'] as string;
 
             const user = res.locals.user;
 
-            const transaction = await transactionLimitService.withUserLock(String(user._id), () => this.transactionService.createBankTransferTransaction(
+            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createBankTransferTransaction(
                 { ...transactionData, idempotencyKey },
-                user._id!,
+                user.id,
                 req.ip,
                 req.headers['user-agent']
             ))
@@ -157,7 +156,7 @@ class TransactionController extends BaseController {
             const result = await this.transactionService.rejectManualTransaction(
                 req.params.id,
                 req.body?.reason,
-                String(res.locals.user?._id),
+                String(res.locals.user?.id),
                 req.ip,
                 req.headers['user-agent']
             );
@@ -179,7 +178,7 @@ class TransactionController extends BaseController {
             const { status } = await this.transactionService.uploadUserPaymentReceipt(
                 req.params.id!, 
                 req.file as Express.Multer.File, 
-                res.locals?.user?._id?.toString(),
+                res.locals?.user?.id,
                 req.ip,
                 req.headers['user-agent']
             );
@@ -203,7 +202,7 @@ class TransactionController extends BaseController {
             await this.transactionService.uploadAdminPaymentReceipt(
                 req.params.id!, 
                 req.file,
-                res.locals?.user?._id?.toString(),
+                res.locals?.user?.id,
                 req.ip,
                 req.headers['user-agent']
             )
@@ -216,11 +215,11 @@ class TransactionController extends BaseController {
     }
 
     /**
-     * Parse YYYY-MM-DD startDate/endDate query params into a Mongo-compatible
-     * { $gte, $lte } range. Returns undefined if no valid dates are provided.
+     * Parse YYYY-MM-DD startDate/endDate query params into a { from, to } range
+     * (whole UTC days). Returns undefined if no valid dates are provided.
      */
-    private buildDateRangeFilter(startDate: unknown, endDate: unknown): Record<string, Date> | undefined {
-        const dateFilter: Record<string, Date> = {};
+    private buildDateRangeFilter(startDate: unknown, endDate: unknown): { from?: Date; to?: Date } | undefined {
+        const dateFilter: { from?: Date; to?: Date } = {};
 
         if (typeof startDate === 'string') {
             const parts = startDate.split('-');
@@ -229,7 +228,7 @@ class TransactionController extends BaseController {
                 const month = parseInt(parts[1], 10) - 1;
                 const day = parseInt(parts[2], 10);
                 if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
-                    dateFilter.$gte = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+                    dateFilter.from = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
                 }
             }
         }
@@ -241,7 +240,7 @@ class TransactionController extends BaseController {
                 const month = parseInt(parts[1], 10) - 1;
                 const day = parseInt(parts[2], 10);
                 if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
-                    dateFilter.$lte = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+                    dateFilter.to = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
                 }
             }
         }
@@ -254,11 +253,8 @@ class TransactionController extends BaseController {
             const { page, limit, searchTerm, status, startDate, endDate } = req.query;
             const user = res.locals.user;
 
-            // Build the filter from a strict whitelist — never spread req.query into a Mongo filter
-            // (Express parses ?foo[$ne]=x into operator objects and would inject into the query).
-            const filter: Record<string, unknown> = {
-                currency: 'RMB',
-            };
+            // Build the filter from a strict whitelist — never pass req.query straight to the database
+            const filter: TransactionListFilter = { currency: 'RMB' };
 
             if (!isAdmin) {
                 filter.user = user?.id;
@@ -269,24 +265,14 @@ class TransactionController extends BaseController {
             }
 
             const createdAt = this.buildDateRangeFilter(startDate, endDate);
-            if (createdAt) {
-                filter.createdAt = createdAt;
-            }
+            filter.createdFrom = createdAt?.from;
+            filter.createdTo = createdAt?.to;
 
-            const parsedPage = parseInt(page as string) || 1;
-            const parsedLimit = parseInt(limit as string) || 10;
-
-            const transactions = typeof searchTerm === 'string' && searchTerm
-                ? await this.transactionService.searchTransactions(
-                    searchTerm,
-                    filter,
-                    { page: parsedPage, limit: parsedLimit, useTextSearch: false }
-                )
-                : await this.transactionService.paginate(filter, {
-                    page: parsedPage,
-                    limit: parsedLimit,
-                    sort: { createdAt: -1 },
-                });
+            const transactions = await this.transactionService.listTransactions(
+                filter,
+                { page: parseInt(page as string) || 1, limit: parseInt(limit as string) || 10 },
+                typeof searchTerm === 'string' ? searchTerm : undefined
+            );
 
             return this.sendSuccess(res, transactions)
         } catch (error: any) {
@@ -299,14 +285,11 @@ class TransactionController extends BaseController {
             const { page, limit, searchTerm, status, startDate, endDate } = req.query;
             const user = res.locals.user;
 
-            // Build the filter from a strict whitelist — never spread req.query into a Mongo filter
-            // (Express parses ?foo[$ne]=x into operator objects and would inject into the query).
-            // Filter for bank transfer / YellowCard transactions (includes both send and receive).
-            // Excludes RMB (alipay/wechat) which is served by a separate endpoint.
-            const filter: Record<string, unknown> = {
-                currency: {
-                    $in: ['GHS', 'NGN', 'KES', 'XAF', 'ZAR', 'TZS', 'UGX', 'XOF', 'RWF', 'BWP', 'ZMW', 'MWK'],
-                },
+            // Build the filter from a strict whitelist — never pass req.query straight to the database.
+            // Bank transfer / YellowCard / OGateway transactions (send and receive); RMB (alipay/wechat)
+            // is served by a separate endpoint.
+            const filter: TransactionListFilter = {
+                currency: ['GHS', 'NGN', 'KES', 'XAF', 'ZAR', 'TZS', 'UGX', 'XOF', 'RWF', 'BWP', 'ZMW', 'MWK'],
             };
 
             if (!isAdmin) {
@@ -318,24 +301,14 @@ class TransactionController extends BaseController {
             }
 
             const createdAt = this.buildDateRangeFilter(startDate, endDate);
-            if (createdAt) {
-                filter.createdAt = createdAt;
-            }
+            filter.createdFrom = createdAt?.from;
+            filter.createdTo = createdAt?.to;
 
-            const parsedPage = parseInt(page as string) || 1;
-            const parsedLimit = parseInt(limit as string) || 10;
-
-            const transactions = typeof searchTerm === 'string' && searchTerm
-                ? await this.transactionService.searchTransactions(
-                    searchTerm,
-                    filter,
-                    { page: parsedPage, limit: parsedLimit, useTextSearch: false }
-                )
-                : await this.transactionService.paginate(filter, {
-                    page: parsedPage,
-                    limit: parsedLimit,
-                    sort: { createdAt: -1 },
-                });
+            const transactions = await this.transactionService.listTransactions(
+                filter,
+                { page: parseInt(page as string) || 1, limit: parseInt(limit as string) || 10 },
+                typeof searchTerm === 'string' ? searchTerm : undefined
+            );
 
             return this.sendSuccess(res, transactions)
         } catch (error: any) {

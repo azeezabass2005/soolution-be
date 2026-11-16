@@ -1,4 +1,4 @@
-import ExchangeRate from "../models/exchange-rate.model";
+import exchangeRateRepository from "../repositories/exchange-rate.repository";
 import yellowCardService from "./yellowcard.service";
 import ogatewayService from "./ogateway.service";
 import platformSettingsService from "./platform-settings.service";
@@ -53,8 +53,8 @@ class FxRateService {
     /** Admin table rows are "units of `to` per 1 `from`" */
     private async adminRate(currency: string, side: FxSide): Promise<FxRate> {
         const row = side === "buy"
-            ? await ExchangeRate.findOne({ from: BASE_WALLET_CURRENCY, to: currency, isActive: true }).lean()
-            : await ExchangeRate.findOne({ from: currency, to: BASE_WALLET_CURRENCY, isActive: true }).lean();
+            ? await exchangeRateRepository.findPair(BASE_WALLET_CURRENCY, currency, { activeOnly: true })
+            : await exchangeRateRepository.findPair(currency, BASE_WALLET_CURRENCY, { activeOnly: true });
         if (!row || !(row.rate > 0)) {
             throw errorResponseMessage.createError(
                 400,

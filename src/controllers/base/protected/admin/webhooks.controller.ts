@@ -1,10 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import BaseController from '../../base-controller';
 import RoleMiddleware from '../../../../middlewares/role.middleware';
-import WebhookEvent from '../../../../models/webhook-event.model';
 import webhookEventService from '../../../../services/webhook-event.service';
 import errorResponseMessage from '../../../../common/messages/error-response-message';
-import { WEBHOOK_PROVIDER, WEBHOOK_STATUS } from '../../../../common/constant';
+import { WEBHOOK_PROVIDER } from '../../../../common/constant';
 import TransactionService from '../../../../services/transaction.service';
 import WalletService from '../../../../services/wallet.service';
 import logger from '../../../../utils/logger.utils';
@@ -22,7 +21,7 @@ class AdminWebhooksController extends BaseController {
 
     constructor() {
         super();
-        this.transactionService = new TransactionService(['user']);
+        this.transactionService = new TransactionService();
         this.walletService = new WalletService();
         this.setupRoutes();
     }
@@ -37,28 +36,18 @@ class AdminWebhooksController extends BaseController {
 
     private async list(req: Request, res: Response, next: NextFunction) {
         try {
-            const filter: any = {};
-            if (typeof req.query.provider === 'string') filter.provider = req.query.provider;
-            if (typeof req.query.status === 'string') filter.status = req.query.status;
-            if (typeof req.query.event === 'string') filter.event = req.query.event;
-            if (typeof req.query.externalId === 'string') filter.externalId = req.query.externalId;
-
-            const dateRange: any = {};
-            if (typeof req.query.startDate === 'string') dateRange.$gte = new Date(req.query.startDate);
-            if (typeof req.query.endDate === 'string') dateRange.$lte = new Date(req.query.endDate);
-            if (Object.keys(dateRange).length > 0) filter.receivedAt = dateRange;
-
-            const page = parseInt(req.query.page as string) || 1;
-            const limit = parseInt(req.query.limit as string) || 25;
-            // @ts-ignore — paginate plugin
-            const result = await WebhookEvent.paginate(filter, {
-                page, limit, sort: { receivedAt: -1 },
-                customLabels: {
-                    totalDocs: 'itemsCount', docs: 'data', limit: 'perPage',
-                    page: 'currentPage', nextPage: 'next', prevPage: 'prev',
-                    totalPages: 'pageCount', pagingCounter: 'serialNumber', meta: 'paginator',
+            const query = req.query;
+            const result = await webhookEventService.list(
+                {
+                    provider: typeof query.provider === 'string' ? query.provider : undefined,
+                    status: typeof query.status === 'string' ? query.status : undefined,
+                    event: typeof query.event === 'string' ? query.event : undefined,
+                    externalId: typeof query.externalId === 'string' ? query.externalId : undefined,
+                    receivedFrom: typeof query.startDate === 'string' ? new Date(query.startDate) : undefined,
+                    receivedTo: typeof query.endDate === 'string' ? new Date(query.endDate) : undefined,
                 },
-            });
+                { page: parseInt(query.page as string) || 1, limit: parseInt(query.limit as string) || 25 }
+            );
             return this.sendSuccess(res, result);
         } catch (error) {
             return next(error);
@@ -67,7 +56,7 @@ class AdminWebhooksController extends BaseController {
 
     private async getOne(req: Request, res: Response, next: NextFunction) {
         try {
-            const event = await WebhookEvent.findById(req.params.id);
+            const event = await webhookEventService.findById(req.params.id);
             if (!event) throw errorResponseMessage.resourceNotFound('Webhook event');
             return this.sendSuccess(res, { event });
         } catch (error) {
@@ -82,28 +71,17 @@ class AdminWebhooksController extends BaseController {
      */
     private async replay(req: Request, res: Response, next: NextFunction) {
         try {
-            const original = await WebhookEvent.findById(req.params.id);
+            const original = await webhookEventService.findById(req.params.id);
             if (!original) throw errorResponseMessage.resourceNotFound('Webhook event');
 
             // Insert a new row representing the replay attempt.
-            const replay = await WebhookEvent.create({
-                provider: original.provider,
-                event: original.event,
-                externalId: original.externalId,
-                signature: original.signature,
-                signatureValid: true, // we trust the original signature was already verified
-                headers: original.headers,
-                payload: original.payload,
-                receivedAt: new Date(),
-                status: WEBHOOK_STATUS.RECEIVED,
-                replayOf: original._id,
-            });
-            const replayId = (replay._id as any).toString();
+            const replay = await webhookEventService.recordReplay(original);
+            const replayId = replay.id;
 
             try {
                 await this.dispatchToHandler(original.provider, original.payload);
                 await webhookEventService.markProcessed(replayId);
-                logger.info('Webhook replayed', { originalId: original._id, replayId });
+                logger.info('Webhook replayed', { originalId: original.id, replayId });
             } catch (replayError) {
                 await webhookEventService.markFailed(replayId, replayError);
                 throw replayError;

@@ -165,8 +165,17 @@ class FincraService {
                 merchantReference: `sp-lab-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
                 ...(input.channel ? { channel: input.channel } : {}),
             };
-            const res = await this.request("post", "/profile/virtual-accounts/requests", { body });
-            return maskDeep(res?.data);
+            try {
+                const res = await this.request("post", "/profile/virtual-accounts/requests", { body });
+                return maskDeep(res?.data);
+            } catch (error) {
+                // Fincra support needs the reference to trace a failed request
+                if (error instanceof FincraError) {
+                    logger.warn("Fincra account request failed", { merchantReference: body.merchantReference, channel: input.channel || "default", status: error.status });
+                    error.message = `${error.message} (reference ${body.merchantReference}${input.channel ? `, bank ${input.channel}` : ""})`;
+                }
+                throw error;
+            }
         } finally {
             this.creating.delete(input.bvn);
         }
@@ -180,13 +189,34 @@ class FincraService {
      */
     async listDeposits(virtualAccountId: string, accountNumber?: string) {
         const business = await this.getBusinessId();
-        let res = await this.request("get", "/collections", { params: { business, virtualAccount: virtualAccountId } });
-        let deposits = rows(res?.data);
-        if (!deposits.length && accountNumber) {
-            res = await this.request("get", "/collections", { params: { business, virtualAccount: accountNumber } });
-            deposits = rows(res?.data);
+        const id = await this.resolveAccountId(virtualAccountId, accountNumber);
+        const res = await this.request("get", "/collections", { params: { business, virtualAccount: id } });
+        return rows(res?.data).map(maskDeep);
+    }
+
+    /** Account number → Fincra's 24-character account id, learnt from the account list */
+    private accountIds = new Map<string, string>();
+
+    /**
+     * The live API only accepts the account's 24-character id as
+     * `virtualAccount` (an account number fails validation). The id given
+     * may be something else, such as what a create returned, so fall back
+     * to finding the account by its number.
+     */
+    private async resolveAccountId(id: string, accountNumber?: string): Promise<string> {
+        if (/^[0-9a-f]{24}$/i.test(id)) return id;
+        const key = accountNumber || id;
+        const cached = this.accountIds.get(key);
+        if (cached) return cached;
+        const { accounts } = await this.listVirtualAccounts();
+        for (const a of accounts) {
+            const n = a.accountInformation?.accountNumber || a.accountNumber;
+            if (n && a._id) this.accountIds.set(n, a._id);
         }
-        return deposits.map(maskDeep);
+        const match = accounts.find((a: any) => a._id === id || a.id === id || (accountNumber && (a.accountInformation?.accountNumber || a.accountNumber) === accountNumber));
+        if (!match?._id) throw new FincraError("This account isn't in Fincra's account list yet; deposits can be checked once it appears", 404);
+        this.accountIds.set(key, match._id);
+        return match._id;
     }
 
     /** What Fincra charges on a checkout payment of this size. Prices only; nothing is charged. */

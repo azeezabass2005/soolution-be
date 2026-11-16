@@ -1,6 +1,7 @@
 import WhatsAppService from '../utils/whatsapp.utils';
 import EmailService from '../utils/email.utils';
-import { IUser } from '../models/interface';
+/** What a notification needs to know about its recipient */
+type IUser = { id?: string; email: string; firstName?: string; lastName?: string; phoneNumber?: string; whatsappNumber?: string };
 
 interface NotificationConfig {
     title: string;
@@ -110,7 +111,7 @@ class NotificationService {
                     }
                 }
             } else {
-                console.warn(`User ${user._id} has no phone number for WhatsApp notification`);
+                console.warn(`User ${user.id} has no phone number for WhatsApp notification`);
             }
         } catch (error) {
             console.error(`Failed to send WhatsApp to ${user.phoneNumber}:`, error);

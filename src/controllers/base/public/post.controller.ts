@@ -2,7 +2,6 @@ import {Request, Response, NextFunction} from "express";
 import BaseController from "../../base/base-controller";
 import PostService from "../../../services/post.service";
 import errorResponseMessage from "../../../common/messages/error-response-message";
-import {IPost} from "../../../models/interface";
 import {validatePostCreate} from "../../../validators";
 
 /**
@@ -49,18 +48,13 @@ class PostController extends BaseController {
             // Build the filter from a strict whitelist — never pass req.query as the Mongo filter
             // (Express parses ?foo[$ne]=x into operator objects and would inject into the query).
             const { category, publicationStatus, user, tag } = req.query;
-            const filter: Record<string, unknown> = {};
+            const filter: { category?: string; publicationStatus?: string; user?: string; tag?: string } = {};
             if (typeof category === 'string' && category) filter.category = category;
             if (typeof publicationStatus === 'string' && publicationStatus) filter.publicationStatus = publicationStatus;
             if (typeof user === 'string' && user) filter.user = user;
-            if (typeof tag === 'string' && tag) filter.tags = tag;
+            if (typeof tag === 'string' && tag) filter.tag = tag;
 
-            const posts = await this.postService.paginate(filter, {
-                page,
-                limit,
-                sort: {createdAt: -1},
-                populate: ['user']
-            });
+            const posts = await this.postService.list(filter, { page, limit });
 
             this.sendSuccess(res, {posts});
         } catch (error) {
@@ -74,9 +68,7 @@ class PostController extends BaseController {
      */
     private async getPostById(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const post = await this.postService.findById(req.params.id, {
-                populate: ['user']
-            });
+            const post = await this.postService.findById(req.params.id);
 
             if (!post) {
                 throw errorResponseMessage.resourceNotFound('Post');
@@ -98,7 +90,7 @@ class PostController extends BaseController {
      */
     private async updatePost(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const post = await this.postService.updateById(req.params.id, req.body);
+            const post = await this.postService.update(req.params.id, req.body ?? {});
 
             if (!post) {
                 throw errorResponseMessage.resourceNotFound('Post');

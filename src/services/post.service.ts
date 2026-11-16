@@ -1,59 +1,40 @@
-import DBService from '../utils/db.utils';
-import {IPost} from '../models/interface';
-import Post from "../models/post.model";
-import {HydratedDocument, PipelineStage} from "mongoose";
+import postRepository, { type PostFilter, type PostUpdate, type PostWithUser, type RelatedPost } from "../repositories/post.repository";
+import type { PageRequest, Paginated } from "../db/pagination";
+import type { PublicationStatus } from "../types/enums";
+import { PUBLICATION_STATUS } from "../common/constant";
 import errorResponseMessage from "../common/messages/error-response-message";
 
-/**
- * Service class for User-related database operations
- *
- * @description Extends the generic DBService with User-specific configurations
- * @extends {DBService<IPost>}
- */
-class PostService extends DBService<IPost> {
-    /**
-     * Creates an instance of PostService
-     *
-     * @constructor
-     * @param {string[]} [populatedFields=[]] - Optional fields to populate during queries
-     */
-    constructor(populatedFields: string[] = []) {
-        // Initialize the service with User model and optional population fields
-        super(Post, populatedFields);
+const PUBLICATION_STATUSES = Object.values(PUBLICATION_STATUS) as string[];
+
+class PostService {
+    /** Newest first, with the author */
+    async list(filter: PostFilter, page: PageRequest): Promise<Paginated<PostWithUser>> {
+        return postRepository.paginate(filter, page);
+    }
+
+    async findById(postId: string): Promise<PostWithUser | undefined> {
+        return postRepository.findById(postId);
+    }
+
+    /** Only these fields can be edited (never the author or counters) */
+    async update(postId: string, body: Record<string, unknown>) {
+        const patch: PostUpdate = {};
+        if (typeof body.title === "string") patch.title = body.title;
+        if (typeof body.content === "string") patch.content = body.content;
+        if (typeof body.category === "string") patch.category = body.category;
+        if (Array.isArray(body.tags) && body.tags.every((tag) => typeof tag === "string")) patch.tags = body.tags as string[];
+        if (typeof body.publicationStatus === "string") {
+            if (!PUBLICATION_STATUSES.includes(body.publicationStatus)) {
+                throw errorResponseMessage.payloadIncorrect(`publicationStatus must be one of ${PUBLICATION_STATUSES.join(", ")}`);
+            }
+            patch.publicationStatus = body.publicationStatus as PublicationStatus;
+        }
+        return postRepository.update(postId, patch);
     }
 
     /**
-     * Calculate time decay score based on post age
-     * Newer posts get higher scores
-     */
-    private getTimeDecayExpression() {
-        const DAY_IN_MS = 24 * 60 * 60 * 1000;
-        return {
-            $divide: [
-                1,
-                {
-                    $add: [
-                        1,
-                        {
-                            $divide: [
-                                {$subtract: [new Date(), "$publishedAt"]},
-                                DAY_IN_MS
-                            ]
-                        }
-                    ]
-                }
-            ]
-        };
-    }
-
-    /**
-     * Find posts related to a given post based on tags and other criteria
-     *
-     * @param {string} postId - ID of the post to find related content for
-     * @param {Object} options - Options for customizing related posts query
-     * @param {number} options.limit - Maximum number of related posts to return
-     * @param {boolean} options.includeSameUser - Whether to include posts from the same user
-     * @returns {Promise<HydratedDocument<IPost>[]>} Array of related posts
+     * Posts related to a given post, ranked by shared category and tags, text
+     * similarity, engagement and recency.
      */
     public async getRelatedPosts(
         postId: string,
@@ -66,171 +47,41 @@ class PostService extends DBService<IPost> {
             engagementWeight?: number;
             timeDecayWeight?: number;
         } = {}
-    ): Promise<HydratedDocument<IPost>[]> {
+    ): Promise<RelatedPost[]> {
         const {
             limit = 5,
             includeSameUser = false,
-            categoryWeight = 3,    // Category matching is important
-            tagWeight = 2,         // Tag matching is also significant
-            textSimilarityWeight = 1.5,  // Text similarity adds relevance
-            engagementWeight = 1,   // Engagement provides social proof
-            timeDecayWeight = 0.5   // Time decay slightly influences ranking
+            categoryWeight = 3, // Category matching is important
+            tagWeight = 2, // Tag matching is also significant
+            textSimilarityWeight = 1.5, // Text similarity adds relevance
+            engagementWeight = 1, // Engagement provides social proof
+            timeDecayWeight = 0.5, // Time decay slightly influences ranking
         } = options;
 
-        const originalPost = await this.findById(postId, {
-            populate: ['user']
-        });
-
+        const originalPost = await postRepository.findById(postId);
         if (!originalPost) {
-            throw errorResponseMessage.resourceNotFound('Post');
+            throw errorResponseMessage.resourceNotFound("Post");
         }
 
-        const pipeline: PipelineStage[] = [
+        const author = typeof originalPost.user === "string" ? originalPost.user : originalPost.user.id;
+        return postRepository.findRelated(
+            { ...originalPost, user: author },
             {
-                $match: {
-                    _id: {$ne: originalPost._id},
-                    ...((!includeSameUser && originalPost.user) ?
-                        {user: {$ne: originalPost.user}} : {}),
-                }
-            },
-
-            {
-                $addFields: {
-                    categoryScore: {
-                        $cond: {
-                            if: {$eq: ["$category", originalPost.category]},
-                            then: categoryWeight,
-                            else: 0
-                        }
-                    },
-
-                    tagScore: {
-                        $multiply: [
-                            {
-                                $size: {
-                                    $setIntersection: ["$tags", originalPost.tags || []]
-                                }
-                            },
-                            tagWeight
-                        ]
-                    },
-
-                    // Text similarity score using text index
-                    textScore: {
-                        $multiply: [
-                            {$meta: "textScore"},
-                            textSimilarityWeight
-                        ]
-                    },
-
-                    engagementScore: {
-                        $multiply: [
-                            {
-                                $divide: [
-                                    {$add: ["$viewCount", {$multiply: ["$likeCount", 2]}]},
-                                    100
-                                ]
-                            },
-                            engagementWeight
-                        ]
-                    },
-
-                    timeDecayScore: {
-                        $multiply: [
-                            this.getTimeDecayExpression(),
-                            timeDecayWeight
-                        ]
-                    }
-                }
-            },
-
-            {
-                $match: {
-                    $text: {
-                        $search: `${originalPost.title} ${originalPost.content}`
-                    }
-                }
-            },
-
-            {
-                $addFields: {
-                    finalScore: {
-                        $add: [
-                            "$categoryScore",
-                            "$tagScore",
-                            "$textScore",
-                            "$engagementScore",
-                            "$timeDecayScore"
-                        ]
-                    }
-                }
-            },
-
-            // Sort by final score
-            {
-                $sort: {
-                    finalScore: -1
-                }
-            },
-
-            // Limit results
-            {$limit: limit},
-
-            // Populate user
-            {
-                $lookup: {
-                    from: 'users',
-                    localField: 'user',
-                    foreignField: '_id',
-                    as: 'user'
-                }
-            },
-            {$unwind: '$user'},
-
-            {
-                $project: {
-                    _id: 1,
-                    title: 1,
-                    content: 1,
-                    tags: 1,
-                    category: 1,
-                    user: 1,
-                    viewCount: 1,
-                    likeCount: 1,
-                    publishedAt: 1,
-                    createdAt: 1,
-                    updatedAt: 1,
-                    scores: {
-                        category: "$categoryScore",
-                        tags: "$tagScore",
-                        text: "$textScore",
-                        engagement: "$engagementScore",
-                        timeDecay: "$timeDecayScore",
-                        final: "$finalScore"
-                    }
-                }
+                limit,
+                includeSameUser,
+                weights: { category: categoryWeight, tag: tagWeight, text: textSimilarityWeight, engagement: engagementWeight, timeDecay: timeDecayWeight },
             }
-        ];
-
-        return this.aggregate(pipeline);
+        );
     }
 
-    /**
-     * Increment view count for a post
-     */
+    /** Increment view count for a post */
     public async incrementViewCount(postId: string): Promise<void> {
-        await this.updateById(postId, {$inc: {viewCount: 1}});
+        await postRepository.incrementCounter(postId, "viewCount", 1);
     }
 
-    /**
-     * Increment like count for a post
-     */
+    /** Like (or unlike) a post */
     public async updateLikeCount(postId: string, likeUpdateType = "increment"): Promise<void> {
-        if(likeUpdateType === "decrement") {
-            await this.updateById(postId, {$inc: {likeCount: 1}});
-        } else {
-            await this.updateById(postId, {dec: {likeCount: 1}});
-        }
+        await postRepository.incrementCounter(postId, "likeCount", likeUpdateType === "decrement" ? -1 : 1);
     }
 }
 

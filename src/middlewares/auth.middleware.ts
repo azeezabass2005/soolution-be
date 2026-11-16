@@ -3,6 +3,8 @@ import TokenBuilder from "../utils/token.utils";
 import { TokenType } from "../utils/interface";
 import UserService from "../services/user.service";
 
+const userService = new UserService();
+
 class AuthMiddleware {
     /**
      * Validates the presence of authorization header or cookie
@@ -133,19 +135,13 @@ class AuthMiddleware {
      * @param res Express response object
      */
     private async verifyUser(res: Response) {
-        const userService = new UserService();
-        const getUser = await userService.findOne({
-            _id: res.locals.userId,
-            email: res.locals.email,
-        });
+        // Never includes the password or PIN hash
+        const user = await userService.findForSession(res.locals.userId, res.locals.email);
 
-
-        if (!getUser?._id) {
+        if (!user?.id) {
             throw new Error("User not found");
         }
 
-        // Remove sensitive information
-        const { password, ...user } = getUser?.toJSON();
         res.locals.user = user;
     }
 }

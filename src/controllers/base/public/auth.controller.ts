@@ -9,7 +9,7 @@ import RefreshTokenService from "../../../services/refresh.service";
 import authMiddleware from "../../../middlewares/auth.middleware";
 import {loginValidate, postRegisterValidate, registerValidate, validateResetTransactionPin} from "../../../validators";
 import {parsePostRegistration} from "../../../validators/z-register";
-import {IUser} from "../../../models/interface";
+import type { User as IUser } from "../../../types/entities";
 import config from "../../../config/env.config";
 import NotificationService from "../../../utils/notification.utils";
 import PinService from "../../../services/pin.service";
@@ -21,7 +21,6 @@ import rateLimit from "express-rate-limit";
 /** Changes whenever the password does, so a reset link only works once */
 const passwordFingerprint = (passwordHash?: string) =>
     crypto.createHmac("sha256", config.JWT_SECRET).update(String(passwordHash || "")).digest("hex").slice(0, 24);
-import User from "../../../models/user.model";
 
 /**
  * Controller handling authentication-related operations
@@ -107,11 +106,7 @@ class AuthController extends BaseController {
             const { email, password, firstName, lastName } = req.body;
 
             // Check if user already exists
-            const existingUser = await this.userService.findOne({
-                email: email
-            });
-
-            console.log(existingUser, "This is the existing user")
+            const existingUser = await this.userService.findByEmail(email);
 
             if (existingUser) {
                 return next(errorResponseMessage.createError(
@@ -125,7 +120,7 @@ class AuthController extends BaseController {
             const hashedPassword = await HashService.hashPassword(password);
 
             // Create user
-            const user = await this.userService.save({
+            const user = await this.userService.register({
                 email,
                 firstName,
                 lastName,
@@ -136,20 +131,13 @@ class AuthController extends BaseController {
             // Every account starts with an NGN wallet. If this fails, the wallet
             // is created on first visit (and by the startup backfill), so don't block sign-up.
             try {
-                await new WalletService().getOrCreateWallet(String(user._id));
+                await new WalletService().getOrCreateWallet(user.id);
             } catch (error) {
                 this.logger.error('Failed to create NGN wallet at sign-up', {
-                    userId: user._id,
+                    userId: user.id,
                     error: error instanceof Error ? error.message : String(error),
                 });
             }
-
-            // Generate verification token
-            // const verificationToken = this.tokenBuilder.build().createVerifyToken({
-            //     userId: user._id as string,
-            //     email: user.email,
-            //     username: user.username
-            // });
 
             // Send welcome email to newly registered user
             try {
@@ -163,13 +151,13 @@ class AuthController extends BaseController {
                     }
                 );
                 this.logger.info('Welcome email sent successfully', {
-                    userId: user._id,
+                    userId: user.id,
                     email: user.email,
                     name: `${user.firstName} ${user.lastName}`
                 });
             } catch (error) {
                 this.logger.error('Failed to send welcome email during registration', {
-                    userId: user._id,
+                    userId: user.id,
                     email: user.email,
                     error: error instanceof Error ? error.message : String(error),
                     stack: error instanceof Error ? error.stack : undefined
@@ -179,7 +167,7 @@ class AuthController extends BaseController {
 
             this.sendSuccess(res, {
                 message: "Registration successful. Please verify your email.",
-                userId: user._id,
+                userId: user.id,
                 registrationToken: this.createRegistrationToken(user)
             }, 201);
         } catch (error) {
@@ -236,7 +224,7 @@ class AuthController extends BaseController {
             // Only the validated sign-up fields; never role, tier or verification flags from the request
             const registrationCompletionData = parsePostRegistration(req.body);
 
-            const completeUser = await this.userService.updateById(tokenUserId, {...registrationCompletionData, isCompleted: true})
+            const completeUser = await this.userService.update(tokenUserId, {...registrationCompletionData, isCompleted: true})
 
             if(!completeUser) {
                 throw new Error("Failed to complete user registration");
@@ -246,8 +234,8 @@ class AuthController extends BaseController {
             const { accessToken, refreshToken } = await this.issueSession(req, res, completeUser, true);
 
             // Update last login timestamp
-            await this.userService.updateById(completeUser._id as string, {
-                lastLogin: new Date()
+            await this.userService.update(completeUser.id, {
+                lastLogin: new Date().toISOString()
             });
 
             this.sendSuccess(res, {
@@ -255,7 +243,7 @@ class AuthController extends BaseController {
                 refreshToken,
                 message: "Registration completed successfully. You are now logged in.",
                 user: {
-                    id: completeUser._id,
+                    id: completeUser.id,
                     email: completeUser.email,
                     role: Object.entries(ROLE_MAP).find(([_, v]) => v === completeUser.role)?.[0],
                     purpose: completeUser.purpose
@@ -288,7 +276,7 @@ class AuthController extends BaseController {
                 return next(errorResponseMessage.payloadIncorrect("Email and password are required"));
             }
 
-            const user = await this.userService.findOne({ email }, { select: ['+password'] });
+            const user = await this.userService.findByEmail(email, { withSecrets: true });
             if (!user) {
                 return next(errorResponseMessage.unauthorized("Invalid credentials"));
             }
@@ -299,7 +287,7 @@ class AuthController extends BaseController {
 
             const isValidPassword = await HashService.verifyPassword(
                 password,
-                user.password
+                user.password!
             );
 
             if (!isValidPassword) {
@@ -310,7 +298,7 @@ class AuthController extends BaseController {
                 return this.sendSuccess(res, {
                     message: "Registration not completed. Redirecting to completion step",
                     not_completed: true,
-                    userId: user._id,
+                    userId: user.id,
                     registrationToken: this.createRegistrationToken(user)
                 });
             }
@@ -324,8 +312,8 @@ class AuthController extends BaseController {
             const { accessToken, refreshToken } = await this.issueSession(req, res, user, rememberMe);
 
             // Update last login timestamp
-            await this.userService.updateById(user._id as string, {
-                lastLogin: new Date()
+            await this.userService.update(user.id, {
+                lastLogin: new Date().toISOString()
             });
 
             // Send login notification email to user
@@ -341,7 +329,7 @@ class AuthController extends BaseController {
                     }
                 );
                 this.logger.info('Login notification email sent successfully', {
-                    userId: user._id,
+                    userId: user.id,
                     email: user.email,
                     name: `${user.firstName} ${user.lastName}`,
                     ip: req.ip,
@@ -349,7 +337,7 @@ class AuthController extends BaseController {
                 });
             } catch (error) {
                 this.logger.error('Failed to send login notification email', {
-                    userId: user._id,
+                    userId: user.id,
                     email: user.email,
                     error: error instanceof Error ? error.message : String(error),
                     stack: error instanceof Error ? error.stack : undefined,
@@ -363,7 +351,7 @@ class AuthController extends BaseController {
                 refreshToken,
                 message: "You are successfully logged in.",
                 user: {
-                    id: user._id,
+                    id: user.id,
                     email: user.email,
                     role: Object.entries(ROLE_MAP).find(([_, v]) => v === user.role)?.[0]
                 }
@@ -396,7 +384,7 @@ class AuthController extends BaseController {
             }
 
             // Update user verification status
-            const user = await this.userService.updateById(decoded.data.userId, {
+            const user = await this.userService.update(decoded.data.userId, {
                 isVerified: true
             });
 
@@ -429,7 +417,7 @@ class AuthController extends BaseController {
             });
 
             try {
-                const user = await this.userService.findOne({ email }, { select: ['+password'] });
+                const user = await this.userService.findByEmail(email, { withSecrets: true });
                 if (!user || user.status !== 'active') return;
                 const token = this.tokenBuilder.build().createToken(user, {
                     type: TokenType.RESET,
@@ -442,7 +430,7 @@ class AuthController extends BaseController {
                     resetUrl,
                     expiryTime: '30 minutes',
                 });
-                this.logger.info("Password reset email sent", { userId: user._id });
+                this.logger.info("Password reset email sent", { userId: user.id });
             } catch (sendError) {
                 this.logger.error("Failed to send password reset email", {
                     error: sendError instanceof Error ? sendError.message : String(sendError),
@@ -480,19 +468,18 @@ class AuthController extends BaseController {
                 return next(invalidLink());
             }
 
-            const user = await this.userService.findOne({ _id: decoded.data.userId }, { select: ['+password'] });
+            const user = await this.userService.findById(decoded.data.userId, { withSecrets: true });
             // The link stops working once the password has changed, so it can only be used once
             if (!user || passwordFingerprint(user.password) !== decoded.data.pfp) {
                 return next(invalidLink());
             }
 
             const hashedPassword = await HashService.hashPassword(newPassword);
-            await this.userService.updateById(String(user._id), { password: hashedPassword.password });
+            await this.userService.update(user.id, { password: hashedPassword.password });
 
             // A new password signs out every existing session
-            await this.refreshTokenService.revokeAllUserTokens(user._id);
-            await User.updateOne({ _id: user._id }, { $set: { sessionsValidAfter: new Date() } });
-            this.logger.info("Password reset", { userId: user._id });
+            await this.userService.endAllSessions(user.id);
+            this.logger.info("Password reset", { userId: user.id });
 
             this.notificationService.emailService.sendNotificationEmail(user.email, {
                 name: user.firstName || 'there',
@@ -575,15 +562,14 @@ class AuthController extends BaseController {
             if (!tokenDoc) {
                 const stored = await this.refreshTokenService.findByTokenId(refreshPayload.tokenId);
                 if (stored?.isRevoked) {
-                    const revokedAgo = Date.now() - new Date(stored.revokedAt || (stored as any).updatedAt || 0).getTime();
+                    const revokedAgo = Date.now() - new Date(stored.revokedAt || stored.updatedAt || 0).getTime();
                     if (revokedAgo <= SESSION.REFRESH_REUSE_GRACE_MS) {
                         // Another tab refreshed with it a moment ago; the browser already has the new cookies
                         return next(errorResponseMessage.createError(401, "Session refreshed in another tab", ErrorSeverity.LOW, { code: SESSION_CODE.REFRESH_RACED }));
                     }
                     // A used token coming back later means it was copied: end every session for this user
                     this.logger.warn("Refresh token reused; signing the user out everywhere", { userId: refreshPayload.userId, ip: req.ip });
-                    await this.refreshTokenService.revokeAllUserTokens(refreshPayload.userId);
-                    await User.updateOne({ _id: refreshPayload.userId }, { $set: { sessionsValidAfter: new Date() } });
+                    await this.userService.endAllSessions(refreshPayload.userId);
                 }
                 return next(sessionEnded("Your session has ended. Please sign in again."));
             }
@@ -645,7 +631,7 @@ class AuthController extends BaseController {
         const decodedRefresh = await this.tokenBuilder.setToken(refreshToken).build().verifyToken();
         if (decodedRefresh && decodedRefresh.type === TokenType.REFRESH) {
             await this.refreshTokenService.saveRefreshToken(
-                user._id as string,
+                user.id,
                 (decodedRefresh.data as IRefreshTokenPayload).tokenId,
                 req.headers['user-agent'],
                 req.ip,
@@ -683,13 +669,12 @@ class AuthController extends BaseController {
             // Get the user ID from the request (added by auth middleware)
             const user = res.locals.user;
 
-            if (!user._id) {
+            if (!user?.id) {
                 return next(errorResponseMessage.unauthorized("User not authenticated"));
             }
 
             // Revoke all refresh tokens, and refuse access tokens already handed out
-            await this.refreshTokenService.revokeAllUserTokens(user._id);
-            await User.updateOne({ _id: user._id }, { $set: { sessionsValidAfter: new Date() } });
+            await this.userService.endAllSessions(user.id);
 
             // Clear cookies
             res.clearCookie('accessToken', {

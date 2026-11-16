@@ -1,6 +1,6 @@
 import { TRANSACTION_STATUS } from "../common/constant";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
-import { TransactionStatus } from "../models/interface";
+import type { TransactionStatus } from "../types/enums";
 
 /**
  * Transaction State Machine Utility

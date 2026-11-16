@@ -4,10 +4,17 @@
   "description": "Solution Pay Backend",
   "main": "dist/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "npx tsc && node ./dist/index.js",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/db/migrate.js && node dist/index.js",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node dist/db/migrate.js",
+    "db:migrate:dev": "tsc && node dist/db/migrate.js",
+    "db:studio": "drizzle-kit studio",
+    "test:pg": "vitest run --no-file-parallelism"
   },
   "author": "",
   "license": "ISC",
@@ -23,15 +30,15 @@
     "compression": "^1.7.5",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.45.4",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.9.0",
-    "mongoose-paginate-v2": "^1.9.0",
     "morgan": "^1.10.0",
     "multer": "^2.0.2",
     "nodemailer": "^7.0.9",
+    "pg": "^8.23.1",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "smile-identity-core": "^3.1.0",
@@ -41,6 +48,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
     "@types/archiver": "^6.0.3",
     "@types/compression": "^1.7.5",
     "@types/cors": "^2.8.17",
@@ -49,9 +57,12 @@
     "@types/morgan": "^1.9.9",
     "@types/multer": "^2.0.0",
     "@types/nodemailer": "^7.0.2",
+    "@types/pg": "^8.23.1",
     "@types/qrcode-terminal": "^0.12.2",
+    "drizzle-kit": "^0.31.11",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.7.2",
+    "vitest": "^5.1.0",
     "wrangler": "^4.33.1"
   }
 }

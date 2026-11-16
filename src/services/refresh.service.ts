@@ -1,72 +1,44 @@
-import {ClientSession, Schema} from "mongoose";
-import RefreshToken from '../models/refresh.model';
-import DBService from "../utils/db.utils";
-import { IRefreshToken } from "../models/interface";
-import {TokenUtils} from "../utils/token.utils";
+import refreshTokenRepository from "../repositories/refresh-token.repository";
+import type { RefreshToken } from "../types/entities";
+import type { Executor } from "../db/client";
+import { TokenUtils } from "../utils/token.utils";
 
-class RefreshTokenService extends DBService<IRefreshToken> {
-    constructor() {
-        super(RefreshToken);
-    }
-
+class RefreshTokenService {
     async saveRefreshToken(
         userId: string,
         tokenId: string,
         userAgent?: string,
         ipAddress?: string,
-        session?: ClientSession,
+        tx?: Executor,
         expiresAt: Date = TokenUtils.getRefreshTokenExpiry()
-    ): Promise<IRefreshToken> {
-        return this.save({
-            userId: (userId as unknown) as Schema.Types.ObjectId,
-            token: tokenId,
-            expiresAt,
-            userAgent,
-            ipAddress,
-            isRevoked: false
-        }, session);
+    ): Promise<RefreshToken> {
+        return refreshTokenRepository.create({ userId, token: tokenId, expiresAt, userAgent, ipAddress, isRevoked: false }, tx);
     }
 
-    async findValidToken(tokenId: string): Promise<IRefreshToken | null> {
-        return this.findOne({
-            token: tokenId,
-            isRevoked: false,
-            expiresAt: { $gt: new Date() }
-        });
+    async findValidToken(tokenId: string): Promise<RefreshToken | undefined> {
+        return refreshTokenRepository.findValid(tokenId);
     }
 
     /**
      * Uses up a refresh token: marks it revoked and returns it, in one atomic
-     * step so two requests can't both spend the same token. Null when it's
+     * step so two requests can't both spend the same token. Undefined when it's
      * unknown, expired or already used.
      */
-    async consumeToken(tokenId: string): Promise<IRefreshToken | null> {
-        return RefreshToken.findOneAndUpdate(
-            { token: tokenId, isRevoked: false, expiresAt: { $gt: new Date() } },
-            { $set: { isRevoked: true, revokedAt: new Date() } },
-            { new: false },
-        );
+    async consumeToken(tokenId: string): Promise<RefreshToken | undefined> {
+        return refreshTokenRepository.consume(tokenId);
     }
 
     /** The stored token whatever its state, to see why it couldn't be used */
-    async findByTokenId(tokenId: string): Promise<IRefreshToken | null> {
-        return RefreshToken.findOne({ token: tokenId });
+    async findByTokenId(tokenId: string): Promise<RefreshToken | undefined> {
+        return refreshTokenRepository.findByToken(tokenId);
     }
 
-    async revokeToken(tokenId: string, session?: ClientSession): Promise<void> {
-        await this.update(
-            { token: tokenId },
-            { isRevoked: true },
-            session
-        );
+    async revokeToken(tokenId: string, tx?: Executor): Promise<void> {
+        await refreshTokenRepository.revoke(tokenId, tx);
     }
 
-    async revokeAllUserTokens(userId: any, session?: ClientSession): Promise<void> {
-        await RefreshToken.updateMany(
-            { userId: userId, isRevoked: false },
-            { $set: { isRevoked: true, revokedAt: new Date() } },
-            session ? { session } : {},
-        );
+    async revokeAllUserTokens(userId: string, tx?: Executor): Promise<void> {
+        await refreshTokenRepository.revokeAllForUser(String(userId), tx);
     }
 }
 

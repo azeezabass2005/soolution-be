@@ -1,7 +1,10 @@
-import mongoose from "mongoose";
-import FxQuote, { IFxQuote } from "../models/fx-quote.model";
-import WalletTransaction from "../models/wallet-transaction.model";
-import Wallet from "../models/wallet.model";
+import { withTransaction } from "../db/transaction";
+import fxQuoteRepository from "../repositories/fx-quote.repository";
+import walletRepository from "../repositories/wallet.repository";
+import walletTransactionRepository from "../repositories/wallet-transaction.repository";
+import { isUuid } from "../utils/id.utils";
+import type { FxQuote } from "../types/entities";
+import type { WalletCurrency } from "../common/wallet.constants";
 import fxRateService from "./fx-rate.service";
 import ledgerService from "./ledger.service";
 import WalletService from "./wallet.service";
@@ -92,10 +95,10 @@ class FxExchangeService {
             throw errorResponseMessage.createError(400, `The smallest exchange is ₦${MIN_EXCHANGE_NGN}`, ErrorSeverity.LOW);
         }
 
-        const quote = await FxQuote.create({
+        const quote = await fxQuoteRepository.create({
             user: userId,
-            fromCurrency,
-            toCurrency,
+            fromCurrency: fromCurrency as WalletCurrency,
+            toCurrency: toCurrency as WalletCurrency,
             fromAmount,
             toAmount,
             rate,
@@ -106,9 +109,9 @@ class FxExchangeService {
         return this.present(quote);
     }
 
-    present(quote: IFxQuote) {
+    present(quote: FxQuote) {
         return {
-            id: String(quote._id),
+            id: quote.id,
             fromCurrency: quote.fromCurrency,
             toCurrency: quote.toCurrency,
             fromAmount: quote.fromAmount,
@@ -120,7 +123,7 @@ class FxExchangeService {
     }
 
     async execute(userId: string, quoteId: unknown, pin: unknown) {
-        if (typeof quoteId !== "string" || !mongoose.isValidObjectId(quoteId)) {
+        if (typeof quoteId !== "string" || !isUuid(quoteId)) {
             throw errorResponseMessage.createError(400, "Get a rate before exchanging", ErrorSeverity.LOW);
         }
         if (typeof pin !== "string" || !pin) {
@@ -129,7 +132,7 @@ class FxExchangeService {
         await transactionLimitService.assertCanTransact(userId);
         await this.pinService.verifyPin(userId, pin);
 
-        const pending = await FxQuote.findOne({ _id: quoteId, user: userId }).lean();
+        const pending = await fxQuoteRepository.findOwned(quoteId, userId);
         if (!pending) throw errorResponseMessage.resourceNotFound("Quote");
         if (pending.usedAt) {
             throw errorResponseMessage.createError(409, "This exchange has already been made", ErrorSeverity.LOW, { code: "QUOTE_USED" });
@@ -138,7 +141,7 @@ class FxExchangeService {
             throw errorResponseMessage.createError(400, "This rate has expired. Get a new rate to continue.", ErrorSeverity.LOW, { code: "QUOTE_EXPIRED" });
         }
 
-        const fromWallet = await this.walletService.findOne({ user: userId, currency: pending.fromCurrency });
+        const fromWallet = await this.walletService.findWallet(userId, pending.fromCurrency);
         if (!fromWallet) {
             throw errorResponseMessage.createError(400, `You don't have a ${pending.fromCurrency} wallet`, ErrorSeverity.LOW);
         }
@@ -146,25 +149,15 @@ class FxExchangeService {
         const toWallet = await this.walletService.getOrCreateWallet(userId, pending.toCurrency as any);
         await this.walletService.getOrCreateWallet(userId, pending.fromCurrency as any);
 
-        const session = await mongoose.startSession();
-        session.startTransaction();
-        try {
-            // Claim the quote inside the transaction: an abort releases it again
-            const quote = await FxQuote.findOneAndUpdate(
-                { _id: quoteId, user: userId, usedAt: { $exists: false }, expiresAt: { $gt: new Date() } },
-                { $set: { usedAt: new Date() } },
-                { new: true, session }
-            );
+        const result = await withTransaction(async (tx) => {
+            // Claim the quote inside the transaction: a rollback releases it again
+            const quote = await fxQuoteRepository.claim(quoteId, userId, tx);
             if (!quote) {
                 throw errorResponseMessage.createError(409, "This rate is no longer available. Get a new rate to continue.", ErrorSeverity.LOW, { code: "QUOTE_EXPIRED" });
             }
             const { fromCurrency, toCurrency, fromAmount, toAmount, rate } = quote;
 
-            const debited = await Wallet.findOneAndUpdate(
-                { _id: fromWallet._id, status: "active", balance: { $gte: fromAmount } },
-                { $inc: { balance: -fromAmount, ledgerBalance: -fromAmount } },
-                { new: true, session }
-            );
+            const debited = await walletRepository.debit(fromWallet.id, fromAmount, tx, { alsoLedger: true });
             if (!debited) {
                 throw errorResponseMessage.createError(
                     400,
@@ -173,11 +166,7 @@ class FxExchangeService {
                     { code: "INSUFFICIENT_BALANCE", currency: fromCurrency, required: fromAmount }
                 );
             }
-            const credited = await Wallet.findOneAndUpdate(
-                { _id: toWallet._id, status: "active" },
-                { $inc: { balance: toAmount, ledgerBalance: toAmount } },
-                { new: true, session }
-            );
+            const credited = await walletRepository.credit(toWallet.id, toAmount, tx, { alsoLedger: true, requireActive: true });
             if (!credited) {
                 throw errorResponseMessage.createError(400, `Your ${toCurrency} wallet is not active. Please contact support.`, ErrorSeverity.HIGH);
             }
@@ -195,7 +184,7 @@ class FxExchangeService {
                 reference,
                 description: `Exchange ${fromAmount} ${fromCurrency} → ${toAmount} ${toCurrency}`,
                 metadata: { quoteId, rate, providerRate: quote.providerRate, rateSource: quote.rateSource },
-                session,
+                tx,
             });
 
             const shared = {
@@ -203,59 +192,59 @@ class FxExchangeService {
                 type: WALLET_TRANSACTION_TYPE.EXCHANGE,
                 status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
                 rate,
-                fxQuoteId: quote._id,
+                fxQuoteId: quote.id,
             };
-            const [outRow, inRow] = await WalletTransaction.create([
-                {
-                    ...shared,
-                    wallet: fromWallet._id,
-                    amount: fromAmount,
-                    currency: fromCurrency,
-                    counterCurrency: toCurrency,
-                    counterAmount: toAmount,
-                    reference: `${reference}-OUT`,
-                    balanceBefore: round2(debited.balance + fromAmount),
-                    balanceAfter: debited.balance,
-                    description: `Exchanged to ${toCurrency}`,
-                },
-                {
-                    ...shared,
-                    wallet: toWallet._id,
-                    amount: toAmount,
-                    currency: toCurrency,
-                    counterCurrency: fromCurrency,
-                    counterAmount: fromAmount,
-                    reference: `${reference}-IN`,
-                    balanceBefore: round2(credited.balance - toAmount),
-                    balanceAfter: credited.balance,
-                    description: `Exchanged from ${fromCurrency}`,
-                },
-            ], { session, ordered: true });
+            const [outRow, inRow] = await walletTransactionRepository.createMany(
+                [
+                    {
+                        ...shared,
+                        wallet: fromWallet.id,
+                        amount: fromAmount,
+                        currency: fromCurrency,
+                        counterCurrency: toCurrency,
+                        counterAmount: toAmount,
+                        reference: `${reference}-OUT`,
+                        balanceBefore: round2(debited.balance + fromAmount),
+                        balanceAfter: debited.balance,
+                        description: `Exchanged to ${toCurrency}`,
+                    },
+                    {
+                        ...shared,
+                        wallet: toWallet.id,
+                        amount: toAmount,
+                        currency: toCurrency,
+                        counterCurrency: fromCurrency,
+                        counterAmount: fromAmount,
+                        reference: `${reference}-IN`,
+                        balanceBefore: round2(credited.balance - toAmount),
+                        balanceAfter: credited.balance,
+                        description: `Exchanged from ${fromCurrency}`,
+                    },
+                ],
+                tx
+            );
 
-            await session.commitTransaction();
-            logger.info("Wallet exchange completed", { userId, fromCurrency, toCurrency, fromAmount, toAmount, rate, reference });
+            return { reference, fromCurrency, toCurrency, fromAmount, toAmount, rate, debited, credited, outRow, inRow };
+        });
 
-            auditLogService
-                .logAction(undefined, userId, "wallet_exchange", undefined, { fromCurrency, toCurrency, fromAmount, toAmount, rate, reference }, undefined, undefined, { quoteId })
-                .catch((error) => logger.warn("Audit log write failed (wallet_exchange)", { reference, error: error?.message }));
+        const { reference, fromCurrency, toCurrency, fromAmount, toAmount, rate, debited, credited, outRow, inRow } = result;
+        logger.info("Wallet exchange completed", { userId, fromCurrency, toCurrency, fromAmount, toAmount, rate, reference });
 
-            return {
-                reference,
-                fromAmount,
-                toAmount,
-                fromCurrency,
-                toCurrency,
-                rate,
-                fromWallet: { currency: fromCurrency, balance: debited.balance },
-                toWallet: { currency: toCurrency, balance: credited.balance },
-                transactions: [outRow, inRow],
-            };
-        } catch (error) {
-            if (session.inTransaction()) await session.abortTransaction();
-            throw error;
-        } finally {
-            session.endSession();
-        }
+        auditLogService
+            .logAction(undefined, userId, "wallet_exchange", undefined, { fromCurrency, toCurrency, fromAmount, toAmount, rate, reference }, undefined, undefined, { quoteId })
+            .catch((error) => logger.warn("Audit log write failed (wallet_exchange)", { reference, error: error?.message }));
+
+        return {
+            reference,
+            fromAmount,
+            toAmount,
+            fromCurrency,
+            toCurrency,
+            rate,
+            fromWallet: { currency: fromCurrency, balance: debited.balance },
+            toWallet: { currency: toCurrency, balance: credited.balance },
+            transactions: [outRow, inRow],
+        };
     }
 }
 

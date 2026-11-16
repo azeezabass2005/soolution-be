@@ -1,10 +1,11 @@
 import crypto from "crypto";
-import { Types } from "mongoose";
-import PaymentLink from "../models/payment-link.model";
-import Transaction from "../models/transaction.model";
-import TransactionDetail from "../models/transaction-details.model";
-import User from "../models/user.model";
-import { IPaymentLink, IUser } from "../models/interface";
+import paymentLinkRepository from "../repositories/payment-link.repository";
+import transactionRepository from "../repositories/transaction.repository";
+import transactionDetailRepository from "../repositories/transaction-detail.repository";
+import userRepository from "../repositories/user.repository";
+import { isUniqueViolation } from "../db/errors";
+import type { PaymentLink as IPaymentLink, User as IUser, Transaction } from "../types/entities";
+import type { TransactionStatus } from "../types/enums";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import { DETAIL_TYPE, TRANSACTION_STATUS } from "../common/constant";
 import { USER_TIER } from "../common/tier.constants";
@@ -28,7 +29,7 @@ import { TRANSFER_DETAILS_REQUIRED_CODE } from "../common/identity.constants";
 import logger from "../utils/logger.utils";
 
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-const IN_FLIGHT = [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING];
+const IN_FLIGHT = [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] as TransactionStatus[];
 const FINAL = [TRANSACTION_STATUS.COMPLETED, TRANSACTION_STATUS.FAILED, TRANSACTION_STATUS.CANCELLED];
 
 /** Shown to payers for anything about the owner's account they shouldn't see */
@@ -92,7 +93,7 @@ const toOgatewayNetwork = (provider: string) => {
 const ownerName = (user: Pick<IUser, "firstName" | "lastName">) => `${user.firstName || ""} ${user.lastName || ""}`.trim();
 
 class PaymentLinkService {
-    private transactionService = new TransactionService(["details", "user"]);
+    private transactionService = new TransactionService();
 
     // ─────────────── Owner ───────────────
 
@@ -103,14 +104,14 @@ class PaymentLinkService {
         // YellowCard collects every currency except GHS and needs the owner's KYC details
         if (data.currency !== "GHS") await identityService.assertTransferDetails(userId);
 
-        const active = await PaymentLink.countDocuments({ user: new Types.ObjectId(userId), active: true });
+        const active = await paymentLinkRepository.countActive(userId);
         if (active >= MAX_ACTIVE_PAYMENT_LINKS) {
             throw badRequest(`You can have up to ${MAX_ACTIVE_PAYMENT_LINKS} active payment links. Turn off one you no longer use first.`);
         }
 
         for (let attempt = 0; attempt < 3; attempt++) {
             try {
-                const link = await PaymentLink.create({
+                const link = await paymentLinkRepository.create({
                     user: userId,
                     slug: generateSlug(),
                     currency: data.currency,
@@ -120,61 +121,49 @@ class PaymentLinkService {
                     title: data.title || data.description,
                     usage: data.usage,
                 });
-                return this.toOwnerView(link.toObject(), { paid: 0, totalPaid: 0 });
+                return this.toOwnerView(link, { paid: 0, totalPaid: 0 });
             } catch (error: any) {
                 // A slug collision is astronomically unlikely; retry rather than fail
-                if (error?.code !== 11000) throw error;
+                if (!isUniqueViolation(error, "payment_links_slug_key")) throw error;
             }
         }
         throw errorResponseMessage.createError(500, "Couldn't create the link. Please try again.", ErrorSeverity.MEDIUM);
     }
 
     async list(userId: string) {
-        const links = await PaymentLink.find({ user: new Types.ObjectId(userId) }).sort({ createdAt: -1 }).limit(100).lean();
+        const links = await paymentLinkRepository.listForUser(userId, 100);
         if (links.length === 0) return [];
-        const stats = await Transaction.aggregate([
-            { $match: { paymentLink: { $in: links.map((l) => l._id) }, status: TRANSACTION_STATUS.COMPLETED } },
-            { $group: { _id: "$paymentLink", paid: { $sum: 1 }, totalPaid: { $sum: "$amount" } } },
-        ]);
-        const byLink = new Map(stats.map((s) => [String(s._id), s]));
+        const byLink = await transactionRepository.paymentLinkStats(links.map((l) => l.id));
         return links.map((link) => {
-            const s = byLink.get(String(link._id));
+            const s = byLink.get(link.id);
             return this.toOwnerView(link, { paid: s?.paid || 0, totalPaid: round2(s?.totalPaid || 0) });
         });
     }
 
     async update(userId: string, id: string, body: unknown) {
-        if (!Types.ObjectId.isValid(id)) throw errorResponseMessage.resourceNotFound("Payment link");
         const { active } = parse<{ active: boolean }>(ZUpdatePaymentLink, body);
         if (active) {
             await transactionLimitService.assertCanTransact(userId);
-            const existing = await PaymentLink.findOne({ _id: id, user: new Types.ObjectId(userId) }).lean();
+            const existing = await paymentLinkRepository.findOwned(id, userId);
             if (existing && (await this.isUsedUp(existing))) {
                 throw errorResponseMessage.createError(409, "This single-use link has already been paid. Create a new link instead.", ErrorSeverity.LOW);
             }
         }
-        const link = await PaymentLink.findOneAndUpdate(
-            { _id: id, user: new Types.ObjectId(userId) },
-            { $set: { active } },
-            { new: true },
-        ).lean();
+        const link = await paymentLinkRepository.setActive(id, userId, active);
         if (!link) throw errorResponseMessage.resourceNotFound("Payment link");
-        const [stats] = await Transaction.aggregate([
-            { $match: { paymentLink: link._id, status: TRANSACTION_STATUS.COMPLETED } },
-            { $group: { _id: null, paid: { $sum: 1 }, totalPaid: { $sum: "$amount" } } },
-        ]);
+        const stats = (await transactionRepository.paymentLinkStats([link.id])).get(link.id);
         return this.toOwnerView(link, { paid: stats?.paid || 0, totalPaid: round2(stats?.totalPaid || 0) });
     }
 
     /** A single-use link that has a completed payment */
-    private async isUsedUp(link: Pick<IPaymentLink, "usage"> & { _id: any }) {
+    private async isUsedUp(link: Pick<IPaymentLink, "usage" | "id">) {
         if (link.usage !== PAYMENT_LINK_USAGE.SINGLE) return false;
-        return !!(await Transaction.exists({ paymentLink: link._id, status: TRANSACTION_STATUS.COMPLETED }));
+        return transactionRepository.hasCompletedPaymentForLink(link.id);
     }
 
-    private toOwnerView(link: any, stats: { paid: number; totalPaid: number }) {
+    private toOwnerView(link: IPaymentLink, stats: { paid: number; totalPaid: number }) {
         return {
-            id: String(link._id),
+            id: link.id,
             slug: link.slug,
             currency: link.currency,
             toCurrency: link.toCurrency,
@@ -195,9 +184,9 @@ class PaymentLinkService {
     /** The link plus its owner, or a 404 that doesn't say whether the slug ever existed */
     private async findPayable(slug: string) {
         if (typeof slug !== "string" || !/^[0-9A-Za-z]{6,32}$/.test(slug)) throw errorResponseMessage.resourceNotFound("Payment link");
-        const link = await PaymentLink.findOne({ slug });
+        const link = await paymentLinkRepository.findBySlug(slug);
         if (!link) throw errorResponseMessage.resourceNotFound("Payment link");
-        const owner = await User.findById(link.user).select("firstName lastName email phoneNumber tier status").lean<IUser>();
+        const owner = await userRepository.findById(link.user);
         if (!owner) throw errorResponseMessage.resourceNotFound("Payment link");
         return { link, owner };
     }
@@ -263,13 +252,9 @@ class PaymentLinkService {
             throw badRequest(`${link.currency} payments are by mobile money only`, { issues: [{ path: "method", message: "Pay by mobile money" }] });
         }
 
-        const userId = String(owner._id);
+        const userId = owner.id;
         return transactionLimitService.withUserLock(userId, async () => {
-            const pending = await Transaction.countDocuments({
-                paymentLink: link._id,
-                status: { $in: IN_FLIGHT },
-                createdAt: { $gte: new Date(Date.now() - PENDING_PAYMENT_WINDOW_MS) },
-            });
+            const pending = await transactionRepository.countForLink(link.id, IN_FLIGHT, new Date(Date.now() - PENDING_PAYMENT_WINDOW_MS));
             // A single-use link takes one payment at a time
             if (link.usage === PAYMENT_LINK_USAGE.SINGLE && pending > 0) {
                 throw errorResponseMessage.createError(409, "A payment on this link is already in progress. If it fails, you can try again.", ErrorSeverity.LOW, { code: "PAYMENT_LINK_IN_PROGRESS" });
@@ -281,7 +266,7 @@ class PaymentLinkService {
             // The payer shouldn't see the owner's limits; fail with a neutral message
             const limit = await transactionLimitService.check(userId, [{ amount, currency: link.currency }]);
             if (!limit.allowed && limit.reason !== "unvalued") {
-                logger.info("Payment link payment refused by owner's limit", { linkId: String(link._id), reason: limit.reason });
+                logger.info("Payment link payment refused by owner's limit", { linkId: link.id, reason: limit.reason });
                 throw errorResponseMessage.createError(409, UNAVAILABLE, ErrorSeverity.LOW, { code: "PAYMENT_LINK_UNAVAILABLE" });
             }
 
@@ -291,7 +276,7 @@ class PaymentLinkService {
             } catch (error: any) {
                 // The owner's missing details are theirs to fix; the payer just can't pay yet
                 if (error?.details?.code !== TRANSFER_DETAILS_REQUIRED_CODE) throw error;
-                logger.warn("Payment link payment refused: owner's transfer details are missing", { linkId: String(link._id) });
+                logger.warn("Payment link payment refused: owner's transfer details are missing", { linkId: link.id });
                 throw errorResponseMessage.createError(409, UNAVAILABLE, ErrorSeverity.LOW, { code: "PAYMENT_LINK_UNAVAILABLE" });
             }
             return this.toPublicPayment(transaction, link);
@@ -300,7 +285,7 @@ class PaymentLinkService {
 
     private async startCollection(link: IPaymentLink, owner: IUser, input: PayPaymentLinkInput, amount: number) {
         const country = CURRENCY_COUNTRY[link.currency];
-        const paymentLinkId = String(link._id);
+        const paymentLinkId = link.id;
         const payer = { name: input.method === "momo" ? input.momoName : input.accountName, email: input.email };
 
         if (link.currency === "GHS") {
@@ -316,7 +301,7 @@ class PaymentLinkService {
                 },
                 paymentLinkId,
                 payer,
-            }, String(owner._id));
+            }, owner.id);
         }
 
         const isMomo = input.method === "momo";
@@ -338,29 +323,29 @@ class PaymentLinkService {
             },
             paymentLinkId,
             payer,
-        }, String(owner._id));
+        }, owner.id);
     }
 
     /** The payer checks on their payment. Syncs with the provider while it's still open. */
     async paymentStatus(slug: string, reference: string) {
         const { link } = await this.findPayable(slug);
         if (typeof reference !== "string" || reference.length > 100) throw errorResponseMessage.resourceNotFound("Payment");
-        const transaction = await Transaction.findOne({ reference, paymentLink: link._id });
+        const transaction = await transactionRepository.findByReference(reference, link.id);
         if (!transaction) throw errorResponseMessage.resourceNotFound("Payment");
 
         if (!FINAL.includes(transaction.status as string)) {
             try {
                 if (transaction.detailType === DETAIL_TYPE.OGATEWAY) {
-                    await this.transactionService.pollOGatewayStatus(String(transaction._id));
+                    await this.transactionService.pollOGatewayStatus(transaction.id);
                 } else if (transaction.detailType === DETAIL_TYPE.YELLOWCARD) {
-                    await this.transactionService.pollYellowCardCollectionStatus(String(transaction._id));
+                    await this.transactionService.pollYellowCardCollectionStatus(transaction.id);
                 }
             } catch (error: any) {
                 // Keep reporting the last known status; the webhook will catch up
                 logger.warn("Payment link status sync failed", { reference, error: error?.message });
             }
         }
-        const fresh = (await Transaction.findById(transaction._id)) || transaction;
+        const fresh = (await transactionRepository.findById(transaction.id)) || transaction;
         const payment = this.toPublicPayment(fresh, link);
         if (payment.status !== "completed") return payment;
         return { ...payment, receipt: await this.payerReceipt(fresh) };
@@ -371,8 +356,8 @@ class PaymentLinkService {
      * link's owner as proof, so the account number is masked and nothing of
      * the owner's side (NGN credited, fee, wallet) is included.
      */
-    private async payerReceipt(transaction: any) {
-        const detail: any = await TransactionDetail.findOne({ transactionId: transaction._id }).lean();
+    private async payerReceipt(transaction: Transaction) {
+        const detail = await transactionDetailRepository.findByTransactionId(transaction.id);
         const account = String(detail?.momoNumber || detail?.accountNumber || "");
         return {
             payerName: transaction.payer?.name || detail?.momoName || detail?.accountName || null,

@@ -1,12 +1,14 @@
-import DBService from "../utils/db.utils";
-import {DetailType, ITransaction, ITransactionDetail, IUser, TransactionStatus} from "../models/interface";
-import Transaction from "../models/transaction.model";
-import TransactionDetailsService from "./transaction-details.service";
+import transactionRepository, { type TransactionListFilter } from "../repositories/transaction.repository";
+import transactionDetailRepository from "../repositories/transaction-detail.repository";
+import userRepository from "../repositories/user.repository";
+import walletTransactionRepository from "../repositories/wallet-transaction.repository";
+import { withTransaction } from "../db/transaction";
+import type { PageRequest, Paginated } from "../db/pagination";
+import type { Transaction, TransactionDetail, TransactionView } from "../types/entities";
+import type { DetailType, TransactionStatus } from "../types/enums";
 import {FileUploadFactory} from "./file-upload.factory";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import {DETAIL_TYPE, TRANSACTION_STATUS} from "../common/constant";
-import {ObjectId, ClientSession} from "mongoose";
-import mongoose from "mongoose";
 import RateUtils from "../utils/rate.utils";
 import BankAccountDetailsService from "./bank-account-details.service";
 import NotificationService from "../utils/notification.utils";
@@ -104,9 +106,33 @@ const providerFailureMessage = (providerMessage: string, flow: "send" | "receive
         : "We couldn't start this payment request right now. Please try again in a few minutes.";
 };
 
-class TransactionService extends DBService<ITransaction> {
+/** Create-request fields shared by the manual (bank transfer / Alipay) flows */
+type ManualTransactionInput = {
+    amount?: number;
+    fromAmount?: number;
+    fromCurrency?: string;
+    paymentMethod?: DetailType;
+    idempotencyKey?: string;
+    pin?: string;
+    walletCurrency?: string;
+    // Bank transfer / mobile money
+    toCurrency?: string;
+    institutionType?: string;
+    transactionType?: 'send' | 'receive';
+    bankName?: string;
+    accountNumber?: string;
+    accountName?: string;
+    momoNetwork?: string;
+    momoNumber?: string;
+    momoName?: string;
+    // Alipay / WeChat
+    platform?: string;
+    alipayNo?: string;
+    alipayName?: string;
+};
 
-    transactionDetailsService: TransactionDetailsService;
+class TransactionService {
+
     bankAccountDetailsService: BankAccountDetailsService;
     notificationService: NotificationService;
     storageService: StorageService;
@@ -120,13 +146,8 @@ class TransactionService extends DBService<ITransaction> {
     /**
      * Creates an instance of TransactionService
      * @constructor
-     * @param populatedField
-     * @example
-     * new TransactionService(['user'])
      */
-    constructor(populatedField: string[] = ['user']) {
-        super(Transaction, populatedField);
-        this.transactionDetailsService = new TransactionDetailsService();
+    constructor() {
         this.bankAccountDetailsService = new BankAccountDetailsService();
         this.notificationService = new NotificationService();
         this.storageService = new StorageService();
@@ -151,7 +172,7 @@ class TransactionService extends DBService<ITransaction> {
     };
 
     public createBankTransferTransaction = async (
-        transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; toCurrency: string; institutionType: string; idempotencyKey?: string; transactionType?: 'send' | 'receive'; pin?: string }>,
+        transactionData: ManualTransactionInput,
         user: string,
         ipAddress?: string,
         userAgent?: string
@@ -159,7 +180,7 @@ class TransactionService extends DBService<ITransaction> {
         const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName, idempotencyKey, fromAmount, transactionType, pin } = transactionData;
         // A send paid from the destination currency's wallet: ops pays out directly
         const fromWallet = transactionType === 'send' && toCurrency
-            ? this.resolveManualWallet((transactionData as any).walletCurrency, toCurrency)
+            ? this.resolveManualWallet(transactionData.walletCurrency, toCurrency)
             : null;
 
         if (!toCurrency) {
@@ -224,18 +245,8 @@ class TransactionService extends DBService<ITransaction> {
 
         // Handle idempotency key if provided
         if (idempotencyKey) {
-            const idempotencyResult = await this.idempotencyService.validateKey(idempotencyKey, user);
-            if (idempotencyResult.isDuplicate && idempotencyResult.transactionId) {
-                // Return existing transaction
-                const existingTransaction = await this.findById(idempotencyResult.transactionId);
-                if (existingTransaction) {
-                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existingTransaction._id });
-                    return { 
-                        ...existingTransaction.toObject(), 
-                        details: existingDetails ? existingDetails.toObject() : {} 
-                    };
-                }
-            }
+            const duplicate = await this.findDuplicate(idempotencyKey, user);
+            if (duplicate) return duplicate;
         }
 
         const bankAccountDetails = fromWallet ? null : await this.bankAccountDetailsService.getCompanyDefault(fromCurrency);
@@ -243,28 +254,28 @@ class TransactionService extends DBService<ITransaction> {
             throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
         }
 
-        const transaction = await this.create({
+        const transaction = await transactionRepository.create({
             usdValue: txUsdValue ?? undefined,
             user,
             reference: this.generateBankTransferTransactionReference(toCurrency),
             amount: Math.round(amount * 100) / 100, // Round to 2 decimal places
             fromCurrency,
             currency: toCurrency,
-            detailType: paymentMethod || DETAIL_TYPE.BANK_TRANSFER,
-            status: TRANSACTION_STATUS.PENDING_INPUT,
-            initiatedAt: Date.now(),
+            detailType: (paymentMethod || DETAIL_TYPE.BANK_TRANSFER) as DetailType,
+            status: TRANSACTION_STATUS.PENDING_INPUT as TransactionStatus,
+            initiatedAt: new Date(),
         })
 
         // Update idempotency key with transaction ID if provided
         if (idempotencyKey) {
-            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
         }
 
-        const transactionDetails = await this.transactionDetailsService.create({
-            transactionId: transaction._id,
-            type: paymentMethod || DETAIL_TYPE.BANK_TRANSFER,
+        const transactionDetails = await transactionDetailRepository.create({
+            transactionId: transaction.id,
+            type: (paymentMethod || DETAIL_TYPE.BANK_TRANSFER) as DetailType,
             institutionType,
-            ...(bankAccountDetails ? { bankAccountDetails: bankAccountDetails.toObject() } : {}),
+            ...(bankAccountDetails ? { bankAccountDetails: { ...bankAccountDetails } } : {}),
             ...(fromWallet ? { fundingCurrency: fromWallet, fundingAmount: transaction.amount, fundingFee: 0 } : {}),
             fromAmount: calculatedFromAmount, // Amount in source currency (what user sends)
             ...(institutionType === 'bank' ? {
@@ -284,8 +295,7 @@ class TransactionService extends DBService<ITransaction> {
 
         // Send transaction initiated email to user
         try {
-            const populatedTransaction = await this.findById(transaction._id.toString());
-            const userObj = populatedTransaction?.user as IUser;
+            const userObj = await userRepository.findById(transaction.user);
             if (userObj) {
                 await this.notificationService.sendTransactionNotification(
                     userObj,
@@ -298,8 +308,8 @@ class TransactionService extends DBService<ITransaction> {
                     }
                 );
                 logger.info('Transaction initiated email sent successfully', {
-                    transactionId: transaction._id,
-                    userId: userObj._id,
+                    transactionId: transaction.id,
+                    userId: userObj.id,
                     email: userObj.email,
                     reference: transaction.reference,
                     amount: `${transaction.amount} ${transaction.fromCurrency}`,
@@ -308,7 +318,7 @@ class TransactionService extends DBService<ITransaction> {
             }
         } catch (error) {
             logger.error('Failed to send transaction initiated email', {
-                transactionId: transaction._id,
+                transactionId: transaction.id,
                 reference: transaction.reference,
                 error: error instanceof Error ? error.message : String(error),
                 stack: error instanceof Error ? error.stack : undefined
@@ -316,8 +326,8 @@ class TransactionService extends DBService<ITransaction> {
             // Don't fail transaction creation if email fails
         }
 
-        const created = fromWallet ? await this.findById(transaction._id.toString()) : transaction;
-        return { ...(created ?? transaction).toObject(), details: { ...transactionDetails.toObject() } }
+        const created = fromWallet ? await transactionRepository.findById(transaction.id) : transaction;
+        return { ...(created ?? transaction), details: { ...transactionDetails } }
     }
 
     /** null = pay by bank transfer (the default); otherwise the wallet currency, which must match the payout */
@@ -335,26 +345,22 @@ class TransactionService extends DBService<ITransaction> {
      * (no bank transfer or receipt). If the hold fails (e.g. the balance was
      * spent meanwhile) the transaction is cancelled and the error rethrown.
      */
-    private holdManualPayoutFromWallet = async (transaction: any, userId: string, description: string) => {
-        const session = await mongoose.startSession();
-        session.startTransaction();
+    private holdManualPayoutFromWallet = async (transaction: Transaction, userId: string, description: string) => {
         try {
-            await walletSendService.holdForManualPayout({
-                userId,
-                currency: transaction.currency,
-                amount: transaction.amount,
-                transactionId: String(transaction._id),
-                reference: transaction.reference,
-                description,
-            }, session);
-            await Transaction.updateOne({ _id: transaction._id }, { $set: { status: TRANSACTION_STATUS.AWAITING_CONFIRMATION } }, { session });
-            await session.commitTransaction();
+            await withTransaction(async (tx) => {
+                await walletSendService.holdForManualPayout({
+                    userId,
+                    currency: transaction.currency,
+                    amount: transaction.amount,
+                    transactionId: transaction.id,
+                    reference: transaction.reference,
+                    description,
+                }, tx);
+                await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.AWAITING_CONFIRMATION as TransactionStatus }, tx);
+            });
         } catch (error) {
-            if (session.inTransaction()) await session.abortTransaction();
-            await Transaction.updateOne({ _id: transaction._id }, { $set: { status: TRANSACTION_STATUS.CANCELLED, cancelReason: "Wallet payment could not be taken" } });
+            await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.CANCELLED as TransactionStatus, cancelReason: "Wallet payment could not be taken" });
             throw error;
-        } finally {
-            session.endSession();
         }
     };
 
@@ -366,7 +372,7 @@ class TransactionService extends DBService<ITransaction> {
         const trimmed = typeof reason === "string" ? reason.trim() : "";
         if (!trimmed) throw errorResponseMessage.payloadIncorrect("Give a reason for rejecting this payment");
 
-        const transaction = await this.findById(transactionId);
+        const transaction = await transactionRepository.findById(transactionId);
         if (!transaction) throw errorResponseMessage.resourceNotFound("Transaction");
         const manualTypes: string[] = [DETAIL_TYPE.ALIPAY, DETAIL_TYPE.WECHAT, DETAIL_TYPE.BANK_TRANSFER, DETAIL_TYPE.MOBILE_MONEY];
         if (!manualTypes.includes(transaction.detailType as string)) {
@@ -375,14 +381,14 @@ class TransactionService extends DBService<ITransaction> {
         transactionStateMachine.validateTransition(transaction.status, TRANSACTION_STATUS.CANCELLED);
 
         const oldStatus = transaction.status;
-        const updated = await Transaction.findOneAndUpdate(
-            { _id: transactionId, status: oldStatus },
-            { $set: { status: TRANSACTION_STATUS.CANCELLED, cancelReason: trimmed, failedAt: new Date() } },
-            { new: true }
-        );
+        const updated = await transactionRepository.updateIfStatus(transaction.id, oldStatus, {
+            status: TRANSACTION_STATUS.CANCELLED as TransactionStatus,
+            cancelReason: trimmed,
+            failedAt: new Date(),
+        });
         if (!updated) throw errorResponseMessage.createError(409, "This payment changed while you were reviewing it. Refresh and try again.", ErrorSeverity.LOW);
 
-        const refunded = await walletSendService.refundManualPayout(transactionId, trimmed);
+        const refunded = await walletSendService.refundManualPayout(transaction.id, trimmed);
         if (adminId) {
             this.auditLogService.logStatusChange(transactionId, adminId, oldStatus, TRANSACTION_STATUS.CANCELLED, ipAddress, userAgent)
                 .catch((error: any) => logger.warn('Failed to log rejection', { transactionId, error: error?.message }));
@@ -391,7 +397,7 @@ class TransactionService extends DBService<ITransaction> {
         return { transaction: updated, refundedToWallet: refunded };
     };
 
-    public createAlipayTransaction = async (transactionData: Partial<ITransaction & ITransactionDetail & { paymentMethod: DetailType; idempotencyKey?: string; pin?: string; walletCurrency?: string }>, alipayQrCode: Express.Multer.File | { qrCodeUrl: string }, user: string, ipAddress?: string, userAgent?: string) =>  {
+    public createAlipayTransaction = async (transactionData: ManualTransactionInput, alipayQrCode: Express.Multer.File | { qrCodeUrl: string }, user: string, ipAddress?: string, userAgent?: string) =>  {
         const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod, idempotencyKey, pin } = transactionData;
         // Paid from the RMB wallet: no bank transfer or receipt, ops pays out directly
         const fromWallet = this.resolveManualWallet(transactionData.walletCurrency, "RMB");
@@ -435,18 +441,8 @@ class TransactionService extends DBService<ITransaction> {
 
         // Handle idempotency key if provided
         if (idempotencyKey) {
-            const idempotencyResult = await this.idempotencyService.validateKey(idempotencyKey, user);
-            if (idempotencyResult.isDuplicate && idempotencyResult.transactionId) {
-                // Return existing transaction
-                const existingTransaction = await this.findById(idempotencyResult.transactionId);
-                if (existingTransaction) {
-                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existingTransaction._id });
-                    return { 
-                        ...existingTransaction.toObject(), 
-                        details: existingDetails ? existingDetails.toObject() : {} 
-                    };
-                }
-            }
+            const duplicate = await this.findDuplicate(idempotencyKey, user);
+            if (duplicate) return duplicate;
         }
 
         // Bank details are only shown when the user pays by bank transfer
@@ -471,32 +467,32 @@ class TransactionService extends DBService<ITransaction> {
             qrCodeUrl = uploadResult.file?.url!;
         }
 
-        const transaction = await this.create({
+        const transaction = await transactionRepository.create({
             usdValue: txUsdValue ?? undefined,
             user,
             reference: this.generateTransactionReference(),
             amount: Math.round(amount * 100) / 100, // Round to 2 decimal places
             fromCurrency,
             currency: "RMB",
-            detailType: paymentMethod || DETAIL_TYPE.ALIPAY,
-            status: TRANSACTION_STATUS.PENDING_INPUT,
-            initiatedAt: Date.now(),
+            detailType: (paymentMethod || DETAIL_TYPE.ALIPAY) as DetailType,
+            status: TRANSACTION_STATUS.PENDING_INPUT as TransactionStatus,
+            initiatedAt: new Date(),
         })
 
         // Update idempotency key with transaction ID if provided
         if (idempotencyKey) {
-            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
         }
 
-        const transactionDetails = await this.transactionDetailsService.create({
-            transactionId: transaction._id,
-            type: paymentMethod || DETAIL_TYPE.ALIPAY,
+        const transactionDetails = await transactionDetailRepository.create({
+            transactionId: transaction.id,
+            type: (paymentMethod || DETAIL_TYPE.ALIPAY) as DetailType,
             alipayNo,
             alipayName,
             qrCodeUrl,
-            ...(bankAccountDetails ? { bankAccountDetails: bankAccountDetails.toObject() } : {}),
+            ...(bankAccountDetails ? { bankAccountDetails: { ...bankAccountDetails } } : {}),
             ...(fromWallet ? { fundingCurrency: "RMB", fundingAmount: transaction.amount, fundingFee: 0 } : {}),
-            ...(paymentMethod === 'alipay' ? { platform: platform } : {}),
+            ...(paymentMethod === 'alipay' ? { platform: platform as any } : {}),
         })
 
         if (fromWallet) {
@@ -505,8 +501,7 @@ class TransactionService extends DBService<ITransaction> {
 
         // Send transaction initiated email to user
         try {
-            const populatedTransaction = await this.findById(transaction._id.toString());
-            const user = populatedTransaction?.user as IUser;
+            const user = await userRepository.findById(transaction.user);
             if (user) {
                 await this.notificationService.sendTransactionNotification(
                     user,
@@ -519,8 +514,8 @@ class TransactionService extends DBService<ITransaction> {
                     }
                 );
                 logger.info('Transaction initiated email sent successfully', {
-                    transactionId: transaction._id,
-                    userId: user._id,
+                    transactionId: transaction.id,
+                    userId: user.id,
                     email: user.email,
                     reference: transaction.reference,
                     amount: `${transaction.amount} ${transaction.fromCurrency}`,
@@ -529,7 +524,7 @@ class TransactionService extends DBService<ITransaction> {
             }
         } catch (error) {
             logger.error('Failed to send transaction initiated email', {
-                transactionId: transaction._id,
+                transactionId: transaction.id,
                 reference: transaction.reference,
                 error: error instanceof Error ? error.message : String(error),
                 stack: error instanceof Error ? error.stack : undefined
@@ -537,90 +532,63 @@ class TransactionService extends DBService<ITransaction> {
             // Don't fail transaction creation if email fails
         }
 
-        const created = fromWallet ? await this.findById(transaction._id.toString()) : transaction;
-        return { ...(created ?? transaction).toObject(), details: { ...transactionDetails.toObject() } }
+        const created = fromWallet ? await transactionRepository.findById(transaction.id) : transaction;
+        return { ...(created ?? transaction), details: { ...transactionDetails } }
     }
 
     public uploadUserPaymentReceipt = async (transactionId: string, receipt: Express.Multer.File, userId?: string, ipAddress?: string, userAgent?: string) => {
-        // Use MongoDB transaction for atomic operations
-        const session = await mongoose.startSession();
-        session.startTransaction();
-
-        try {
-            const uploadResult = await this.receiptUploadService.uploadFile(receipt as Express.Multer.File, {
-                folder: 'pay_in/',
-                customFilename: `pay_in_receipt${Date.now()}`,
-                makePublic: true,
-            });
-            if(!uploadResult.success) {
-                logger.error('Payment receipt upload failed', { 
-                    error: uploadResult.error,
-                    transactionId,
-                    fileName: receipt.originalname,
-                    fileSize: receipt.size
-                });
-                throw errorResponseMessage.unableToComplete("Payment receipt upload failed");
-            }
-            
-            if (!uploadResult.file?.url) {
-                logger.error('Upload succeeded but no URL returned', {
-                    transactionId,
-                    fileKey: uploadResult.file?.key
-                });
-                throw errorResponseMessage.unableToComplete("Payment receipt upload failed - no URL returned");
-            }
-
-            logger.info('Payment receipt uploaded successfully', {
+        const uploadResult = await this.receiptUploadService.uploadFile(receipt as Express.Multer.File, {
+            folder: 'pay_in/',
+            customFilename: `pay_in_receipt${Date.now()}`,
+            makePublic: true,
+        });
+        if(!uploadResult.success) {
+            logger.error('Payment receipt upload failed', {
+                error: uploadResult.error,
                 transactionId,
-                fileKey: uploadResult.file.key,
-                fileUrl: uploadResult.file.url,
-                fileSize: uploadResult.file.size
+                fileName: receipt.originalname,
+                fileSize: receipt.size
             });
+            throw errorResponseMessage.unableToComplete("Payment receipt upload failed");
+        }
 
-            // Fetch transaction with optimistic locking - use findOneAndUpdate to prevent race conditions
-            const transaction = await this.Model.findOneAndUpdate(
-                { 
-                    _id: transactionId,
-                    status: TRANSACTION_STATUS.PENDING_INPUT // Only update if still in PENDING_INPUT
-                },
-                { $set: {} }, // No update, just for locking
-                { 
-                    session,
-                    new: true 
-                }
-            ).populate('user');
+        if (!uploadResult.file?.url) {
+            logger.error('Upload succeeded but no URL returned', {
+                transactionId,
+                fileKey: uploadResult.file?.key
+            });
+            throw errorResponseMessage.unableToComplete("Payment receipt upload failed - no URL returned");
+        }
 
+        const receiptUrl = uploadResult.file.url;
+        logger.info('Payment receipt uploaded successfully', {
+            transactionId,
+            fileKey: uploadResult.file.key,
+            fileUrl: receiptUrl,
+            fileSize: uploadResult.file.size
+        });
+
+        // The receipt, the fromAmount and the status change commit together. The
+        // row is locked (and must still be awaiting the receipt) so two uploads
+        // can't both move it.
+        const { transaction, details, oldStatus, newStatus } = await withTransaction(async (tx) => {
+            const transaction = await transactionRepository.findByIdForUpdate(transactionId, TRANSACTION_STATUS.PENDING_INPUT as TransactionStatus, tx);
             if (!transaction) {
-                await session.abortTransaction();
-                await session.endSession();
                 throw errorResponseMessage.resourceNotFound("Transaction or transaction is not in a valid state for receipt upload");
             }
 
-            // Validate exchange rate exists and is active before conversion
             if (!transaction.fromCurrency || !transaction.currency) {
-                await session.abortTransaction();
-                await session.endSession();
-                throw errorResponseMessage.createError(
-                    400,
-                    "Transaction currency information is missing",
-                    ErrorSeverity.HIGH
-                );
+                throw errorResponseMessage.createError(400, "Transaction currency information is missing", ErrorSeverity.HIGH);
             }
 
             if (!transaction.amount || transaction.amount <= 0) {
-                await session.abortTransaction();
-                await session.endSession();
-                throw errorResponseMessage.createError(
-                    400,
-                    "Transaction amount is invalid",
-                    ErrorSeverity.HIGH
-                );
+                throw errorResponseMessage.createError(400, "Transaction amount is invalid", ErrorSeverity.HIGH);
             }
 
             // Preserve fromAmount if already stored at transaction creation time (historically accurate).
             // Only compute it here for transaction types that don't store it during creation (e.g. Alipay).
-            const existingDetails = await this.transactionDetailsService.findOne({ transactionId });
-            const updateFields: Record<string, any> = { payInReceiptUrl: uploadResult.file.url };
+            const existingDetails = await transactionDetailRepository.findByTransactionId(transaction.id, tx);
+            const updateFields: { payInReceiptUrl: string; fromAmount?: number } = { payInReceiptUrl: receiptUrl };
 
             if (!existingDetails?.fromAmount) {
                 // fromAmount not set at creation — compute from current rate as fallback
@@ -630,153 +598,94 @@ class TransactionService extends DBService<ITransaction> {
                 updateFields.fromAmount = fromAmount;
             }
 
-            // Update transaction details with receipt URL (within transaction)
-            await this.transactionDetailsService.updateOneWithSession(
-                { transactionId },
-                { $set: updateFields },
-                session
-            );
+            const details = await transactionDetailRepository.updateByTransactionId(transaction.id, updateFields, tx);
 
-            // Validate status transition before updating
-            const oldStatus = transaction.status;
             // Limits are enforced when the transaction is created, so a paid transaction goes straight to review
-            const newStatus = TRANSACTION_STATUS.AWAITING_CONFIRMATION;
+            const oldStatus = transaction.status;
+            const newStatus = TRANSACTION_STATUS.AWAITING_CONFIRMATION as TransactionStatus;
             transactionStateMachine.validateTransition(oldStatus, newStatus);
+            await transactionRepository.update(transaction.id, { status: newStatus }, tx);
 
-            // Update status within transaction
-            await this.updateById(transactionId, { status: newStatus }, session);
+            return { transaction, details, oldStatus, newStatus };
+        });
 
-            // Commit transaction
-            await session.commitTransaction();
-            await session.endSession();
-
-            // Log status change and receipt upload (outside transaction to avoid blocking)
-            if (userId) {
-                try {
-                    await Promise.all([
-                        this.auditLogService.logStatusChange(
-                            transactionId,
-                            userId,
-                            oldStatus,
-                            newStatus,
-                            ipAddress,
-                            userAgent
-                        ),
-                        this.auditLogService.logReceiptUpload(
-                            transactionId,
-                            userId,
-                            'pay_in',
-                            uploadResult.file.url,
-                            ipAddress,
-                            userAgent
-                        )
-                    ]);
-                } catch (error) {
-                    logger.warn('Failed to log audit events', { error, transactionId });
-                    // Don't fail if audit logging fails
-                }
+        // Log status change and receipt upload (outside the transaction to avoid blocking)
+        if (userId) {
+            try {
+                await Promise.all([
+                    this.auditLogService.logStatusChange(transaction.id, userId, oldStatus, newStatus, ipAddress, userAgent),
+                    this.auditLogService.logReceiptUpload(transaction.id, userId, 'pay_in', receiptUrl, ipAddress, userAgent)
+                ]);
+            } catch (error) {
+                logger.warn('Failed to log audit events', { error, transactionId });
+                // Don't fail if audit logging fails
             }
+        }
 
-            // Notify admins via both email and WhatsApp (outside transaction - don't fail if this fails)
-            const isAlipayTransaction = transaction.currency === 'RMB';
-            const transactionType = isAlipayTransaction ? 'RMB Payment' : `${transaction.currency} Payment`;
-            const recipientInfo = isAlipayTransaction 
-                ? `${transaction.details?.alipayNo ? `Alipay No: ${transaction.details.alipayNo}\n` : ''}${transaction.details?.alipayName ? `Alipay Name: ${transaction.details.alipayName}` : ''}`
-                : transaction.details?.institutionType === 'bank'
-                    ? `Bank: ${transaction.details.bankName}\nAccount Number: ${transaction.details.accountNumber}\nAccount Name: ${transaction.details.accountName}`
-                    : `Network: ${transaction.details?.momoNetwork}\nNumber: ${transaction.details?.momoNumber}\nName: ${transaction.details?.momoName}`;
+        // Notify admins via both email and WhatsApp (don't fail if this fails)
+        const isAlipayTransaction = transaction.currency === 'RMB';
+        const transactionType = isAlipayTransaction ? 'RMB Payment' : `${transaction.currency} Payment`;
+        const recipientInfo = isAlipayTransaction
+            ? `${details?.alipayNo ? `Alipay No: ${details.alipayNo}\n` : ''}${details?.alipayName ? `Alipay Name: ${details.alipayName}` : ''}`
+            : details?.institutionType === 'bank'
+                ? `Bank: ${details.bankName}\nAccount Number: ${details.accountNumber}\nAccount Name: ${details.accountName}`
+                : `Network: ${details?.momoNetwork}\nNumber: ${details?.momoNumber}\nName: ${details?.momoName}`;
 
-            const attachments = [];
-            const whatsappAttachments = [];
+        const attachments = [];
+        const whatsappAttachments = [];
 
-            if (isAlipayTransaction && transaction.details?.qrCodeUrl) {
-                try {
-                    attachments.push({
-                        filename: 'alipay_qrcode.png',
-                        content: await this.storageService.downloadFile(transaction.details.qrCodeUrl),
-                        contentType: 'image/png'
-                    });
-                    whatsappAttachments.push({
-                        caption: 'Alipay QRCode',
-                        url: transaction.details.qrCodeUrl,
-                    });
-                } catch (error) {
-                    logger.warn('Failed to download Alipay QR code for notification', { error, transactionId });
-                    // Continue without QR code attachment
-                }
-            }
-
+        if (isAlipayTransaction && details?.qrCodeUrl) {
             try {
                 attachments.push({
-                    filename: 'user_payment_receipt.png',
-                    content: await this.storageService.downloadFile(uploadResult.file.url),
+                    filename: 'alipay_qrcode.png',
+                    content: await this.storageService.downloadFile(details.qrCodeUrl),
                     contentType: 'image/png'
                 });
                 whatsappAttachments.push({
-                    caption: 'User Payment Receipt',
-                    url: uploadResult.file.url,
+                    caption: 'Alipay QRCode',
+                    url: details.qrCodeUrl,
                 });
             } catch (error) {
-                logger.warn('Failed to download receipt for notification, but receipt is uploaded', { error, transactionId, receiptUrl: uploadResult.file.url });
-                // Continue without receipt attachment in notification, but receipt is already saved
+                logger.warn('Failed to download Alipay QR code for notification', { error, transactionId });
+                // Continue without QR code attachment
             }
-
-            // Send notifications (don't fail if this fails, receipt is already uploaded)
-            try {
-                await this.notificationService.notifyAdmins(
-                    config.ADMIN_EMAILS,
-                    {
-                        title: `📱 New ${transactionType}`,
-                        message: `A customer has initiated a new ${transaction.currency} payment and has paid. Check the payment receipt attached.\n${recipientInfo}`,
-                        actionUrl: `${config.FRONTEND_URL}/dashboard/admin/transactions`,
-                        buttonText: "Go to Transaction History",
-                    },
-                    config.ADMIN_PHONE_NUMBERS,
-                    attachments,
-                    whatsappAttachments,
-                );
-            } catch (error) {
-                logger.error('Failed to send admin notifications, but receipt is uploaded', { error, transactionId });
-                // Don't fail the whole operation if notifications fail
-            }
-
-            return { status: newStatus };
-        } catch (error) {
-            // Abort transaction on error
-            await session.abortTransaction();
-            await session.endSession();
-            throw error;
         }
 
-        // Attach files for email notification
-        // const adminEmails = config.ADMIN_EMAILS.split(",");
-        // for (const email of adminEmails) {
-        //     try {
-        //         await this.notificationService.emailService.sendNotificationEmail(
-        //             email,
-        //             {
-        //                 title: "New RMB Payment",
-        //                 message: "A customer has initiated a new RMB payment and has paid.",
-        //                 actionUrl: `${config.FRONTEND_URL}/dashboard/admin/payments`,
-        //                 buttonText: "Go to dashboard"
-        //             },
-        //             [
-        //                 {
-        //                     filename: 'alipay_qrcode.png',
-        //                     content: await this.storageService.downloadFile(transaction?.details?.qrCodeUrl!),
-        //                     contentType: 'image/png'
-        //                 },
-        //                 {
-        //                     filename: 'user_payment_receipt.png',
-        //                     content: await this.storageService.downloadFile(uploadResult.file?.url!),
-        //                     contentType: 'image/png'
-        //                 }
-        //             ]
-        //         );
-        //     } catch (error) {
-        //         console.error(`Failed to send admin notification to ${email}:`, error);
-        //     }
-        // }
+        try {
+            attachments.push({
+                filename: 'user_payment_receipt.png',
+                content: await this.storageService.downloadFile(receiptUrl),
+                contentType: 'image/png'
+            });
+            whatsappAttachments.push({
+                caption: 'User Payment Receipt',
+                url: receiptUrl,
+            });
+        } catch (error) {
+            logger.warn('Failed to download receipt for notification, but receipt is uploaded', { error, transactionId, receiptUrl });
+            // Continue without receipt attachment in notification, but receipt is already saved
+        }
+
+        // Send notifications (don't fail if this fails, receipt is already uploaded)
+        try {
+            await this.notificationService.notifyAdmins(
+                config.ADMIN_EMAILS,
+                {
+                    title: `📱 New ${transactionType}`,
+                    message: `A customer has initiated a new ${transaction.currency} payment and has paid. Check the payment receipt attached.\n${recipientInfo}`,
+                    actionUrl: `${config.FRONTEND_URL}/dashboard/admin/transactions`,
+                    buttonText: "Go to Transaction History",
+                },
+                config.ADMIN_PHONE_NUMBERS,
+                attachments,
+                whatsappAttachments,
+            );
+        } catch (error) {
+            logger.error('Failed to send admin notifications, but receipt is uploaded', { error, transactionId });
+            // Don't fail the whole operation if notifications fail
+        }
+
+        return { status: newStatus };
     }
 
     public uploadAdminPaymentReceipt = async (transactionId: string, receipt: Express.Multer.File, userId?: string, ipAddress?: string, userAgent?: string) => {
@@ -786,12 +695,12 @@ class TransactionService extends DBService<ITransaction> {
             makePublic: true,
         });
         if(!uploadResult.success) {
-            console.log(uploadResult, "This is the result from admin payment receipt upload")
+            logger.error("Admin payment receipt upload failed", { transactionId, error: uploadResult.error });
             throw errorResponseMessage.unableToComplete("Payment receipt upload failed");
         }
 
         // Fetch transaction and validate it exists
-        const transaction = await this.findById(transactionId);
+        const transaction = await transactionRepository.findById(transactionId);
         if (!transaction) {
             throw errorResponseMessage.resourceNotFound("Transaction");
         }
@@ -810,11 +719,23 @@ class TransactionService extends DBService<ITransaction> {
 
         const oldStatus = transaction.status;
 
-        await this.transactionDetailsService.update({ transactionId }, { payOutReceiptUrl: uploadResult.file?.url });
-        await this.updateById(transactionId, { status: TRANSACTION_STATUS.COMPLETED });
+        // Only the admin whose update moves it from AWAITING_CONFIRMATION completes it
+        const completed = await withTransaction(async (tx) => {
+            const updated = await transactionRepository.updateIfStatus(transaction.id, oldStatus, {
+                status: TRANSACTION_STATUS.COMPLETED as TransactionStatus,
+                completedAt: new Date(),
+            }, tx);
+            if (!updated) return false;
+            await transactionDetailRepository.updateByTransactionId(transaction.id, { payOutReceiptUrl: uploadResult.file?.url }, tx);
+            return true;
+        });
+        if (!completed) {
+            throw errorResponseMessage.createError(409, "This payment changed while you were reviewing it. Refresh and try again.", ErrorSeverity.LOW);
+        }
+
         // Paid from a wallet: the held money leaves the platform's FX position
         try {
-            await walletSendService.completeManualPayout(transactionId);
+            await walletSendService.completeManualPayout(transaction.id);
         } catch (error: any) {
             logger.error("CRITICAL: manual payout settlement posting failed", { transactionId, error: error?.message });
         }
@@ -823,22 +744,8 @@ class TransactionService extends DBService<ITransaction> {
         if (userId) {
             try {
                 await Promise.all([
-                    this.auditLogService.logStatusChange(
-                        transactionId,
-                        userId,
-                        oldStatus,
-                        TRANSACTION_STATUS.COMPLETED,
-                        ipAddress,
-                        userAgent
-                    ),
-                    this.auditLogService.logReceiptUpload(
-                        transactionId,
-                        userId,
-                        'pay_out',
-                        uploadResult.file?.url || '',
-                        ipAddress,
-                        userAgent
-                    )
+                    this.auditLogService.logStatusChange(transaction.id, userId, oldStatus, TRANSACTION_STATUS.COMPLETED, ipAddress, userAgent),
+                    this.auditLogService.logReceiptUpload(transaction.id, userId, 'pay_out', uploadResult.file?.url || '', ipAddress, userAgent)
                 ]);
             } catch (error) {
                 logger.warn('Failed to log audit events', { error, transactionId });
@@ -847,16 +754,17 @@ class TransactionService extends DBService<ITransaction> {
         }
 
         // Send transaction completed email and WhatsApp notification to user
-        const user = transaction?.user as IUser;
+        const user = await userRepository.findById(transaction.user);
+        const details = await transactionDetailRepository.findByTransactionId(transaction.id);
         if (user) {
             try {
                 await this.notificationService.sendTransactionNotification(
                     user,
                     'payment_completed',
                     {
-                        amount: `${transaction?.amount} ${transaction?.currency}`,
-                        reference: transaction?.reference,
-                        recipient: transaction?.details?.alipayName || 'Recipient',
+                        amount: `${transaction.amount} ${transaction.currency}`,
+                        reference: transaction.reference,
+                        recipient: details?.alipayName || 'Recipient',
                         actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
                     },
                     [
@@ -868,19 +776,19 @@ class TransactionService extends DBService<ITransaction> {
                     ]
                 );
                 logger.info('Transaction completed email sent successfully', {
-                    transactionId: transaction?._id,
-                    userId: user._id,
+                    transactionId: transaction.id,
+                    userId: user.id,
                     email: user.email,
-                    reference: transaction?.reference,
-                    amount: `${transaction?.amount} ${transaction?.fromCurrency}`,
-                    currency: transaction?.currency
+                    reference: transaction.reference,
+                    amount: `${transaction.amount} ${transaction.fromCurrency}`,
+                    currency: transaction.currency
                 });
             } catch (error) {
                 logger.error('Failed to send transaction completed email', {
-                    transactionId: transaction?._id,
-                    userId: user._id,
+                    transactionId: transaction.id,
+                    userId: user.id,
                     email: user.email,
-                    reference: transaction?.reference,
+                    reference: transaction.reference,
                     error: error instanceof Error ? error.message : String(error),
                     stack: error instanceof Error ? error.stack : undefined
                 });
@@ -996,17 +904,8 @@ class TransactionService extends DBService<ITransaction> {
 
         // Handle idempotency
         if (idempotencyKey) {
-            const idempotencyResult = await this.idempotencyService.validateKey(idempotencyKey, userId);
-            if (idempotencyResult.isDuplicate && idempotencyResult.transactionId) {
-                const existingTransaction = await this.findById(idempotencyResult.transactionId);
-                if (existingTransaction) {
-                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existingTransaction._id });
-                    return {
-                        ...existingTransaction.toObject(),
-                        details: existingDetails ? existingDetails.toObject() : {}
-                    };
-                }
-            }
+            const duplicate = await this.findDuplicate(idempotencyKey, userId);
+            if (duplicate) return duplicate;
         }
 
         // YellowCard routes by channel type: we say bank or momo plus the country
@@ -1073,7 +972,7 @@ class TransactionService extends DBService<ITransaction> {
         let transaction: any;
         let transactionDetails: any;
         try {
-            transaction = await this.create({
+            transaction = await transactionRepository.create({
                 usdValue: txUsdValue ?? undefined,
                 user: userId,
                 reference: sequenceId,
@@ -1082,7 +981,7 @@ class TransactionService extends DBService<ITransaction> {
                 currency: toCurrency,
                 detailType: DETAIL_TYPE.YELLOWCARD,
                 status: TRANSACTION_STATUS.PENDING,
-                initiatedAt: Date.now(),
+                initiatedAt: new Date(),
                 lockedRate,
                 lockedRateFromCurrency: 'NGN',
                 lockedRateToCurrency: toCurrency,
@@ -1094,28 +993,28 @@ class TransactionService extends DBService<ITransaction> {
                 sequenceId,
             });
             // Refund wallet since we couldn't create the transaction
-            await this.refundWallet(wallet._id, userId, totalDebit, walletTransaction._id, walletTxRef, "Transaction record creation failed", feeAmount);
+            await this.refundWallet(wallet.id, userId, totalDebit, walletTransaction.id, walletTxRef, "Transaction record creation failed", feeAmount);
             throw errorResponseMessage.createError(
                 500,
-                `Failed to create transaction: ${dbError?.message || 'Unknown error'}`,
+                "We couldn't create this transaction. Please try again.",
                 ErrorSeverity.CRITICAL
             );
         }
 
         // Link wallet transaction to the YellowCard transaction
-        await this.walletTransactionService.updateById(walletTransaction._id as string, {
+        await walletTransactionRepository.update(walletTransaction.id, {
             paystackReference: sequenceId, // reuse field to link to YC transaction
-            transactionId: transaction._id,
+            transactionId: transaction.id,
         });
 
         if (idempotencyKey) {
-            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
         }
 
         // Create transaction detail with YC-specific fields (channelId updated after successful submission)
         try {
-            transactionDetails = await this.transactionDetailsService.create({
-                transactionId: transaction._id,
+            transactionDetails = await transactionDetailRepository.create({
+                transactionId: transaction.id,
                 type: DETAIL_TYPE.YELLOWCARD,
                 ycSequenceId: sequenceId,
                 ycNetworkId: network.id,
@@ -1138,12 +1037,12 @@ class TransactionService extends DBService<ITransaction> {
         } catch (dbError: any) {
             logger.error("Failed to create YellowCard transaction detail", {
                 error: dbError?.message || dbError,
-                transactionId: transaction._id,
+                transactionId: transaction.id,
                 sequenceId,
             });
             throw errorResponseMessage.createError(
                 500,
-                `Failed to create transaction detail: ${dbError?.message || 'Unknown error'}`,
+                "We couldn't create this transaction. Please try again.",
                 ErrorSeverity.CRITICAL
             );
         }
@@ -1168,9 +1067,7 @@ class TransactionService extends DBService<ITransaction> {
             });
 
             // YellowCard says which channel it routed to
-            await this.transactionDetailsService.update(
-                { transactionId: transaction._id },
-                {
+            await transactionDetailRepository.updateByTransactionId(transaction.id, {
                     ycChannelId: paymentResponse?.channelId,
                     ycPaymentId: paymentResponse?.id,
                     ycStatus: paymentResponse?.status || YELLOWCARD_STATUS.PROCESSING,
@@ -1178,17 +1075,17 @@ class TransactionService extends DBService<ITransaction> {
                 }
             );
 
-            await this.updateById(transaction._id.toString(), {
+            await transactionRepository.update(transaction.id, {
                 status: TRANSACTION_STATUS.PROCESSING,
             });
 
             // Mark wallet transaction as processing (payment submitted to YellowCard)
-            await this.walletTransactionService.updateById(walletTransaction._id as string, {
+            await walletTransactionRepository.update(walletTransaction.id, {
                 status: WALLET_TRANSACTION_STATUS.PROCESSING,
             });
 
             logger.info("YellowCard transaction created and payment submitted", {
-                transactionId: transaction._id,
+                transactionId: transaction.id,
                 sequenceId,
                 channelType: targetType,
                 channelId: paymentResponse?.channelId,
@@ -1198,10 +1095,10 @@ class TransactionService extends DBService<ITransaction> {
             });
 
             return {
-                ...transaction.toObject(),
+                ...transaction,
                 status: TRANSACTION_STATUS.PROCESSING,
                 details: {
-                    ...transactionDetails.toObject(),
+                    ...transactionDetails,
                     ycChannelId: paymentResponse?.channelId,
                     ycPaymentId: paymentResponse?.id,
                     ycStatus: paymentResponse?.status || YELLOWCARD_STATUS.PROCESSING,
@@ -1212,21 +1109,19 @@ class TransactionService extends DBService<ITransaction> {
         }
 
         // YellowCard rejected the payment — mark transaction as failed and REFUND wallet
-        await this.updateById(transaction._id.toString(), {
+        await transactionRepository.update(transaction.id, {
             status: TRANSACTION_STATUS.FAILED,
             failedAt: new Date(),
         });
-        await this.transactionDetailsService.update(
-            { transactionId: transaction._id },
-            { ycStatus: YELLOWCARD_STATUS.FAILED }
+        await transactionDetailRepository.updateByTransactionId(transaction.id, { ycStatus: YELLOWCARD_STATUS.FAILED }
         );
 
         // Refund wallet balance
-        await this.refundWallet(wallet._id, userId, totalDebit, walletTransaction._id, walletTxRef, "Payment failed", feeAmount);
+        await this.refundWallet(wallet.id, userId, totalDebit, walletTransaction.id, walletTxRef, "Payment failed", feeAmount);
 
         const ycError = lastError?.ycError || lastError?.response?.data || lastError?.data;
         logger.error("YellowCard payment submission failed — wallet refunded", {
-            transactionId: transaction._id,
+            transactionId: transaction.id,
             sequenceId,
             ycError,
             errorMessage: lastError?.message,
@@ -1274,7 +1169,7 @@ class TransactionService extends DBService<ITransaction> {
      * Used when webhooks aren't available (e.g. localhost development).
      */
     public pollYellowCardStatus = async (transactionId: string) => {
-        const transaction = await this.findById(transactionId);
+        const transaction = await transactionRepository.findById(transactionId);
         if (!transaction) {
             throw errorResponseMessage.createError(404, "Transaction not found", ErrorSeverity.MEDIUM);
         }
@@ -1282,7 +1177,7 @@ class TransactionService extends DBService<ITransaction> {
             throw errorResponseMessage.createError(400, "This transaction's status can't be checked here.", ErrorSeverity.MEDIUM);
         }
 
-        const detail = await this.transactionDetailsService.findOne({ transactionId: transaction._id });
+        const detail = await transactionDetailRepository.findByTransactionId(transaction.id);
         if (!detail?.ycSequenceId) {
             throw errorResponseMessage.createError(400, "This transaction has no payment reference yet.", ErrorSeverity.MEDIUM);
         }
@@ -1298,7 +1193,7 @@ class TransactionService extends DBService<ITransaction> {
                 error: error?.ycError || error?.message,
             });
             return {
-                transaction: transaction.toObject(),
+                transaction: await transactionRepository.findViewById(transaction.id),
                 ycStatus: detail.ycStatus || "unknown",
                 message: "We couldn't check the latest status. We'll keep trying.",
             };
@@ -1319,9 +1214,7 @@ class TransactionService extends DBService<ITransaction> {
         });
 
         // Update local detail with latest YC data
-        await this.transactionDetailsService.update(
-            { _id: detail._id },
-            { ycRawPayload: ycPayment, ycStatus, ycPaymentId: ycPayment?.id || detail.ycPaymentId }
+        await transactionDetailRepository.update(detail.id, { ycRawPayload: ycPayment, ycStatus, ycPaymentId: ycPayment?.id || detail.ycPaymentId }
         );
 
         // Sync transaction status based on YC status
@@ -1343,20 +1236,17 @@ class TransactionService extends DBService<ITransaction> {
                 logger.info("YellowCard poll: transaction completed", { transactionId });
 
                 // Mark linked wallet transaction as successful
-                const walletTx = await this.walletTransactionService.findOne({
-                    paystackReference: transaction.reference,
-                    type: WALLET_TRANSACTION_TYPE.TRANSFER,
-                });
+                const walletTx = await walletTransactionRepository.findByPaystackReference(transaction.reference, WALLET_TRANSACTION_TYPE.TRANSFER as "transfer");
                 if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.SUCCESSFUL) {
-                    await this.walletTransactionService.updateById(walletTx._id as string, {
+                    await walletTransactionRepository.update(walletTx.id, {
                         status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
                     });
-                    await this.walletService.adjustLedgerBalance(walletTx.wallet as string, -walletTx.amount);
-                    logger.info("Wallet transfer marked successful via poll", { walletTxId: walletTx._id, amount: walletTx.amount });
+                    await this.walletService.adjustLedgerBalance(walletTx.wallet, -walletTx.amount);
+                    logger.info("Wallet transfer marked successful via poll", { walletTxId: walletTx.id, amount: walletTx.amount });
                 }
 
                 // Notify user
-                const user = transaction.user as IUser;
+                const user = await userRepository.findById(transaction.user);
                 if (user?.email) {
                     try {
                         await this.notificationService.sendTransactionNotification(
@@ -1381,23 +1271,20 @@ class TransactionService extends DBService<ITransaction> {
             const claimed = await this.claimStatus(transaction, newStatus, newStatus === TRANSACTION_STATUS.FAILED ? { failedAt: new Date() } : {});
             if (claimed) {
                 // Refund wallet on failure
-                const walletTx = await this.walletTransactionService.findOne({
-                    paystackReference: transaction.reference,
-                    type: WALLET_TRANSACTION_TYPE.TRANSFER,
-                });
+                const walletTx = await walletTransactionRepository.findByPaystackReference(transaction.reference, WALLET_TRANSACTION_TYPE.TRANSFER as "transfer");
                 if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.FAILED && walletTx.status !== WALLET_TRANSACTION_STATUS.REVERSED) {
-                    const ycDetail = await this.transactionDetailsService.findOne({ transactionId: transaction._id });
+                    const ycDetail = await transactionDetailRepository.findByTransactionId(transaction.id);
                     const fee = (ycDetail as any)?.feeAmount || 0;
                     await this.refundWallet(
                         walletTx.wallet,
-                        walletTx.user as string,
+                        walletTx.user,
                         walletTx.amount,
-                        walletTx._id,
+                        walletTx.id,
                         walletTx.reference,
                         `Payment ${ycStatus}`,
                         fee,
                     );
-                    logger.info("Wallet refunded via poll", { walletTxId: walletTx._id, amount: walletTx.amount });
+                    logger.info("Wallet refunded via poll", { walletTxId: walletTx.id, amount: walletTx.amount });
                 }
 
                 logger.info("YellowCard poll: transaction failed/cancelled", { transactionId, ycStatus });
@@ -1410,13 +1297,13 @@ class TransactionService extends DBService<ITransaction> {
             });
         }
 
-        const updatedTransaction = await this.findById(transactionId);
+        const updatedTransaction = await transactionRepository.findViewById(transactionId);
         logger.info("YellowCard poll: final transaction status", {
             transactionId,
             finalStatus: updatedTransaction?.status,
         });
         return {
-            transaction: updatedTransaction?.toObject(),
+            transaction: updatedTransaction,
             ycStatus,
             ycPayment,
         };
@@ -1495,17 +1382,8 @@ class TransactionService extends DBService<ITransaction> {
 
         // Handle idempotency
         if (idempotencyKey) {
-            const idempotencyResult = await this.idempotencyService.validateKey(idempotencyKey, userId);
-            if (idempotencyResult.isDuplicate && idempotencyResult.transactionId) {
-                const existingTransaction = await this.findById(idempotencyResult.transactionId);
-                if (existingTransaction) {
-                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existingTransaction._id });
-                    return {
-                        ...existingTransaction.toObject(),
-                        details: existingDetails ? existingDetails.toObject() : {}
-                    };
-                }
-            }
+            const duplicate = await this.findDuplicate(idempotencyKey, userId);
+            if (duplicate) return duplicate;
         }
 
         // Where the payer pays from. YellowCard routes by channel type (bank or
@@ -1535,7 +1413,7 @@ class TransactionService extends DBService<ITransaction> {
         let transaction: any;
         let transactionDetails: any;
         try {
-            transaction = await this.create({
+            transaction = await transactionRepository.create({
                 usdValue: txUsdValue ?? undefined,
                 user: userId,
                 reference: sequenceId,
@@ -1544,7 +1422,7 @@ class TransactionService extends DBService<ITransaction> {
                 currency: toCurrency,
                 detailType: DETAIL_TYPE.YELLOWCARD,
                 status: TRANSACTION_STATUS.PENDING,
-                initiatedAt: Date.now(),
+                initiatedAt: new Date(),
                 lockedRate: userRate,
                 lockedRateFromCurrency: fromCurrency,
                 lockedRateToCurrency: toCurrency,
@@ -1553,16 +1431,16 @@ class TransactionService extends DBService<ITransaction> {
             });
         } catch (dbError: any) {
             logger.error("Failed to create collection transaction record", { error: dbError?.message, sequenceId });
-            throw errorResponseMessage.createError(500, `Failed to create transaction: ${dbError?.message || 'Unknown error'}`, ErrorSeverity.CRITICAL);
+            throw errorResponseMessage.createError(500, "We couldn't create this transaction. Please try again.", ErrorSeverity.CRITICAL);
         }
 
         if (idempotencyKey) {
-            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
         }
 
         try {
-            transactionDetails = await this.transactionDetailsService.create({
-                transactionId: transaction._id,
+            transactionDetails = await transactionDetailRepository.create({
+                transactionId: transaction.id,
                 type: DETAIL_TYPE.YELLOWCARD,
                 ycSequenceId: sequenceId,
                 ycNetworkId: network?.id,
@@ -1583,7 +1461,7 @@ class TransactionService extends DBService<ITransaction> {
             });
         } catch (dbError: any) {
             logger.error("Failed to create collection transaction detail", { error: dbError?.message, sequenceId });
-            throw errorResponseMessage.createError(500, `Failed to create transaction detail: ${dbError?.message || 'Unknown error'}`, ErrorSeverity.CRITICAL);
+            throw errorResponseMessage.createError(500, "We couldn't create this transaction. Please try again.", ErrorSeverity.CRITICAL);
         }
 
         let lastError: any = null;
@@ -1605,9 +1483,7 @@ class TransactionService extends DBService<ITransaction> {
             });
 
             // YellowCard says which channel it routed to
-            await this.transactionDetailsService.update(
-                { transactionId: transaction._id },
-                {
+            await transactionDetailRepository.updateByTransactionId(transaction.id, {
                     ycChannelId: collectionResponse?.channelId,
                     ycCollectionId: collectionResponse?.id,
                     ycStatus: collectionResponse?.status || YELLOWCARD_STATUS.PROCESSING,
@@ -1615,12 +1491,12 @@ class TransactionService extends DBService<ITransaction> {
                 }
             );
 
-            await this.updateById(transaction._id.toString(), {
+            await transactionRepository.update(transaction.id, {
                 status: TRANSACTION_STATUS.PROCESSING,
             });
 
             logger.info("YellowCard collection created", {
-                transactionId: transaction._id,
+                transactionId: transaction.id,
                 sequenceId,
                 channelType: targetType,
                 channelId: collectionResponse?.channelId,
@@ -1628,10 +1504,10 @@ class TransactionService extends DBService<ITransaction> {
             });
 
             return {
-                ...transaction.toObject(),
+                ...transaction,
                 status: TRANSACTION_STATUS.PROCESSING,
                 details: {
-                    ...transactionDetails.toObject(),
+                    ...transactionDetails,
                     ycChannelId: collectionResponse?.channelId,
                     ycCollectionId: collectionResponse?.id,
                     ycStatus: collectionResponse?.status || YELLOWCARD_STATUS.PROCESSING,
@@ -1642,12 +1518,12 @@ class TransactionService extends DBService<ITransaction> {
         }
 
         // YellowCard rejected the collection
-        await this.updateById(transaction._id.toString(), { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
-        await this.transactionDetailsService.update({ transactionId: transaction._id }, { ycStatus: YELLOWCARD_STATUS.FAILED });
+        await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
+        await transactionDetailRepository.updateByTransactionId(transaction.id, { ycStatus: YELLOWCARD_STATUS.FAILED });
 
         const ycError = lastError?.ycError || lastError?.response?.data || lastError?.data;
         const ycMessage = ycError?.message || ycError?.code || lastError?.message || "Collection request failed";
-        logger.error("YellowCard collection rejected", { transactionId: transaction._id, sequenceId, providerMessage: ycMessage });
+        logger.error("YellowCard collection rejected", { transactionId: transaction.id, sequenceId, providerMessage: ycMessage });
         throw errorResponseMessage.createError(400, providerFailureMessage(ycMessage, "receive"), ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
     };
 
@@ -1656,12 +1532,12 @@ class TransactionService extends DBService<ITransaction> {
      * When collection completes, credits the user's wallet with the NGN equivalent.
      */
     public pollYellowCardCollectionStatus = async (transactionId: string) => {
-        const transaction = await this.findById(transactionId);
+        const transaction = await transactionRepository.findById(transactionId);
         if (!transaction) {
             throw errorResponseMessage.createError(404, "Transaction not found", ErrorSeverity.MEDIUM);
         }
 
-        const detail = await this.transactionDetailsService.findOne({ transactionId: transaction._id });
+        const detail = await transactionDetailRepository.findByTransactionId(transaction.id);
         if (!detail?.ycSequenceId) {
             throw errorResponseMessage.createError(400, "This transaction has no payment reference yet.", ErrorSeverity.MEDIUM);
         }
@@ -1681,7 +1557,7 @@ class TransactionService extends DBService<ITransaction> {
                 error: error?.ycError || error?.message,
             });
             return {
-                transaction: transaction.toObject(),
+                transaction: await transactionRepository.findViewById(transaction.id),
                 ycStatus: detail.ycStatus || "unknown",
                 message: "We couldn't check the latest status. We'll keep trying.",
             };
@@ -1698,9 +1574,7 @@ class TransactionService extends DBService<ITransaction> {
         });
 
         // Update local detail
-        await this.transactionDetailsService.update(
-            { _id: detail._id },
-            { ycRawPayload: ycCollection, ycStatus, ycCollectionId: rawCollection?.id || detail.ycCollectionId }
+        await transactionDetailRepository.update(detail.id, { ycRawPayload: ycCollection, ycStatus, ycCollectionId: rawCollection?.id || detail.ycCollectionId }
         );
 
         // Handle completed collection → credit wallet
@@ -1715,7 +1589,7 @@ class TransactionService extends DBService<ITransaction> {
                 logger.info("YellowCard collection completed, wallet credited", { transactionId });
 
                 // Notify user
-                const user = transaction.user as IUser;
+                const user = await userRepository.findById(transaction.user);
                 if (user?.email) {
                     try {
                         await this.notificationService.sendTransactionNotification(
@@ -1738,9 +1612,9 @@ class TransactionService extends DBService<ITransaction> {
             await this.claimStatus(transaction, newStatus, newStatus === TRANSACTION_STATUS.FAILED ? { failedAt: new Date() } : {});
         }
 
-        const updatedTransaction = await this.findById(transactionId);
+        const updatedTransaction = await transactionRepository.findViewById(transactionId);
         return {
-            transaction: updatedTransaction?.toObject(),
+            transaction: updatedTransaction,
             ycStatus,
             ycCollection,
         };
@@ -1750,8 +1624,8 @@ class TransactionService extends DBService<ITransaction> {
      * Credit user's wallet when a YellowCard collection completes.
      * The NGN amount is stored in detail.fromAmount (for receive: fromAmount is the NGN equivalent).
      */
-    private creditWalletFromCollection = async (transaction: any, detail: any) => {
-        const userId = typeof transaction.user === 'object' ? transaction.user._id?.toString() : transaction.user?.toString();
+    private creditWalletFromCollection = async (transaction: Transaction, detail: TransactionDetail) => {
+        const userId = transaction.user;
         // detail.fromAmount is the NET NGN amount credited to the user (fee
         // already deducted). The platform receives the GROSS = net + fee from
         // the rail and books the fee into FEES_NGN.
@@ -1769,11 +1643,10 @@ class TransactionService extends DBService<ITransaction> {
             // Make sure the user's ledger account exists.
             await this.walletService.getOrCreateWallet(userId);
 
-            const session = await mongoose.startSession();
-            session.startTransaction();
-            try {
-                // Credit wallet in the same session as the journal posting.
-                await this.walletService.creditBalance(wallet._id as string, ngnAmount, session);
+            await withTransaction(async (tx) => {
+                // Credit wallet in the same transaction as the journal posting.
+                const credited = await this.walletService.creditBalance(wallet.id, ngnAmount, tx);
+                if (!credited) throw errorResponseMessage.createError(500, "Wallet not found for collection credit", ErrorSeverity.CRITICAL);
 
                 // Post journal: YellowCard float decreases by the gross; the
                 // user's wallet receives the net; the fee lands in FEES_NGN.
@@ -1792,38 +1665,32 @@ class TransactionService extends DBService<ITransaction> {
                     description: `Collection settled — ${transaction.amount} ${transaction.fromCurrency} → ₦${ngnAmount.toFixed(2)} (fee ₦${feeAmount.toFixed(2)})`,
                     externalRef: { provider: WEBHOOK_PROVIDER.YELLOWCARD, id: transaction.reference },
                     metadata: { fromAmount: transaction.amount, fromCurrency: transaction.fromCurrency, feeAmount, grossNgn },
-                    session,
+                    tx,
                 });
 
-                // Create wallet funding transaction
-                const ref = this.walletTransactionService.generateReference('COL');
-                await this.walletTransactionService.create({
-                    wallet: wallet._id,
+                // Wallet funding record (unique per collection reference, so it can't be credited twice)
+                await walletTransactionRepository.create({
+                    wallet: wallet.id,
                     user: userId,
-                    type: WALLET_TRANSACTION_TYPE.FUNDING,
-                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                    type: WALLET_TRANSACTION_TYPE.FUNDING as "funding",
+                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful",
                     amount: ngnAmount,
-                    reference: ref,
-                    balanceBefore: wallet.balance,
-                    balanceAfter: wallet.balance + ngnAmount,
+                    reference: this.walletTransactionService.generateReference('COL'),
+                    balanceBefore: Math.round((credited.balance - ngnAmount) * 100) / 100,
+                    balanceAfter: credited.balance,
                     description: `Received ${transaction.amount} ${transaction.fromCurrency} → ₦${ngnAmount.toLocaleString()}`,
+                    currency: wallet.currency,
                     paystackReference: transaction.reference, // Link to YC transaction
-                }, session);
+                    transactionId: transaction.id,
+                }, tx);
 
                 // Update ledger balance projection
-                await this.walletService.adjustLedgerBalance(wallet._id as string, ngnAmount, session);
-
-                await session.commitTransaction();
-            } catch (sessionError) {
-                if (session.inTransaction()) await session.abortTransaction();
-                throw sessionError;
-            } finally {
-                session.endSession();
-            }
+                await this.walletService.adjustLedgerBalance(wallet.id, ngnAmount, tx);
+            });
 
             logger.info("Wallet credited from collection", {
                 userId,
-                walletId: wallet._id,
+                walletId: wallet.id,
                 ngnAmount,
                 foreignAmount: transaction.amount,
                 foreignCurrency: transaction.fromCurrency,
@@ -1831,7 +1698,7 @@ class TransactionService extends DBService<ITransaction> {
         } catch (error: any) {
             logger.error("CRITICAL: Failed to credit wallet from collection", {
                 userId,
-                transactionId: transaction._id,
+                transactionId: transaction.id,
                 ngnAmount,
                 error: error?.message,
             });
@@ -1854,12 +1721,12 @@ class TransactionService extends DBService<ITransaction> {
             return;
         }
 
-        const detail = await this.transactionDetailsService.findOne({ ycSequenceId: sequenceId });
+        const detail = await transactionDetailRepository.findByYcSequenceId(sequenceId);
         if (!detail) {
             logger.warn("YellowCard webhook: no matching transaction detail", { sequenceId });
             return;
         }
-        const transactionId = detail.transactionId.toString();
+        const transactionId = detail.transactionId;
 
         // Receives carry our collection id; the event name (RECEIVE.* now,
         // COLLECTION.* before) covers one that failed before we stored it.
@@ -1891,13 +1758,9 @@ class TransactionService extends DBService<ITransaction> {
      * Returns false when a webhook, status check or the sweeper got there
      * first, so the caller skips the wallet movement that goes with it.
      */
-    private claimStatus = async (transaction: any, to: TransactionStatus, extra: Record<string, any> = {}) => {
+    private claimStatus = async (transaction: Transaction, to: TransactionStatus, extra: { completedAt?: Date; failedAt?: Date } = {}) => {
         if (!transactionStateMachine.canTransition(transaction.status, to)) return false;
-        const claimed = await this.Model.findOneAndUpdate(
-            { _id: transaction._id, status: transaction.status },
-            { $set: { status: to, ...extra } },
-            { new: true },
-        );
+        const claimed = await transactionRepository.updateIfStatus(transaction.id, transaction.status, { status: to, ...extra });
         return !!claimed;
     };
 
@@ -2012,14 +1875,8 @@ class TransactionService extends DBService<ITransaction> {
         );
 
         if (idempotencyKey) {
-            const dup = await this.idempotencyService.validateKey(idempotencyKey, userId);
-            if (dup.isDuplicate && dup.transactionId) {
-                const existing = await this.findById(dup.transactionId);
-                if (existing) {
-                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existing._id });
-                    return { ...existing.toObject(), details: existingDetails ? existingDetails.toObject() : {} };
-                }
-            }
+            const duplicate = await this.findDuplicate(idempotencyKey, userId);
+            if (duplicate) return duplicate;
         }
 
         const sequenceId = this.generateOGatewaySequenceId();
@@ -2061,7 +1918,7 @@ class TransactionService extends DBService<ITransaction> {
         let transaction: any;
         let transactionDetails: any;
         try {
-            transaction = await this.create({
+            transaction = await transactionRepository.create({
                 usdValue: txUsdValue ?? undefined,
                 user: userId,
                 reference: sequenceId,
@@ -2070,7 +1927,7 @@ class TransactionService extends DBService<ITransaction> {
                 currency: 'GHS',
                 detailType: DETAIL_TYPE.OGATEWAY,
                 status: TRANSACTION_STATUS.PENDING,
-                initiatedAt: Date.now(),
+                initiatedAt: new Date(),
                 lockedRate,
                 lockedRateFromCurrency: 'NGN',
                 lockedRateToCurrency: 'GHS',
@@ -2080,23 +1937,23 @@ class TransactionService extends DBService<ITransaction> {
             logger.error("Failed to create OGateway transaction record, refunding wallet", {
                 error: dbError?.message, sequenceId,
             });
-            await this.refundWalletFromOGateway(wallet._id, userId, totalDebit, ngnAmount, walletTransaction._id, walletTxRef, "Transaction record creation failed", feeAmount);
-            throw errorResponseMessage.createError(500, `Failed to create transaction: ${dbError?.message || 'Unknown error'}`, ErrorSeverity.CRITICAL);
+            await this.refundWalletFromOGateway(wallet.id, userId, totalDebit, ngnAmount, walletTransaction.id, walletTxRef, "Transaction record creation failed", feeAmount);
+            throw errorResponseMessage.createError(500, "We couldn't create this transaction. Please try again.", ErrorSeverity.CRITICAL);
         }
 
-        await this.walletTransactionService.updateById(walletTransaction._id as string, {
+        await walletTransactionRepository.update(walletTransaction.id, {
             paystackReference: sequenceId,
-            transactionId: transaction._id,
+            transactionId: transaction.id,
         });
 
         if (idempotencyKey) {
-            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
         }
 
         const isMomo = destination.accountType === 'momo';
         try {
-            transactionDetails = await this.transactionDetailsService.create({
-                transactionId: transaction._id,
+            transactionDetails = await transactionDetailRepository.create({
+                transactionId: transaction.id,
                 type: DETAIL_TYPE.OGATEWAY,
                 ogReference: sequenceId,
                 ogChannel: isMomo ? OGATEWAY_CHANNELS.MOMO : OGATEWAY_CHANNELS.BANK,
@@ -2118,8 +1975,8 @@ class TransactionService extends DBService<ITransaction> {
             });
         } catch (dbError: any) {
             logger.error("Failed to create OGateway transaction detail", { error: dbError?.message });
-            await this.refundWalletFromOGateway(wallet._id, userId, totalDebit, ngnAmount, walletTransaction._id, walletTxRef, "Transaction detail creation failed", feeAmount);
-            throw errorResponseMessage.createError(500, `Failed to create transaction detail: ${dbError?.message || 'Unknown error'}`, ErrorSeverity.CRITICAL);
+            await this.refundWalletFromOGateway(wallet.id, userId, totalDebit, ngnAmount, walletTransaction.id, walletTxRef, "Transaction detail creation failed", feeAmount);
+            throw errorResponseMessage.createError(500, "We couldn't create this transaction. Please try again.", ErrorSeverity.CRITICAL);
         }
 
         // Dispatch to OGateway.
@@ -2154,9 +2011,7 @@ class TransactionService extends DBService<ITransaction> {
             const ogTx = Array.isArray(payoutResponse) ? payoutResponse[0] : payoutResponse;
             const ogStatus = (ogTx?.status || OGATEWAY_STATUS.INITIATED).toLowerCase();
 
-            await this.transactionDetailsService.update(
-                { transactionId: transaction._id },
-                {
+            await transactionDetailRepository.updateByTransactionId(transaction.id, {
                     ogId: ogTx?.id,
                     ogStatus,
                     ogRawPayload: payoutResponse,
@@ -2168,7 +2023,7 @@ class TransactionService extends DBService<ITransaction> {
             const finalStatus = ogStatus === OGATEWAY_STATUS.COMPLETED
                 ? TRANSACTION_STATUS.COMPLETED
                 : TRANSACTION_STATUS.PROCESSING;
-            await this.updateById(transaction._id.toString(), {
+            await transactionRepository.update(transaction.id, {
                 status: finalStatus,
                 ...(finalStatus === TRANSACTION_STATUS.COMPLETED ? { completedAt: new Date() } : {}),
             });
@@ -2176,14 +2031,14 @@ class TransactionService extends DBService<ITransaction> {
             if (finalStatus === TRANSACTION_STATUS.COMPLETED) {
                 // Sync: post the final ledger leg + clear wallet-transaction pending.
                 await this.postOGatewayPayoutCompletion(sequenceId, ngnAmount);
-                await this.walletTransactionService.updateById(walletTransaction._id as string, {
+                await walletTransactionRepository.update(walletTransaction.id, {
                     status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
                 });
-                await this.walletService.adjustLedgerBalance(wallet._id as string, -walletDebit);
+                await this.walletService.adjustLedgerBalance(wallet.id, -walletDebit);
             }
 
             logger.info("OGateway payout dispatched", {
-                transactionId: transaction._id,
+                transactionId: transaction.id,
                 sequenceId,
                 ogId: ogTx?.id,
                 ogStatus,
@@ -2191,24 +2046,22 @@ class TransactionService extends DBService<ITransaction> {
             });
 
             return {
-                ...transaction.toObject(),
+                ...transaction,
                 status: finalStatus,
                 details: {
-                    ...transactionDetails.toObject(),
+                    ...transactionDetails,
                     ogId: ogTx?.id,
                     ogStatus,
                 },
             };
         } catch (error: any) {
-            await this.updateById(transaction._id.toString(), { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
-            await this.transactionDetailsService.update(
-                { transactionId: transaction._id },
-                { ogStatus: OGATEWAY_STATUS.FAILED },
+            await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
+            await transactionDetailRepository.updateByTransactionId(transaction.id, { ogStatus: OGATEWAY_STATUS.FAILED },
             );
-            await this.refundWalletFromOGateway(wallet._id, userId, totalDebit, ngnAmount, walletTransaction._id, walletTxRef, "Payment failed", feeAmount);
+            await this.refundWalletFromOGateway(wallet.id, userId, totalDebit, ngnAmount, walletTransaction.id, walletTxRef, "Payment failed", feeAmount);
             const ogError = error?.ogError || error?.response?.data || error?.data;
             const ogMessage = ogError?.message || ogError?.error || error?.message || "Payout request failed";
-            logger.error("OGateway payout rejected", { transactionId: transaction._id, providerMessage: ogMessage });
+            logger.error("OGateway payout rejected", { transactionId: transaction.id, providerMessage: ogMessage });
             throw errorResponseMessage.createError(400, `${providerFailureMessage(ogMessage, "send")} Your wallet has not been charged.`, ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
         }
     };
@@ -2280,20 +2133,14 @@ class TransactionService extends DBService<ITransaction> {
         const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
 
         if (idempotencyKey) {
-            const dup = await this.idempotencyService.validateKey(idempotencyKey, userId);
-            if (dup.isDuplicate && dup.transactionId) {
-                const existing = await this.findById(dup.transactionId);
-                if (existing) {
-                    const existingDetails = await this.transactionDetailsService.findOne({ transactionId: existing._id });
-                    return { ...existing.toObject(), details: existingDetails ? existingDetails.toObject() : {} };
-                }
-            }
+            const duplicate = await this.findDuplicate(idempotencyKey, userId);
+            if (duplicate) return duplicate;
         }
 
         const sequenceId = this.generateOGatewaySequenceId();
         const lockedRate = userRate;
 
-        const transaction = await this.create({
+        const transaction = await transactionRepository.create({
             usdValue: txUsdValue ?? undefined,
             user: userId,
             reference: sequenceId,
@@ -2302,7 +2149,7 @@ class TransactionService extends DBService<ITransaction> {
             currency: 'NGN',
             detailType: DETAIL_TYPE.OGATEWAY,
             status: TRANSACTION_STATUS.PENDING,
-            initiatedAt: Date.now(),
+            initiatedAt: new Date(),
             lockedRate,
             lockedRateFromCurrency: 'GHS',
             lockedRateToCurrency: 'NGN',
@@ -2311,11 +2158,11 @@ class TransactionService extends DBService<ITransaction> {
         });
 
         if (idempotencyKey) {
-            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction._id.toString());
+            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
         }
 
-        const transactionDetails = await this.transactionDetailsService.create({
-            transactionId: transaction._id,
+        const transactionDetails = await transactionDetailRepository.create({
+            transactionId: transaction.id,
             type: DETAIL_TYPE.OGATEWAY,
             ogReference: sequenceId,
             ogChannel: OGATEWAY_CHANNELS.MOMO,
@@ -2346,34 +2193,30 @@ class TransactionService extends DBService<ITransaction> {
             });
 
             const ogStatus = (response?.status || OGATEWAY_STATUS.INITIATED).toLowerCase();
-            await this.transactionDetailsService.update(
-                { transactionId: transaction._id },
-                { ogId: response?.id, ogStatus, ogRawPayload: response },
+            await transactionDetailRepository.updateByTransactionId(transaction.id, { ogId: response?.id, ogStatus, ogRawPayload: response },
             );
-            await this.updateById(transaction._id.toString(), { status: TRANSACTION_STATUS.PROCESSING });
+            await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.PROCESSING });
 
             logger.info("OGateway collection created", {
-                transactionId: transaction._id, sequenceId, ogId: response?.id, ogStatus,
+                transactionId: transaction.id, sequenceId, ogId: response?.id, ogStatus,
             });
 
             return {
-                ...transaction.toObject(),
+                ...transaction,
                 status: TRANSACTION_STATUS.PROCESSING,
                 details: {
-                    ...transactionDetails.toObject(),
+                    ...transactionDetails,
                     ogId: response?.id,
                     ogStatus,
                 },
             };
         } catch (error: any) {
-            await this.updateById(transaction._id.toString(), { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
-            await this.transactionDetailsService.update(
-                { transactionId: transaction._id },
-                { ogStatus: OGATEWAY_STATUS.FAILED },
+            await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
+            await transactionDetailRepository.updateByTransactionId(transaction.id, { ogStatus: OGATEWAY_STATUS.FAILED },
             );
             const ogError = error?.ogError || error?.response?.data || error?.data;
             const ogMessage = ogError?.message || ogError?.error || error?.message || "Collection request failed";
-            logger.error("OGateway collection rejected", { transactionId: transaction._id, providerMessage: ogMessage });
+            logger.error("OGateway collection rejected", { transactionId: transaction.id, providerMessage: ogMessage });
             throw errorResponseMessage.createError(400, providerFailureMessage(ogMessage, "receive"), ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
         }
     };
@@ -2383,10 +2226,8 @@ class TransactionService extends DBService<ITransaction> {
      * Posted in NGN-equivalent amounts (locked rate already captured on tx record).
      */
     private postOGatewayPayoutCompletion = async (reference: string, ngnAmount: number) => {
-        const session = await mongoose.startSession();
-        session.startTransaction();
         try {
-            await ledgerService.post({
+            await ledgerService.postStandalone({
                 legs: [
                     { accountCode: ogPaymentInflightCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: ngnAmount },
                     { accountCode: ogCashAccountCode('GHS'), direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
@@ -2395,14 +2236,9 @@ class TransactionService extends DBService<ITransaction> {
                 reference,
                 description: `OGateway payout settled — float drawn down`,
                 externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: reference },
-                session,
             });
-            await session.commitTransaction();
         } catch (error) {
-            if (session.inTransaction()) await session.abortTransaction();
             logger.error("OGateway payout settlement journal post failed", { reference, error: (error as any)?.message });
-        } finally {
-            session.endSession();
         }
     };
 
@@ -2410,8 +2246,8 @@ class TransactionService extends DBService<ITransaction> {
      * On collection completion, credit the user's NGN wallet at the locked rate
      * and post the settling journal entries.
      */
-    private creditWalletFromOGatewayCollection = async (transaction: any, detail: any) => {
-        const userId = typeof transaction.user === 'object' ? transaction.user._id?.toString() : transaction.user?.toString();
+    private creditWalletFromOGatewayCollection = async (transaction: Transaction, detail: TransactionDetail) => {
+        const userId = transaction.user;
         // detail.fromAmount is the NET amount credited to the user (already
         // fee-deducted). The platform receives the GROSS = net + fee from the
         // rail, and books the fee into FEES_NGN.
@@ -2427,10 +2263,9 @@ class TransactionService extends DBService<ITransaction> {
             }
             await this.walletService.getOrCreateWallet(userId);
 
-            const session = await mongoose.startSession();
-            session.startTransaction();
-            try {
-                await this.walletService.creditBalance(wallet._id as string, ngnAmount, session);
+            await withTransaction(async (tx) => {
+                const credited = await this.walletService.creditBalance(wallet.id, ngnAmount, tx);
+                if (!credited) throw errorResponseMessage.createError(500, "Wallet not found for collection credit", ErrorSeverity.CRITICAL);
 
                 const userAccountCode = userWalletAccountCode(userId, wallet.currency);
                 const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
@@ -2447,38 +2282,33 @@ class TransactionService extends DBService<ITransaction> {
                     description: `OGateway collection settled — ${transaction.amount} GHS → ₦${ngnAmount.toFixed(2)} (fee ₦${feeAmount.toFixed(2)})`,
                     externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: transaction.reference },
                     metadata: { fromAmount: transaction.amount, fromCurrency: 'GHS', feeAmount, grossNgn },
-                    session,
+                    tx,
                 });
 
-                const ref = this.walletTransactionService.generateReference('COL');
-                await this.walletTransactionService.create({
-                    wallet: wallet._id,
+                await walletTransactionRepository.create({
+                    wallet: wallet.id,
                     user: userId,
-                    type: WALLET_TRANSACTION_TYPE.FUNDING,
-                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+                    type: WALLET_TRANSACTION_TYPE.FUNDING as "funding",
+                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL as "successful",
                     amount: ngnAmount,
-                    reference: ref,
-                    balanceBefore: wallet.balance,
-                    balanceAfter: wallet.balance + ngnAmount,
+                    reference: this.walletTransactionService.generateReference('COL'),
+                    balanceBefore: Math.round((credited.balance - ngnAmount) * 100) / 100,
+                    balanceAfter: credited.balance,
                     description: `Received ${transaction.amount} GHS → ₦${ngnAmount.toLocaleString()}`,
+                    currency: wallet.currency,
                     paystackReference: transaction.reference,
-                }, session);
+                    transactionId: transaction.id,
+                }, tx);
 
-                await this.walletService.adjustLedgerBalance(wallet._id as string, ngnAmount, session);
-                await session.commitTransaction();
-            } catch (sessionError) {
-                if (session.inTransaction()) await session.abortTransaction();
-                throw sessionError;
-            } finally {
-                session.endSession();
-            }
+                await this.walletService.adjustLedgerBalance(wallet.id, ngnAmount, tx);
+            });
 
             logger.info("Wallet credited from OGateway collection", {
-                userId, walletId: wallet._id, ngnAmount, ghsAmount: transaction.amount,
+                userId, walletId: wallet.id, ngnAmount, ghsAmount: transaction.amount,
             });
         } catch (error: any) {
             logger.error("CRITICAL: Failed to credit wallet from OGateway collection", {
-                userId, transactionId: transaction._id, ngnAmount, error: error?.message,
+                userId, transactionId: transaction.id, ngnAmount, error: error?.message,
             });
         }
     };
@@ -2502,14 +2332,14 @@ class TransactionService extends DBService<ITransaction> {
             return;
         }
 
-        const detail = await this.transactionDetailsService.findOne({ ogReference: reference });
+        const detail = await transactionDetailRepository.findByOgReference(reference);
         if (!detail) {
             logger.warn("OGateway webhook: no matching transaction detail", { reference });
             return;
         }
 
-        const transactionId = detail.transactionId.toString();
-        const transaction = await this.findById(transactionId);
+        const transactionId = detail.transactionId;
+        const transaction = await transactionRepository.findById(transactionId);
         if (!transaction) {
             logger.warn("OGateway webhook: no matching transaction", { transactionId });
             return;
@@ -2517,45 +2347,37 @@ class TransactionService extends DBService<ITransaction> {
 
         const status = (webhookData?.status || '').toLowerCase();
 
-        await this.transactionDetailsService.update(
-            { _id: detail._id },
-            { ogRawPayload: webhookData, ogStatus: status, ogId: webhookData?.id || detail.ogId },
-        );
+        await transactionDetailRepository.update(detail.id, { ogRawPayload: webhookData, ogStatus: status, ogId: webhookData?.id || detail.ogId });
 
         const isSendFlow = transaction.fromCurrency === 'NGN' && transaction.currency === 'GHS';
         const isReceiveFlow = transaction.fromCurrency === 'GHS' && transaction.currency === 'NGN';
 
         // ===== Send flow (NGN→GHS payout) =====
         if (isSendFlow) {
-            const findWalletTx = async () => this.walletTransactionService.findOne({
-                paystackReference: transaction.reference,
-                type: WALLET_TRANSACTION_TYPE.TRANSFER,
-            });
+            const findWalletTx = async () => walletTransactionRepository.findByPaystackReference(transaction.reference, WALLET_TRANSACTION_TYPE.TRANSFER as "transfer");
 
             if (status === OGATEWAY_STATUS.COMPLETED) {
-                if (transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.COMPLETED)) {
-                    await this.updateById(transactionId, {
-                        status: TRANSACTION_STATUS.COMPLETED,
-                        completedAt: new Date(),
-                    });
+                // Only the caller that moves the status settles, so a webhook and
+                // the sweeper's poll arriving together can't both post it.
+                if (await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() })) {
                     // detail.fromAmount is the total wallet debit (converted + fee).
                     // The OG_PAYMENT_INFLIGHT_GHS leg only holds the converted
                     // portion, so we drain it by `fromAmount - feeAmount`.
                     const totalDebit = detail.fromAmount || transaction.amount;
-                    const feeAmount = (detail as any).feeAmount || 0;
+                    const feeAmount = detail.feeAmount || 0;
                     const convertedNgn = Math.round((totalDebit - feeAmount) * 100) / 100;
                     await this.postOGatewayPayoutCompletion(transaction.reference, convertedNgn);
 
                     const walletTx = await findWalletTx();
                     if (walletTx) {
-                        await this.walletTransactionService.updateById(walletTx._id as string, {
+                        await walletTransactionRepository.update(walletTx.id, {
                             status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
                         });
-                        await this.walletService.adjustLedgerBalance(walletTx.wallet as string, -walletTx.amount);
+                        await this.walletService.adjustLedgerBalance(walletTx.wallet, -walletTx.amount);
                     }
                 }
 
-                const user = transaction.user as IUser;
+                const user = await userRepository.findById(transaction.user);
                 if (user?.email) {
                     try {
                         await this.notificationService.sendTransactionNotification(user, "payment_completed", {
@@ -2572,20 +2394,19 @@ class TransactionService extends DBService<ITransaction> {
             }
 
             if (status === OGATEWAY_STATUS.FAILED) {
-                if (transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.FAILED)) {
-                    await this.updateById(transactionId, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
-                }
+                await this.claimStatus(transaction, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date() });
+                // The refund claims the wallet transaction itself, so it happens once
                 const walletTx = await findWalletTx();
                 if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.FAILED && walletTx.status !== WALLET_TRANSACTION_STATUS.REVERSED) {
                     const totalDebit = walletTx.amount;
-                    const feeAmount = (detail as any).feeAmount || 0;
+                    const feeAmount = detail.feeAmount || 0;
                     const convertedNgn = Math.round((totalDebit - feeAmount) * 100) / 100;
                     await this.refundWalletFromOGateway(
                         walletTx.wallet,
-                        walletTx.user as string,
+                        walletTx.user,
                         totalDebit,
                         convertedNgn,
-                        walletTx._id,
+                        walletTx.id,
                         walletTx.reference,
                         'Payment failed',
                         feeAmount,
@@ -2598,19 +2419,14 @@ class TransactionService extends DBService<ITransaction> {
         // ===== Receive flow (GHS→NGN collection) =====
         if (isReceiveFlow) {
             if (status === OGATEWAY_STATUS.COMPLETED) {
-                if (transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.COMPLETED)) {
-                    await this.updateById(transactionId, {
-                        status: TRANSACTION_STATUS.COMPLETED,
-                        completedAt: new Date(),
-                    });
+                // Only the caller that moves the status credits the wallet
+                if (await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() })) {
                     await this.creditWalletFromOGatewayCollection(transaction, detail);
                 }
                 return;
             }
             if (status === OGATEWAY_STATUS.FAILED) {
-                if (transactionStateMachine.canTransition(transaction.status, TRANSACTION_STATUS.FAILED)) {
-                    await this.updateById(transactionId, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
-                }
+                await this.claimStatus(transaction, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date() });
                 return;
             }
         }
@@ -2631,30 +2447,24 @@ class TransactionService extends DBService<ITransaction> {
     public pollOGatewayStatus = async (
         transactionId: string,
     ): Promise<{ transaction?: any; ogStatus: string; message?: string }> => {
-        const transaction = await this.findById(transactionId);
+        const transaction = await transactionRepository.findById(transactionId);
         if (!transaction) {
             logger.warn("pollOGatewayStatus: transaction not found", { transactionId });
             return { ogStatus: "unknown", message: "Transaction not found" };
         }
 
         const resultFromCurrentState = async (fallbackStatus: string, message?: string) => {
-            const refreshed = await this.findById(transactionId);
-            const baseTransaction = refreshed || transaction;
-            const refreshedDetail = await this.transactionDetailsService.findOne({
-                transactionId: baseTransaction._id,
-            });
+            const refreshed = await transactionRepository.findViewById(transactionId);
+            const baseTransaction = refreshed || (await transactionRepository.toViews([transaction]))[0];
 
             return {
-                transaction: {
-                    ...baseTransaction.toObject(),
-                    details: refreshedDetail ? refreshedDetail.toObject() : {},
-                },
-                ogStatus: (refreshedDetail as any)?.ogStatus || fallbackStatus,
+                transaction: { ...baseTransaction, details: baseTransaction.details ?? {} },
+                ogStatus: baseTransaction.details?.ogStatus || fallbackStatus,
                 message,
             };
         };
 
-        const detail = await this.transactionDetailsService.findOne({ transactionId: transaction._id });
+        const detail = await transactionDetailRepository.findByTransactionId(transaction.id);
         if (!detail) {
             logger.warn("pollOGatewayStatus: detail not found", { transactionId });
             return resultFromCurrentState(
@@ -2697,47 +2507,37 @@ class TransactionService extends DBService<ITransaction> {
         return resultFromCurrentState(remoteStatus);
     };
 
-    public async searchTransactions(
-        searchTerm: string,
-        filters: Partial<ITransaction> = {},
-        options: {
-            page?: number;
-            limit?: number;
-            useTextSearch?: boolean;
-        } = {}
-    ) {
-        const { page = 1, limit = 10, useTextSearch = false } = options;
+    /**
+     * Transactions with their details and owner, newest first. `searchTerm`
+     * matches the reference (partial, case-insensitive).
+     */
+    public async listTransactions(filter: TransactionListFilter, page: PageRequest, searchTerm?: string): Promise<Paginated<TransactionView>> {
+        const search = searchTerm?.trim();
+        return transactionRepository.paginateViews({ ...filter, ...(search ? { search } : {}) }, page);
+    }
 
-        let query: any = { ...filters };
-        let sortOptions: Record<string, any> = { createdAt: -1 };
+    /** A transaction with its details and owner */
+    public async findView(transactionId: string): Promise<TransactionView | undefined> {
+        return transactionRepository.findViewById(transactionId);
+    }
 
-        if (searchTerm?.trim()) {
-            const cleanedSearchTerm = searchTerm.trim();
+    /** The detail row of a transaction */
+    public async findDetails(transactionId: string): Promise<TransactionDetail | undefined> {
+        return transactionDetailRepository.findByTransactionId(transactionId);
+    }
 
-            if (useTextSearch && cleanedSearchTerm.length >= 3) {
-                // Use text search for better performance on full words
-                query.$text = { $search: cleanedSearchTerm };
-                sortOptions = { score: { $meta: "textScore" } };
-            } else {
-                // Use regex for partial matching
-                const escapedSearchTerm = cleanedSearchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const regex = new RegExp(escapedSearchTerm, 'i');
-
-                query.$or = [
-                    { reference: regex },
-                    { description: regex },
-                    { city: regex },
-                    { country: regex },
-                ];
-            }
-        }
-
-        return this.paginate(query, {
-            page,
-            limit,
-            sort: sortOptions
-        });
+    /**
+     * Claims the idempotency key, or returns the transaction it already
+     * created (with its details and owner) when the request is a repeat.
+     */
+    private async findDuplicate(idempotencyKey: string, userId: string): Promise<TransactionView | undefined> {
+        const idempotencyResult = await this.idempotencyService.validateKey(idempotencyKey, userId);
+        if (!idempotencyResult.isDuplicate || !idempotencyResult.transactionId) return undefined;
+        const existing = await transactionRepository.findViewById(idempotencyResult.transactionId);
+        if (!existing) return undefined;
+        return { ...existing, details: existing.details ?? ({} as TransactionDetail) };
     }
 }
 
+export type { TransactionListFilter };
 export default TransactionService;

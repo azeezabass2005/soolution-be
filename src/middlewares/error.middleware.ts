@@ -6,6 +6,7 @@ import errorResponseMessage, {
 } from "../common/messages/error-response-message";
 import { NextFunction, Request, Response, Application } from "express";
 import logger from "../utils/logger.utils";
+import { PG_ERROR, pgError } from "../db/errors";
 
 class ResponseErrorHandler {
     protected logger: typeof logger;
@@ -51,13 +52,20 @@ class ResponseErrorHandler {
             return;
         }
 
+        // Database errors: Drizzle's message contains the SQL and its parameters
+        // (which can include password hashes or identity numbers), so it is
+        // never logged or returned; only the Postgres code and constraint are.
+        const database = this.databaseError(err);
+
         // Log the error with request context
         // Extract error details safely to avoid circular references
-        const errorDetails: any = {
-            name: err.name || "UnknownError",
-            message: err.message || String(err),
-            stack: err.stack || "UnknownStack"
-        };
+        const errorDetails: any = database
+            ? { name: "DatabaseError", message: database.logMessage, code: database.code, constraint: database.constraint }
+            : {
+                name: err.name || "UnknownError",
+                message: err.message || String(err),
+                stack: err.stack || "UnknownStack"
+            };
 
         // If it's an AxiosError, extract response details safely
         if ((err as any).response) {
@@ -84,7 +92,7 @@ class ResponseErrorHandler {
             }
         }
 
-        this.logger.error(`Error in request [${correlationId}]: ${err.message}`, {
+        this.logger.error(`Error in request [${correlationId}]: ${errorDetails.message}`, {
             correlationId,
             error: errorDetails,
             request: {
@@ -99,7 +107,7 @@ class ResponseErrorHandler {
         });
 
         // Create error response using the provided ErrorResponseMessage methods
-        const errorResponse = this.createDetailedErrorResponse(err);
+        const errorResponse = database ? database.response : this.createDetailedErrorResponse(err);
 
         // Add correlation ID to response headers
         res.setHeader('X-Correlation-ID', correlationId);
@@ -107,6 +115,37 @@ class ResponseErrorHandler {
         // Send error response
         res.status(errorResponse.response_code)
             .json({ ...errorResponse, correlationId });
+    }
+
+    /** Maps a Postgres error to a safe client response; null when `err` isn't one */
+    private databaseError(err: Error): { code: string; constraint?: string; logMessage: string; response: ErrorResponse } | null {
+        const info = pgError(err);
+        if (!info && err?.name !== 'DrizzleQueryError') return null;
+        const code = info?.code ?? 'unknown';
+        const logMessage = `Database error ${code}${info?.constraint ? ` (${info.constraint})` : ''}`;
+        const respond = (status: number, message: string, severity: ErrorSeverity) =>
+            this.errorMessageHandler.createError(status, message, severity);
+        let response: ErrorResponse;
+        switch (code) {
+            case PG_ERROR.UNIQUE_VIOLATION:
+                response = respond(ErrorResponseCode.RESOURCE_ALREADY_EXISTS, 'A record with these details already exists', ErrorSeverity.LOW);
+                break;
+            case PG_ERROR.FOREIGN_KEY_VIOLATION:
+                response = respond(ErrorResponseCode.PAYLOAD_INCORRECT, 'A related record does not exist', ErrorSeverity.LOW);
+                break;
+            case PG_ERROR.CHECK_VIOLATION:
+                response = respond(ErrorResponseCode.PAYLOAD_INCORRECT, 'One or more values are outside the allowed range', ErrorSeverity.LOW);
+                break;
+            case PG_ERROR.NOT_NULL_VIOLATION:
+                response = respond(ErrorResponseCode.PAYLOAD_INCORRECT, 'A required field is missing', ErrorSeverity.LOW);
+                break;
+            case PG_ERROR.INVALID_TEXT_REPRESENTATION:
+                response = respond(ErrorResponseCode.PAYLOAD_INCORRECT, 'One or more values are invalid', ErrorSeverity.LOW);
+                break;
+            default:
+                response = this.errorMessageHandler.unableToComplete('An unexpected error occurred');
+        }
+        return { code, constraint: info?.constraint, logMessage, response };
     }
 
     private isErrorResponse(err: any): err is ErrorResponse {

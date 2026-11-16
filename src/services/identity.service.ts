@@ -1,8 +1,9 @@
 import { createHmac } from "crypto";
-import mongoose from "mongoose";
-import User from "../models/user.model";
-import Verification from "../models/verification.model";
-import { IUser, IVerification } from "../models/interface";
+import userRepository from "../repositories/user.repository";
+import verificationRepository, { ENCRYPTED_IDS_CLEARED } from "../repositories/verification.repository";
+import { isUuid } from "../utils/id.utils";
+import { isUniqueViolation } from "../db/errors";
+import type { User as IUser, UserIdentity, Verification as IVerification } from "../types/entities";
 import SmileId, { personalInfoFrom, SmileImage, SmileJobRef, SmilePersonalInfo } from "./smile-id.service";
 import AuditLogService from "./audit-log.service";
 import NotificationService from "../utils/notification.utils";
@@ -126,13 +127,7 @@ class IdentityService {
     }
 
     private async countedFailures(userId: string) {
-        return Verification.find({
-            user: userId,
-            kind: "bvn",
-            status: "failed",
-            excludedFromAttempts: { $ne: true },
-            createdAt: { $gte: new Date(Date.now() - BVN_ATTEMPT_WINDOW_MS) },
-        }).select("createdAt").sort({ createdAt: 1 }).lean();
+        return verificationRepository.countedFailuresSince(userId, new Date(Date.now() - BVN_ATTEMPT_WINDOW_MS));
     }
 
     private async attempts(userId: string): Promise<IdentityStatusView["attempts"]> {
@@ -145,13 +140,13 @@ class IdentityService {
 
     /** The user's verification state; also chases Smile ID for a result that's overdue */
     async getStatus(userId: string): Promise<IdentityStatusView> {
-        let pending = await Verification.findOne({ user: userId, kind: "bvn", status: "pending" });
+        let pending = await verificationRepository.findPendingBvn(userId);
         if (pending) {
             await this.checkPending(pending);
-            pending = await Verification.findOne({ user: userId, kind: "bvn", status: "pending" });
+            pending = await verificationRepository.findPendingBvn(userId);
         }
 
-        const user = await User.findById(userId).select("+identity.bvnEnc +identity.ninEnc").lean();
+        const user = await userRepository.findById(userId, { withSecrets: true });
         if (!user) throw errorResponseMessage.resourceNotFound("User");
         const identity = user.identity;
         const verified = identity?.status === IDENTITY_STATUS.VERIFIED;
@@ -164,7 +159,7 @@ class IdentityService {
             failureReason: identity?.status === IDENTITY_STATUS.FAILED ? identity?.failureReason : undefined,
             pending: pending ? { id: pending.id, startedAt: pending.createdAt } : null,
             attempts: await this.attempts(userId),
-            transferDetails: this.detailsView(user as IUser),
+            transferDetails: this.detailsView(user),
         };
     }
 
@@ -190,7 +185,7 @@ class IdentityService {
 
     /** Starts a BVN check: validates, enforces limits, and submits to Smile ID */
     async submitBvn(user: IUser, bvn: unknown, images: unknown, nin?: unknown): Promise<IdentityStatusView> {
-        const userId = String(user._id);
+        const userId = user.id;
         if ((user.tier ?? USER_TIER.UNVERIFIED) >= USER_TIER.INDIVIDUAL || user.identity?.status === IDENTITY_STATUS.VERIFIED) {
             throw errorResponseMessage.createError(409, "Your identity is already verified", ErrorSeverity.LOW, { code: "IDENTITY_ALREADY_VERIFIED" });
         }
@@ -199,10 +194,10 @@ class IdentityService {
         if (nin === bvn) throw badRequest("Your NIN and BVN are different numbers. Check your NIN.", "INVALID_NIN");
         const selfie = this.validateImages(images);
 
-        const existing = await Verification.findOne({ user: userId, kind: "bvn", status: "pending" });
+        const existing = await verificationRepository.findPendingBvn(userId);
         if (existing) {
             await this.checkPending(existing);
-            if (await Verification.exists({ _id: existing._id, status: "pending" })) {
+            if (await verificationRepository.isPending(existing.id)) {
                 throw errorResponseMessage.createError(409, "We're still checking your last submission. This usually takes a minute or two.", ErrorSeverity.LOW, { code: "IDENTITY_PENDING" });
             }
         }
@@ -218,23 +213,23 @@ class IdentityService {
         }
 
         const idHash = this.hashBvn(bvn);
-        if (await User.exists({ _id: { $ne: user._id }, "identity.bvnHash": idHash })) {
+        if (await userRepository.identityHashInUse("bvnHash", idHash, userId)) {
             throw errorResponseMessage.createError(409, "This BVN is already linked to another SolutionPay account. Contact support if you think this is a mistake.", ErrorSeverity.LOW, { code: "BVN_IN_USE" });
         }
 
         const ninHash = this.hashNin(nin);
-        if (await User.exists({ _id: { $ne: user._id }, "identity.ninHash": ninHash })) {
+        if (await userRepository.identityHashInUse("ninHash", ninHash, userId)) {
             throw errorResponseMessage.createError(409, "This NIN is already linked to another SolutionPay account. Contact support if you think this is a mistake.", ErrorSeverity.LOW, { code: "NIN_IN_USE" });
         }
 
         let verification;
         try {
-            verification = await Verification.create({
-                user: user._id, kind: "bvn", status: "pending", idHash, idLast4: bvn.slice(-4),
+            verification = await verificationRepository.create({
+                user: userId, kind: "bvn", status: "pending", idHash, idLast4: bvn.slice(-4),
                 bvnEnc: encryptIdentity(bvn), ninEnc: encryptIdentity(nin), ninHash, ninLast4: nin.slice(-4),
             });
         } catch (error: any) {
-            if (error?.code === 11000) {
+            if (isUniqueViolation(error, "verifications_pending_bvn_key")) {
                 throw errorResponseMessage.createError(409, "We're still checking your last submission. This usually takes a minute or two.", ErrorSeverity.LOW, { code: "IDENTITY_PENDING" });
             }
             throw error;
@@ -247,19 +242,23 @@ class IdentityService {
                 bvn,
                 selfie
             );
-            await Verification.updateOne({ _id: verification._id }, { $set: { smileJobId } });
+            await verificationRepository.update(verification.id, { smileJobId });
         } catch (error: any) {
             // Our partner didn't take the job: not the user's fault, so it doesn't use an attempt
-            await Verification.updateOne(
-                { _id: verification._id },
-                { $set: { status: "failed", reason: "Submission to our verification partner failed", excludedFromAttempts: true, completedAt: new Date() }, $unset: ENCRYPTED_IDS }
-            );
+            await verificationRepository.update(verification.id, {
+                status: "failed",
+                reason: "Submission to our verification partner failed",
+                excludedFromAttempts: true,
+                completedAt: new Date(),
+                ...ENCRYPTED_IDS_CLEARED,
+            });
             throw errorResponseMessage.createError(500, "We couldn't start your verification. Please try again in a few minutes.", ErrorSeverity.MEDIUM);
         }
 
-        await User.updateOne(
-            { _id: user._id, "identity.status": { $ne: IDENTITY_STATUS.VERIFIED } },
-            { $set: { "identity.status": IDENTITY_STATUS.PENDING }, $unset: { "identity.failureReason": "" } }
+        await userRepository.updateIdentity(
+            userId,
+            { status: IDENTITY_STATUS.PENDING, failureReason: null },
+            { statusIsNot: IDENTITY_STATUS.VERIFIED }
         );
         await this.auditLog.logAction(undefined, userId, "IDENTITY_BVN_SUBMITTED", undefined, { verificationId: verification.id, bvnLast4: bvn.slice(-4) });
         return this.getStatus(userId);
@@ -285,7 +284,7 @@ class IdentityService {
         const lastPolled = verification.lastPolledAt ? Date.now() - new Date(verification.lastPolledAt).getTime() : Infinity;
 
         if (age >= BVN_POLL_AFTER_MS && lastPolled >= BVN_POLL_INTERVAL_MS) {
-            await Verification.updateOne({ _id: verification._id }, { $set: { lastPolledAt: new Date() } });
+            await verificationRepository.update(verification.id, { lastPolledAt: new Date() });
             const status = await this.smileId.getJobStatus(this.smileRef(verification));
             if (status?.job_complete && status.result && typeof status.result === "object") {
                 await this.handleSmileResult(status.result, "poll");
@@ -294,14 +293,18 @@ class IdentityService {
         }
 
         if (age >= BVN_PENDING_TIMEOUT_MS) {
-            const expired = await Verification.updateOne(
-                { _id: verification._id, status: "pending" },
-                { $set: { status: "failed", reason: "No verification result in time", excludedFromAttempts: true, completedAt: new Date() }, $unset: ENCRYPTED_IDS }
-            );
-            if (expired.modifiedCount) {
-                await User.updateOne(
-                    { _id: verification.user, "identity.status": IDENTITY_STATUS.PENDING },
-                    { $set: { "identity.status": IDENTITY_STATUS.FAILED, "identity.failureReason": "We didn't get a result in time. Please try again." } }
+            const expired = await verificationRepository.updateIfPending(verification.id, {
+                status: "failed",
+                reason: "No verification result in time",
+                excludedFromAttempts: true,
+                completedAt: new Date(),
+                ...ENCRYPTED_IDS_CLEARED,
+            });
+            if (expired) {
+                await userRepository.updateIdentity(
+                    verification.user,
+                    { status: IDENTITY_STATUS.FAILED, failureReason: "We didn't get a result in time. Please try again." },
+                    { statusIs: IDENTITY_STATUS.PENDING }
                 );
             }
         }
@@ -359,9 +362,9 @@ class IdentityService {
      */
     async handleSmileResult(result: any, source: "webhook" | "poll"): Promise<{ handled: boolean; outcome?: "passed" | "failed" | "waiting"; reason?: string }> {
         const jobId = result?.PartnerParams?.job_id;
-        if (typeof jobId !== "string" || !mongoose.isValidObjectId(jobId)) return { handled: false, reason: "Unknown job" };
+        if (typeof jobId !== "string" || !isUuid(jobId)) return { handled: false, reason: "Unknown job" };
 
-        const verification = await Verification.findById(jobId).select("+idHash +bvnEnc +ninEnc +ninHash");
+        const verification = await verificationRepository.findById(jobId, { withSecrets: true });
         if (!verification || verification.kind !== "bvn") return { handled: false, reason: "Unknown job" };
         if (result?.PartnerParams?.user_id !== this.smileRef(verification).userId) return { handled: false, reason: "Job doesn't match user" };
         if (verification.status !== "pending") return { handled: true, reason: "Already decided" };
@@ -376,11 +379,11 @@ class IdentityService {
 
         const isFinal = result?.IsFinalResult === true || result?.IsFinalResult === "true";
         if (!isFinal) {
-            await Verification.updateOne({ _id: verification._id, status: "pending" }, { $set: details });
+            await verificationRepository.updateIfPending(verification.id, details);
             return { handled: true, outcome: "waiting" };
         }
 
-        const user = await User.findById(verification.user).select("firstName lastName email tier identity");
+        const user = await userRepository.findById(verification.user);
         if (!user) return { handled: false, reason: "User not found" };
 
         let outcome = this.evaluate(result, user);
@@ -388,75 +391,53 @@ class IdentityService {
             const info = personalInfoFrom(result);
             this.logRecordFields("bvn", info);
             try {
-                await User.updateOne(
-                    { _id: user._id },
-                    {
-                        $set: {
-                            "identity.status": IDENTITY_STATUS.VERIFIED,
-                            "identity.bvnHash": verification.idHash,
-                            "identity.bvnLast4": verification.idLast4,
-                            "identity.verifiedName": outcome.nameOnId,
-                            "identity.verifiedAt": new Date(),
-                            "identity.method": SMILE_METHOD,
-                            ...this.detailsUpdate({
-                                bvnEnc: verification.bvnEnc,
-                                ninEnc: verification.ninEnc,
-                                ninHash: verification.ninHash,
-                                ninLast4: verification.ninLast4,
-                                info,
-                            }),
-                        },
-                        $unset: { "identity.failureReason": "" },
-                    }
-                );
+                await userRepository.updateIdentity(user.id, {
+                    status: IDENTITY_STATUS.VERIFIED,
+                    bvnHash: verification.idHash,
+                    bvnLast4: verification.idLast4,
+                    verifiedName: outcome.nameOnId,
+                    verifiedAt: new Date(),
+                    method: SMILE_METHOD,
+                    ...this.detailsUpdate({
+                        bvnEnc: verification.bvnEnc,
+                        ninEnc: verification.ninEnc,
+                        ninHash: verification.ninHash,
+                        ninLast4: verification.ninLast4,
+                        info,
+                    }),
+                    failureReason: null,
+                });
             } catch (error: any) {
-                if (error?.code !== 11000) throw error;
+                if (!isUniqueViolation(error)) throw error;
                 outcome = { passed: false, reason: "This BVN or NIN is already linked to another SolutionPay account. Contact support if you think this is a mistake." };
             }
         }
 
-        const claimed = await Verification.updateOne(
-            { _id: verification._id, status: "pending" },
-            {
-                $set: {
-                    ...details,
-                    status: outcome.passed ? "passed" : "failed",
-                    ...(outcome.passed ? {} : { reason: outcome.reason }),
-                    nameOnId: outcome.nameOnId,
-                    resultSource: source,
-                    completedAt: new Date(),
-                },
-                // The numbers now live (encrypted) on the user, or aren't needed
-                $unset: ENCRYPTED_IDS,
-            }
-        );
+        const claimed = await verificationRepository.updateIfPending(verification.id, {
+            ...details,
+            status: outcome.passed ? "passed" : "failed",
+            ...(outcome.passed ? {} : { reason: outcome.reason }),
+            nameOnId: outcome.nameOnId,
+            resultSource: source,
+            completedAt: new Date(),
+            // The numbers now live (encrypted) on the user, or aren't needed
+            ...ENCRYPTED_IDS_CLEARED,
+        });
         // The webhook and a status lookup can race: only the first one finishes the job
-        if (!claimed.modifiedCount) return { handled: true, reason: "Already decided" };
+        if (!claimed) return { handled: true, reason: "Already decided" };
 
         if (outcome.passed) {
-            const promoted = await User.updateOne(
-                { _id: user._id, tier: { $lt: USER_TIER.INDIVIDUAL } },
-                {
-                    $set: { tier: USER_TIER.INDIVIDUAL },
-                    $push: { tierHistory: { tier: USER_TIER.INDIVIDUAL, reason: "BVN verified", at: new Date() } },
-                }
-            );
-            // Older accounts may have no tier field at all
-            if (!promoted.modifiedCount) {
-                await User.updateOne(
-                    { _id: user._id, tier: { $exists: false } },
-                    { $set: { tier: USER_TIER.INDIVIDUAL }, $push: { tierHistory: { tier: USER_TIER.INDIVIDUAL, reason: "BVN verified", at: new Date() } } }
-                );
-            }
+            await userRepository.setTier(user.id, USER_TIER.INDIVIDUAL, { reason: "BVN verified" }, { onlyIfBelow: true });
         } else {
-            await User.updateOne(
-                { _id: user._id, "identity.status": { $ne: IDENTITY_STATUS.VERIFIED } },
-                { $set: { "identity.status": IDENTITY_STATUS.FAILED, "identity.failureReason": outcome.reason } }
+            await userRepository.updateIdentity(
+                user.id,
+                { status: IDENTITY_STATUS.FAILED, failureReason: outcome.reason },
+                { statusIsNot: IDENTITY_STATUS.VERIFIED }
             );
         }
 
         logger.info("BVN verification decided", { verificationId: verification.id, outcome: outcome.passed ? "passed" : "failed", resultCode, source });
-        await this.auditLog.logAction(undefined, String(user._id), outcome.passed ? "IDENTITY_BVN_VERIFIED" : "IDENTITY_BVN_FAILED", undefined, {
+        await this.auditLog.logAction(undefined, user.id, outcome.passed ? "IDENTITY_BVN_VERIFIED" : "IDENTITY_BVN_FAILED", undefined, {
             verificationId: verification.id,
             resultCode,
             ...(outcome.passed ? {} : { reason: outcome.reason }),
@@ -465,21 +446,21 @@ class IdentityService {
         return { handled: true, outcome: outcome.passed ? "passed" : "failed", ...(outcome.passed ? {} : { reason: outcome.reason }) };
     }
 
-    /** $set fields for the details YellowCard needs; only what's known is written */
+    /** Identity fields for the details YellowCard needs; only what's known is written */
     private detailsUpdate(input: { bvnEnc?: string; ninEnc?: string; ninHash?: string; ninLast4?: string; info?: SmilePersonalInfo; dob?: string; address?: string }) {
-        const set: Record<string, unknown> = {};
-        if (input.bvnEnc) set["identity.bvnEnc"] = input.bvnEnc;
+        const set: Partial<UserIdentity> = {};
+        if (input.bvnEnc) set.bvnEnc = input.bvnEnc;
         if (input.ninEnc) {
-            set["identity.ninEnc"] = input.ninEnc;
-            set["identity.ninHash"] = input.ninHash;
-            set["identity.ninLast4"] = input.ninLast4;
+            set.ninEnc = input.ninEnc;
+            set.ninHash = input.ninHash;
+            set.ninLast4 = input.ninLast4;
         }
         const dob = input.info?.dob || input.dob;
         const address = input.info?.address || input.address;
-        if (dob) set["identity.dob"] = dob;
-        if (address) set["identity.address"] = address.slice(0, 300);
-        if (toNigerianIntl(input.info?.phone)) set["identity.idPhone"] = toNigerianIntl(input.info?.phone);
-        if (Object.keys(set).length) set["identity.detailsUpdatedAt"] = new Date();
+        if (dob) set.dob = dob;
+        if (address) set.address = address.slice(0, 300);
+        if (toNigerianIntl(input.info?.phone)) set.idPhone = toNigerianIntl(input.info?.phone);
+        if (Object.keys(set).length) set.detailsUpdatedAt = new Date();
         return set;
     }
 
@@ -497,9 +478,9 @@ class IdentityService {
     }
 
     async transferDetails(userId: string): Promise<TransferDetailsView> {
-        const user = await User.findById(userId).select("+identity.bvnEnc +identity.ninEnc").lean();
+        const user = await userRepository.findById(userId, { withSecrets: true });
         if (!user) throw errorResponseMessage.resourceNotFound("User");
-        return this.detailsView(user as IUser);
+        return this.detailsView(user);
     }
 
     /**
@@ -509,14 +490,14 @@ class IdentityService {
      * again (no selfie) to fill in date of birth, phone and address.
      */
     async submitTransferDetails(user: IUser, body: { bvn?: unknown; nin?: unknown; dob?: unknown; address?: unknown; phone?: unknown }): Promise<TransferDetailsView> {
-        const userId = String(user._id);
-        const current = await User.findById(userId).select("+identity.bvnHash +identity.bvnEnc +identity.ninEnc").lean();
+        const userId = user.id;
+        const current = await userRepository.findById(userId, { withSecrets: true });
         if (!current) throw errorResponseMessage.resourceNotFound("User");
         if (current.identity?.status !== IDENTITY_STATUS.VERIFIED) {
             throw errorResponseMessage.createError(403, "Verify your identity first. It takes about 2 minutes.", ErrorSeverity.LOW, { code: IDENTITY_REQUIRED_CODE });
         }
         const identity = current.identity;
-        const set: Record<string, unknown> = {};
+        const set: Partial<UserIdentity> = {};
         let info: SmilePersonalInfo = {};
 
         // BVN: only if we don't hold it yet
@@ -527,19 +508,19 @@ class IdentityService {
             if (identity.bvnHash && identity.bvnHash !== bvnHash) {
                 throw badRequest(`That isn't the BVN you verified with (ending ${identity.bvnLast4}). Check the number and try again.`, "BVN_MISMATCH");
             }
-            if (!identity.bvnHash && await User.exists({ _id: { $ne: current._id }, "identity.bvnHash": bvnHash })) {
+            if (!identity.bvnHash && await userRepository.identityHashInUse("bvnHash", bvnHash, current.id)) {
                 throw errorResponseMessage.createError(409, "This BVN is already linked to another SolutionPay account. Contact support if you think this is a mistake.", ErrorSeverity.LOW, { code: "BVN_IN_USE" });
             }
-            const lookup = await this.lookup(current as IUser, "BVN", bvn);
+            const lookup = await this.lookup(current, "BVN", bvn);
             if (!lookup.verified) throw badRequest("We couldn't find that BVN. Check the number and try again.", "INVALID_BVN");
             // Accounts verified before BVN checks prove the BVN is theirs by name
-            if (!identity.bvnHash) this.assertNameMatches(current as IUser, lookup.info, "BVN");
+            if (!identity.bvnHash) this.assertNameMatches(current, lookup.info, "BVN");
             info = lookup.info;
             this.logRecordFields("bvn", info);
             Object.assign(set, this.detailsUpdate({ bvnEnc: encryptIdentity(bvn), info }));
             if (!identity.bvnHash) {
-                set["identity.bvnHash"] = bvnHash;
-                set["identity.bvnLast4"] = bvn.slice(-4);
+                set.bvnHash = bvnHash;
+                set.bvnLast4 = bvn.slice(-4);
             }
         }
 
@@ -549,13 +530,13 @@ class IdentityService {
             if (!isNin(nin)) throw badRequest("Enter your 11-digit NIN", "INVALID_NIN");
             if (typeof body.bvn === "string" && nin === body.bvn) throw badRequest("Your NIN and BVN are different numbers. Check your NIN.", "INVALID_NIN");
             const ninHash = this.hashNin(nin);
-            if (await User.exists({ _id: { $ne: current._id }, "identity.ninHash": ninHash })) {
+            if (await userRepository.identityHashInUse("ninHash", ninHash, current.id)) {
                 throw errorResponseMessage.createError(409, "This NIN is already linked to another SolutionPay account. Contact support if you think this is a mistake.", ErrorSeverity.LOW, { code: "NIN_IN_USE" });
             }
             if (config.SMILE_ID_VERIFY_NIN) {
-                const lookup = await this.lookup(current as IUser, "NIN_V2", nin);
+                const lookup = await this.lookup(current, "NIN_V2", nin);
                 if (!lookup.verified) throw badRequest("We couldn't find that NIN. Check the number and try again.", "INVALID_NIN");
-                this.assertNameMatches(current as IUser, lookup.info, "NIN");
+                this.assertNameMatches(current, lookup.info, "NIN");
                 this.logRecordFields("nin", lookup.info);
                 info = { ...lookup.info, ...info };
             }
@@ -564,36 +545,36 @@ class IdentityService {
 
         // Date of birth and address: from the ID record, else what the user typed
         let typedProblem: ReturnType<typeof badRequest> | undefined;
-        if (!((set["identity.dob"] as string) || identity.dob)) {
+        if (!(set.dob || identity.dob)) {
             const typed = typeof body.dob === "string" ? body.dob.trim() : "";
             if (!/^\d{4}-\d{2}-\d{2}$/.test(typed) || isNaN(Date.parse(typed))) typedProblem = badRequest("Enter your date of birth", "INVALID_DOB");
             else if (yearsSince(typed) < 18) typedProblem = badRequest("You must be at least 18 to send money abroad", "INVALID_DOB");
             else if (yearsSince(typed) > 120) typedProblem = badRequest("Check your date of birth", "INVALID_DOB");
-            else set["identity.dob"] = typed;
+            else set.dob = typed;
         }
-        if (!((set["identity.address"] as string) || identity.address)) {
+        if (!(set.address || identity.address)) {
             const typed = typeof body.address === "string" ? body.address.trim().replace(/\s+/g, " ") : "";
             if (typed.length < 10) typedProblem ??= badRequest("Enter your home address, including the street, town and state", "INVALID_ADDRESS");
-            else set["identity.address"] = typed.slice(0, 300);
+            else set.address = typed.slice(0, 300);
         }
         // Phone: YellowCard takes only a Nigerian number, so a foreign profile phone needs one here
-        if (!toNigerianIntl((set["identity.idPhone"] as string) || identity.idPhone) && !toNigerianIntl(current.phoneNumber)) {
+        if (!toNigerianIntl(set.idPhone || identity.idPhone) && !toNigerianIntl(current.phoneNumber)) {
             const typed = toNigerianIntl(typeof body.phone === "string" ? body.phone : "");
             if (!typed) typedProblem ??= badRequest("Enter your Nigerian phone number", "INVALID_PHONE");
-            else set["identity.idPhone"] = typed;
+            else set.idPhone = typed;
         }
 
         // Save what we have (e.g. a paid lookup's result) even if something typed needs fixing
         if (Object.keys(set).length) {
-            set["identity.detailsUpdatedAt"] = new Date();
+            set.detailsUpdatedAt = new Date();
             try {
-                await User.updateOne({ _id: current._id }, { $set: set });
+                await userRepository.updateIdentity(current.id, set);
             } catch (error: any) {
-                if (error?.code !== 11000) throw error;
+                if (!isUniqueViolation(error)) throw error;
                 throw errorResponseMessage.createError(409, "This BVN or NIN is already linked to another SolutionPay account. Contact support if you think this is a mistake.", ErrorSeverity.LOW, { code: "ID_IN_USE" });
             }
             await this.auditLog.logAction(undefined, userId, "IDENTITY_TRANSFER_DETAILS_UPDATED", undefined, {
-                fields: Object.keys(set).filter((key) => !/Enc$|Hash$|detailsUpdatedAt/.test(key)).map((key) => key.replace("identity.", "")),
+                fields: Object.keys(set).filter((key) => !/Enc$|Hash$|detailsUpdatedAt/.test(key)),
             });
         }
         if (typedProblem) throw typedProblem;
@@ -602,24 +583,27 @@ class IdentityService {
 
     /** A paid Smile ID lookup, limited per user per day, and recorded for support */
     private async lookup(user: IUser, idType: "BVN" | "NIN_V2", idNumber: string) {
-        const recent = await Verification.countDocuments({ user: user._id, kind: "details", createdAt: { $gte: new Date(Date.now() - BVN_ATTEMPT_WINDOW_MS) } });
+        const recent = await verificationRepository.countSince(user.id, "details", new Date(Date.now() - BVN_ATTEMPT_WINDOW_MS));
         if (recent >= DETAILS_MAX_LOOKUPS) {
             throw errorResponseMessage.createError(429, "You've tried too many times today. Please try again tomorrow, or contact support for help.", ErrorSeverity.LOW, { code: "DETAILS_ATTEMPTS_EXCEEDED" });
         }
-        const check = await Verification.create({ user: user._id, kind: "details", status: "pending", idLast4: idNumber.slice(-4), reason: `${idType} lookup` });
+        const check = await verificationRepository.create({ user: user.id, kind: "details", status: "pending", idLast4: idNumber.slice(-4), reason: `${idType} lookup` });
         try {
             const result = await this.smileId.lookupId(
-                { userId: `${String(user._id)}-${check.id}`, jobId: String(check.id) },
+                { userId: `${user.id}-${check.id}`, jobId: check.id },
                 { firstName: user.firstName, lastName: user.lastName },
                 idType,
                 idNumber
             );
-            await Verification.updateOne({ _id: check._id }, {
-                $set: { status: result.verified ? "passed" : "failed", resultCode: result.resultCode, resultText: result.resultText, completedAt: new Date() },
+            await verificationRepository.update(check.id, {
+                status: result.verified ? "passed" : "failed",
+                resultCode: result.resultCode,
+                resultText: result.resultText,
+                completedAt: new Date(),
             });
             return result;
         } catch (error) {
-            await Verification.updateOne({ _id: check._id }, { $set: { status: "failed", reason: `${idType} lookup unavailable`, completedAt: new Date() } });
+            await verificationRepository.update(check.id, { status: "failed", reason: `${idType} lookup unavailable`, completedAt: new Date() });
             throw errorResponseMessage.createError(500, "We couldn't start your verification. Please try again in a few minutes.", ErrorSeverity.MEDIUM);
         }
     }
@@ -653,9 +637,9 @@ class IdentityService {
      * YellowCard's sandbox, which gets placeholders.
      */
     async yellowCardPerson(userId: string): Promise<YellowCardPerson> {
-        const user = await User.findById(userId).select("+identity.bvnEnc +identity.ninEnc").lean();
+        const user = await userRepository.findById(userId, { withSecrets: true });
         if (!user) throw errorResponseMessage.resourceNotFound("User");
-        const view = this.detailsView(user as IUser);
+        const view = this.detailsView(user);
         const identity = user.identity;
         const name = `${user.firstName || ""} ${user.lastName || ""}`.trim() || identity?.verifiedName || "Customer";
         const phone = toNigerianIntl(identity?.idPhone) || toNigerianIntl(user.phoneNumber);
@@ -707,7 +691,7 @@ class IdentityService {
                     buttonText: "Try again",
                 });
         } catch (error: any) {
-            logger.error("Failed to send BVN verification email", { userId: String(user._id), error: error?.message });
+            logger.error("Failed to send BVN verification email", { userId: user.id, error: error?.message });
         }
     }
 
@@ -715,18 +699,30 @@ class IdentityService {
     async adminSummary(userId: string) {
         const [status, recent] = await Promise.all([
             this.getStatus(userId),
-            Verification.find({ user: userId }).sort({ createdAt: -1 }).limit(10)
-                .select("kind status reason idLast4 smileJobId resultCode resultText nameOnId resultSource excludedFromAttempts createdAt completedAt")
-                .lean(),
+            verificationRepository.listForUser(userId, 10),
         ]);
-        const user = await User.findById(userId).select("identity").lean();
+        const user = await userRepository.findById(userId);
         return {
             ...status,
             // transferDetails (in status) says what's on file, never the numbers
             verifiedName: user?.identity?.verifiedName,
             verifiedAt: user?.identity?.verifiedAt,
             method: user?.identity?.method,
-            checks: recent.map((check) => ({ id: String(check._id), ...check, _id: undefined })),
+            checks: recent.map((check) => ({
+                id: check.id,
+                kind: check.kind,
+                status: check.status,
+                reason: check.reason,
+                idLast4: check.idLast4,
+                smileJobId: check.smileJobId,
+                resultCode: check.resultCode,
+                resultText: check.resultText,
+                nameOnId: check.nameOnId,
+                resultSource: check.resultSource,
+                excludedFromAttempts: check.excludedFromAttempts,
+                createdAt: check.createdAt,
+                completedAt: check.completedAt,
+            })),
         };
     }
 
@@ -737,28 +733,24 @@ class IdentityService {
      * error, or for testing the full flow again.
      */
     async adminResetVerification(admin: IUser, userId: string, reason: string) {
-        const before = await User.findById(userId).select("tier identity").lean();
+        const before = await userRepository.findById(userId);
         if (!before) throw errorResponseMessage.resourceNotFound("User");
-        await User.updateOne(
-            { _id: userId },
-            {
-                $set: { tier: USER_TIER.UNVERIFIED, identity: { status: IDENTITY_STATUS.UNVERIFIED } },
-                $push: { tierHistory: { tier: USER_TIER.UNVERIFIED, reason: `Verification reset by admin: ${reason}`, by: admin._id, at: new Date() } },
-            }
-        );
+        await userRepository.resetIdentity(userId);
+        await userRepository.setTier(userId, USER_TIER.UNVERIFIED, { reason: `Verification reset by admin: ${reason}`, by: admin.id });
         // Any check still running is abandoned, and nothing counts against the next attempts
-        await Verification.updateMany(
-            { user: userId, status: "pending" },
-            { $set: { status: "failed", reason: "Verification reset by admin", completedAt: new Date() }, $unset: ENCRYPTED_IDS }
+        await verificationRepository.updateManyForUser(
+            userId,
+            { status: "pending" },
+            { status: "failed", reason: "Verification reset by admin", completedAt: new Date(), ...ENCRYPTED_IDS_CLEARED }
         );
-        await Verification.updateMany({ user: userId, kind: "bvn", status: "failed" }, { $set: { excludedFromAttempts: true } });
+        await verificationRepository.updateManyForUser(userId, { kind: "bvn", status: "failed" }, { excludedFromAttempts: true });
         await this.auditLog.logAction(
             undefined, userId, "IDENTITY_VERIFICATION_RESET",
             { tier: before.tier, status: before.identity?.status, bvnLast4: before.identity?.bvnLast4, ninLast4: before.identity?.ninLast4 },
             { tier: USER_TIER.UNVERIFIED, status: IDENTITY_STATUS.UNVERIFIED },
-            undefined, undefined, { by: String(admin._id), reason }
+            undefined, undefined, { by: admin.id, reason }
         );
-        logger.info("Identity verification reset by admin", { userId, by: String(admin._id), fromTier: before.tier });
+        logger.info("Identity verification reset by admin", { userId, by: admin.id, fromTier: before.tier });
         return this.adminSummary(userId);
     }
 
@@ -766,18 +758,15 @@ class IdentityService {
     async adminResetAttempts(admin: IUser, userId: string, reason: string) {
         const failures = await this.countedFailures(userId);
         if (failures.length) {
-            await Verification.updateMany({ _id: { $in: failures.map((failure) => failure._id) } }, { $set: { excludedFromAttempts: true } });
+            await verificationRepository.updateMany(failures.map((failure) => failure.id), { excludedFromAttempts: true });
         }
         await this.auditLog.logAction(undefined, userId, "IDENTITY_ATTEMPTS_RESET", { counted: failures.length }, { counted: 0 }, undefined, undefined, {
-            by: String(admin._id),
+            by: admin.id,
             reason,
         });
         return this.adminSummary(userId);
     }
 }
-
-/** Encrypted numbers on a verification, removed once the check is decided */
-const ENCRYPTED_IDS = { bvnEnc: "", ninEnc: "", ninHash: "" };
 
 const escapeHtml = (value: string) =>
     value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");

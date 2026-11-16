@@ -1,8 +1,8 @@
 import z from "zod";
-import { FilterQuery } from "mongoose";
-import { IKycApplication, IKycDocument, IUser } from "../models/interface";
-import KycApplication from "../models/kyc-application.model";
-import DBService from "../utils/db.utils";
+import kycApplicationRepository, { type KycAdminFilter } from "../repositories/kyc-application.repository";
+import userRepository from "../repositories/user.repository";
+import transactionRepository from "../repositories/transaction.repository";
+import type { KycApplication as IKycApplication, KycDocument as IKycDocument, User as IUser } from "../types/entities";
 import errorResponseMessage, { ErrorResponseCode, ErrorSeverity } from "../common/messages/error-response-message";
 import {
     KYC_ADMIN_TRANSITIONS,
@@ -25,10 +25,8 @@ import { getStepSchema } from "../validators/z-kyc";
 import { FileUploadFactory } from "./file-upload.factory";
 import { FileUploadService } from "./file-upload.service";
 import NotificationService from "../utils/notification.utils";
-import UserService from "./user.service";
 import config from "../config/env.config";
 import logger from "../utils/logger.utils";
-import Transaction from "../models/transaction.model";
 import { TRANSACTION_STATUS } from "../common/constant";
 import { TIER_NAME, USER_TIER, UserTier, isUserTier } from "../common/tier.constants";
 import { IDENTITY_REQUIRED_CODE } from "../common/identity.constants";
@@ -44,8 +42,6 @@ const escapeHtml = (value: unknown): string =>
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;");
-
-const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const validationError = (error: z.ZodError) => {
     const fieldErrors: Record<string, string> = {};
@@ -82,16 +78,13 @@ const assertBvnVerified = (tier: UserTier) => {
 
 const formatUsd = (value: number) => `$${value.toLocaleString("en-US")}`;
 
-class KycApplicationService extends DBService<IKycApplication> {
+class KycApplicationService {
     private uploadService: FileUploadService;
     private notificationService: NotificationService;
-    private userService: UserService;
 
-    constructor(populatedFields: string[] = []) {
-        super(KycApplication, populatedFields);
+    constructor() {
         this.uploadService = FileUploadFactory.createCustomUploadService(KYC_DOCUMENT_UPLOAD);
         this.notificationService = new NotificationService();
-        this.userService = new UserService();
     }
 
     /**
@@ -160,8 +153,20 @@ class KycApplicationService extends DBService<IKycApplication> {
         }
     }
 
+    /** Update an application; 404 if it has gone */
+    private async write(...args: Parameters<typeof kycApplicationRepository.update>): Promise<IKycApplication> {
+        const updated = await kycApplicationRepository.update(...args);
+        if (!updated) throw errorResponseMessage.resourceNotFound("KYC application");
+        return updated;
+    }
+
+    /** The user's application, if they've started one */
+    public async findForUser(userId: string): Promise<IKycApplication | undefined> {
+        return kycApplicationRepository.findByUser(userId);
+    }
+
     private async getOwnApplication(userId: string) {
-        const application = await this.findOne({ user: userId });
+        const application = await kycApplicationRepository.findByUser(userId);
         if (!application) throw errorResponseMessage.resourceNotFound("KYC application");
         return application;
     }
@@ -171,7 +176,7 @@ class KycApplicationService extends DBService<IKycApplication> {
      * definitions it needs and fresh signed URLs for every uploaded document.
      */
     public async toClient(application: IKycApplication) {
-        const plain: any = (application as any).toJSON ? (application as any).toJSON() : application;
+        const plain: any = application;
         const steps = stepsOf(application);
 
         const documents = await Promise.all((plain.documents || []).map(async (document: IKycDocument) => {
@@ -212,7 +217,7 @@ class KycApplicationService extends DBService<IKycApplication> {
 
         const currentTier = userTier(user);
         assertBvnVerified(currentTier);
-        const existing = await this.findOne({ user: user._id });
+        const existing = await kycApplicationRepository.findByUser(user.id);
 
         if (existing && existing.status !== KYC_STATUS.APPROVED && existing.type === type && applicationTier(existing) === tier) {
             return existing;
@@ -225,27 +230,28 @@ class KycApplicationService extends DBService<IKycApplication> {
         }
 
         if (!existing) {
-            return this.create({ user: user._id, type, tier, status: KYC_STATUS.DRAFT, ...this.prefillFromProfile(user, type) });
+            return kycApplicationRepository.create({ user: user.id, type, tier, status: KYC_STATUS.DRAFT, ...this.prefillFromProfile(user, type) });
         }
 
         if (existing.status === KYC_STATUS.APPROVED) {
-            const history = { status: KYC_STATUS.DRAFT, note: `Upgrade to Tier ${tier} (${TIER_NAME[tier]}) started`, by: user._id, at: new Date() };
+            const history = { status: KYC_STATUS.DRAFT, note: `Upgrade to Tier ${tier} (${TIER_NAME[tier]}) started`, by: user.id, at: new Date() };
 
             if (existing.type === type) {
                 // Keep the approved details; new steps and documents still need completing
                 const steps = getKycSteps(type, tier);
-                return this.updateById(existing.id, {
-                    $set: {
+                return this.write(
+                    existing.id,
+                    {
                         tier,
                         status: KYC_STATUS.DRAFT,
                         completedSteps: existing.completedSteps.filter((step) => steps.includes(step) && step !== KYC_STEP.DOCUMENTS),
+                        rejectionReason: null,
                     },
-                    $unset: { rejectionReason: 1 },
-                    $push: { history },
-                });
+                    { history }
+                );
             }
 
-            const plain: any = existing.toObject();
+            const plain: any = existing;
             const snapshot = {
                 type: plain.type,
                 tier: applicationTier(existing),
@@ -261,11 +267,22 @@ class KycApplicationService extends DBService<IKycApplication> {
                 reviewedBy: plain.reviewedBy,
                 archivedAt: new Date(),
             };
-            return this.updateById(existing.id, {
-                $set: { ...this.emptyApplicationData(), ...this.prefillFromProfile(user, type), type, tier, status: KYC_STATUS.DRAFT },
-                $unset: { displayName: 1, rejectionReason: 1, submittedAt: 1, reviewedAt: 1, reviewedBy: 1 },
-                $push: { archive: snapshot, history },
-            });
+            return this.write(
+                existing.id,
+                {
+                    ...this.emptyApplicationData(),
+                    ...this.prefillFromProfile(user, type),
+                    type,
+                    tier,
+                    status: KYC_STATUS.DRAFT,
+                    displayName: null,
+                    rejectionReason: null,
+                    submittedAt: null,
+                    reviewedAt: null,
+                    reviewedBy: null,
+                },
+                { archive: snapshot, history }
+            );
         }
 
         this.assertEditable(existing);
@@ -273,11 +290,9 @@ class KycApplicationService extends DBService<IKycApplication> {
         if (existing.type === type) {
             // Same details, different requirements: documents must be checked again
             const steps = getKycSteps(type, tier);
-            return this.updateById(existing.id, {
-                $set: {
-                    tier,
-                    completedSteps: existing.completedSteps.filter((step) => steps.includes(step) && step !== KYC_STEP.DOCUMENTS),
-                },
+            return this.write(existing.id, {
+                tier,
+                completedSteps: existing.completedSteps.filter((step) => steps.includes(step) && step !== KYC_STEP.DOCUMENTS),
             });
         }
 
@@ -289,9 +304,12 @@ class KycApplicationService extends DBService<IKycApplication> {
         for (const document of existing.documents) {
             await this.uploadService.deleteFile(document.key);
         }
-        return this.updateById(existing.id, {
-            $set: { ...this.emptyApplicationData(), ...this.prefillFromProfile(user, type), type, tier },
-            $unset: { displayName: 1 },
+        return this.write(existing.id, {
+            ...this.emptyApplicationData(),
+            ...this.prefillFromProfile(user, type),
+            type,
+            tier,
+            displayName: null,
         });
     }
 
@@ -325,13 +343,13 @@ class KycApplicationService extends DBService<IKycApplication> {
 
     private emptyApplicationData() {
         return {
-            completedSteps: [],
+            completedSteps: [] as KycStep[],
             general: {},
             personal: {},
             ubos: [],
             directors: [],
             questionnaire: {},
-            documents: [],
+            documents: [] as IKycDocument[],
         };
     }
 
@@ -387,7 +405,7 @@ class KycApplicationService extends DBService<IKycApplication> {
             }
         }
 
-        return this.updateById(application.id, { $set: update });
+        return this.write(application.id, update);
     }
 
     private partitionDocuments(documents: IKycDocument[], predicate: (document: IKycDocument) => boolean) {
@@ -438,8 +456,8 @@ class KycApplicationService extends DBService<IKycApplication> {
             uploadedAt: new Date(),
         };
 
-        const updated = await this.updateById(application.id, {
-            $set: { documents: [...application.documents.filter((d) => d.slot !== slot), document] },
+        const updated = await this.write(application.id, {
+            documents: [...application.documents.filter((d) => d.slot !== slot), document],
         });
 
         if (previous) await this.uploadService.deleteFile(previous.key);
@@ -455,8 +473,9 @@ class KycApplicationService extends DBService<IKycApplication> {
         if (!document) throw errorResponseMessage.resourceNotFound("Document");
 
         const completedSteps = application.completedSteps.filter((step) => step !== KYC_STEP.DOCUMENTS);
-        const updated = await this.updateById(application.id, {
-            $set: { documents: application.documents.filter((d) => d.slot !== slot), completedSteps },
+        const updated = await this.write(application.id, {
+            documents: application.documents.filter((d) => d.slot !== slot),
+            completedSteps,
         });
         await this.uploadService.deleteFile(document.key);
         return updated;
@@ -467,7 +486,7 @@ class KycApplicationService extends DBService<IKycApplication> {
      * and notifies admins and the applicant by email.
      */
     public async submit(user: IUser) {
-        const application = await this.getOwnApplication(String(user._id));
+        const application = await this.getOwnApplication(user.id);
         this.assertEditable(application);
 
         const currentTier = userTier(user);
@@ -500,15 +519,17 @@ class KycApplicationService extends DBService<IKycApplication> {
         }
 
         const wasResubmission = application.status === KYC_STATUS.REJECTED;
-        const updated = await this.updateById(application.id, {
-            $set: {
+        const updated = await this.write(
+            application.id,
+            {
                 status: KYC_STATUS.SUBMITTED,
                 submittedAt: new Date(),
                 completedSteps: stepsOf(application),
+                rejectionReason: null,
             },
-            $unset: { rejectionReason: 1 },
-            $push: { history: { status: KYC_STATUS.SUBMITTED, by: user._id, at: new Date() } },
-        });
+            { history: { status: KYC_STATUS.SUBMITTED, by: user.id, at: new Date() } }
+        );
+        if (!updated) throw errorResponseMessage.resourceNotFound("KYC application");
 
         await this.sendSubmissionEmails(user, updated, wasResubmission);
         return updated;
@@ -552,41 +573,39 @@ class KycApplicationService extends DBService<IKycApplication> {
      * Admin listing with status/type filters, search and per-status counts
      */
     public async adminList(params: { status?: string; type?: string; tier?: number; search?: string; page?: number; limit?: number }) {
-        const query: FilterQuery<IKycApplication> = {};
-        if (params.tier && isUserTier(params.tier)) query.tier = params.tier;
-        if (params.status && Object.values(KYC_STATUS).includes(params.status as KycStatus)) query.status = params.status;
-        if (params.type && (params.type === "individual" || params.type === "business")) query.type = params.type;
+        const filter: KycAdminFilter = {};
+        if (params.tier && isUserTier(params.tier)) filter.tier = params.tier;
+        if (params.status && Object.values(KYC_STATUS).includes(params.status as KycStatus)) filter.status = params.status as KycStatus;
+        if (params.type && (params.type === "individual" || params.type === "business")) filter.type = params.type;
 
         if (params.search?.trim()) {
-            const pattern = new RegExp(escapeRegex(params.search.trim()), "i");
-            const users = await this.userService.find(
-                { $or: [{ email: pattern }, { firstName: pattern }, { lastName: pattern }] },
-                { select: ["_id"], limit: 200 }
-            );
-            query.$or = [{ displayName: pattern }, { user: { $in: users.map((u) => u._id) } }];
+            const text = params.search.trim();
+            filter.search = { text, userIds: await userRepository.searchIds(text, 200) };
         }
 
-        const result = await this.paginate(query, {
-            page: params.page || 1,
-            limit: Math.min(params.limit || 20, 100),
-            sort: { updatedAt: -1 },
-            select: ["user", "type", "tier", "status", "displayName", "completedSteps", "submittedAt", "reviewedAt", "createdAt", "updatedAt"],
-            populate: ["user"],
-        });
+        const result = await kycApplicationRepository.paginate(filter, { page: params.page || 1, limit: Math.min(params.limit || 20, 100) });
 
-        const countsRaw = await this.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]);
+        const countsRaw = await kycApplicationRepository.countByStatus();
         const counts: Record<string, number> = Object.fromEntries(Object.values(KYC_STATUS).map((status) => [status, 0]));
-        for (const { _id, count } of countsRaw) counts[_id] = count;
+        for (const [status, count] of Object.entries(countsRaw)) counts[status] = count;
 
-        const data = result.data.map((application: any) => {
-            const plain = application.toJSON();
-            const user = plain.user;
-            const steps = stepsOf(plain);
+        const owners = new Map((await userRepository.findManyByIds(result.data.map((a) => a.user))).map((u) => [u.id, u]));
+        const data = result.data.map((application) => {
+            const user = owners.get(application.user);
+            const steps = stepsOf(application);
             return {
-                ...plain,
-                tier: applicationTier(plain),
+                id: application.id,
+                type: application.type,
+                tier: applicationTier(application),
+                status: application.status,
+                displayName: application.displayName,
+                completedSteps: application.completedSteps,
+                submittedAt: application.submittedAt,
+                reviewedAt: application.reviewedAt,
+                createdAt: application.createdAt,
+                updatedAt: application.updatedAt,
                 user: user ? { id: user.id, firstName: user.firstName, lastName: user.lastName, email: user.email, tier: userTier(user) } : null,
-                progress: Math.round((plain.completedSteps.filter((s: KycStep) => steps.includes(s)).length / steps.length) * 100),
+                progress: Math.round((application.completedSteps.filter((s: KycStep) => steps.includes(s)).length / steps.length) * 100),
             };
         });
 
@@ -594,16 +613,22 @@ class KycApplicationService extends DBService<IKycApplication> {
     }
 
     public async adminGet(id: string) {
-        const application = await this.findById(id, { populate: ["user", "history.by", "reviewedBy"] });
+        const application = await kycApplicationRepository.findById(id);
         if (!application) throw errorResponseMessage.resourceNotFound("KYC application");
         const client: any = await this.toClient(application);
 
-        const pickUser = (u: any) => u && typeof u === "object" && u.email
-            ? { id: u.id ?? String(u._id), firstName: u.firstName, lastName: u.lastName, email: u.email, phoneNumber: u.phoneNumber, whatsappNumber: u.whatsappNumber, countryOfResidence: u.countryOfResidence, tier: userTier(u) }
-            : u;
-        client.user = pickUser(client.user);
-        client.reviewedBy = pickUser(client.reviewedBy);
-        client.history = (client.history || []).map((event: any) => ({ ...event, by: pickUser(event.by) }));
+        // "Populate" the applicant, the reviewer and whoever acted in the history
+        const ids = [application.user, application.reviewedBy, ...(application.history || []).map((event) => event.by)].filter(Boolean) as string[];
+        const people = new Map((await userRepository.findManyByIds(ids)).map((u) => [u.id, u]));
+        const pickUser = (id?: string) => {
+            const u = id ? people.get(id) : undefined;
+            return u
+                ? { id: u.id, firstName: u.firstName, lastName: u.lastName, email: u.email, phoneNumber: u.phoneNumber, whatsappNumber: u.whatsappNumber, countryOfResidence: u.countryOfResidence, tier: userTier(u) }
+                : id;
+        };
+        client.user = pickUser(application.user);
+        client.reviewedBy = pickUser(application.reviewedBy);
+        client.history = (application.history || []).map((event) => ({ ...event, by: pickUser(event.by) }));
         return client;
     }
 
@@ -611,7 +636,7 @@ class KycApplicationService extends DBService<IKycApplication> {
      * Admin decision; approving raises the user to the application's tier
      */
     public async adminReview(admin: IUser, id: string, status: KycStatus, note?: string) {
-        const application = await this.findById(id, { populate: ["user"] });
+        const application = await kycApplicationRepository.findById(id);
         if (!application) throw errorResponseMessage.resourceNotFound("KYC application");
 
         const allowedFrom = KYC_ADMIN_TRANSITIONS[status] || [];
@@ -619,29 +644,36 @@ class KycApplicationService extends DBService<IKycApplication> {
             throw badRequest(`Cannot move an application from "${application.status}" to "${status}"`);
         }
 
-        const update: Record<string, any> = {
-            $set: { status, reviewedAt: new Date(), reviewedBy: admin._id },
-            $push: { history: { status, note, by: admin._id, at: new Date() } },
-        };
-        if (status === KYC_STATUS.REJECTED) update.$set.rejectionReason = note;
+        await this.write(
+            application.id,
+            {
+                status,
+                reviewedAt: new Date(),
+                reviewedBy: admin.id,
+                ...(status === KYC_STATUS.REJECTED ? { rejectionReason: note ?? null } : {}),
+            },
+            { history: { status, note, by: admin.id, at: new Date() } }
+        );
 
-        await this.updateById(application.id, update);
-
-        const applicant = application.user as IUser;
+        const applicant = await userRepository.findById(application.user);
+        if (!applicant) throw errorResponseMessage.resourceNotFound("User");
         if (status === KYC_STATUS.APPROVED) {
             const tier = applicationTier(application);
-            await this.userService.updateById(String(applicant._id), {
-                isKYCDone: true,
-                isKYCRejected: false,
-                ...(tier > userTier(applicant) ? {
+            if (tier > userTier(applicant)) {
+                await userRepository.setTier(
+                    applicant.id,
                     tier,
-                    $push: { tierHistory: { tier, reason: `${application.type === "business" ? "KYB" : "KYC"} application approved`, by: admin._id, at: new Date() } },
-                } : {}),
-            } as any);
+                    { reason: `${application.type === "business" ? "KYB" : "KYC"} application approved`, by: admin.id },
+                    { extra: { isKYCDone: true, isKYCRejected: false } }
+                );
+            } else {
+                await userRepository.update(applicant.id, { isKYCDone: true, isKYCRejected: false });
+            }
             // Release transactions that were waiting on verification (as a Smile ID pass does)
-            await Transaction.updateMany(
-                { user: applicant._id, status: TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION },
-                { $set: { status: TRANSACTION_STATUS.AWAITING_CONFIRMATION } },
+            await transactionRepository.moveStatusForUser(
+                applicant.id,
+                TRANSACTION_STATUS.AWAITING_KYC_VERIFICATION as "awaiting_kyc_verification",
+                TRANSACTION_STATUS.AWAITING_CONFIRMATION as "awaiting_confirmation"
             );
         }
 

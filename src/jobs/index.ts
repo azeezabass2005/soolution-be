@@ -1,6 +1,7 @@
 import logger from '../utils/logger.utils';
 import reconciliationService from '../services/reconciliation.service';
 import { runStaleTransactionSweep } from './sweeper.job';
+import { runExpiredRecordCleanup } from './cleanup.job';
 
 const ONE_MINUTE = 60_000;
 const ONE_HOUR = 60 * ONE_MINUTE;
@@ -52,9 +53,13 @@ export function registerJobs(): void {
     });
     timers.push(setInterval(reconFn, ONE_HOUR));
 
+    // Expired idempotency keys, FX quotes and limit locks (Postgres has no TTL index) — hourly.
+    timers.push(setInterval(safe('expired-record-cleanup', runExpiredRecordCleanup), ONE_HOUR));
+
     logger.info('Background jobs scheduled', {
         sweepIntervalMs: 5 * ONE_MINUTE,
         reconIntervalMs: ONE_HOUR,
+        cleanupIntervalMs: ONE_HOUR,
     });
 }
 

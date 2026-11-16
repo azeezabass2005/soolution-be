@@ -1,26 +1,22 @@
-import DBService from "../utils/db.utils";
-import { IUser } from "../models/interface";
-import User from "../models/user.model";
 import HashService from "../utils/hash.utils";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import { WALLET_LIMITS } from "../config/wallet-limits.config";
 import TokenBuilder from "../utils/token.utils";
 import { TokenType } from "../utils/interface";
 import logger from "../utils/logger.utils";
+import userRepository from "../repositories/user.repository";
 
 /**
  * Single source of truth for transaction-PIN operations.
  *
- * The PIN lives on the user document (transactionPinHash, isTransactionPinSet,
+ * The PIN lives on the user (transactionPinHash, isTransactionPinSet,
  * transactionPinAttempts, transactionPinLockedUntil) and is required to
- * authorize any outbound money movement. WalletService.{setPin,changePin,
- * verifyPin} delegate here so wallet withdrawal continues to work unchanged.
+ * authorize any outbound money movement.
  */
-class PinService extends DBService<IUser> {
+class PinService {
     private tokenBuilder: TokenBuilder;
 
     constructor() {
-        super(User);
         this.tokenBuilder = new TokenBuilder();
     }
 
@@ -29,7 +25,7 @@ class PinService extends DBService<IUser> {
      * Throws 400 if a PIN is already set — the caller must use changePin instead.
      */
     async setPin(userId: string, pin: string): Promise<void> {
-        const user = await this.Model.findById(userId).select('+transactionPinHash');
+        const user = await userRepository.findById(userId);
         if (!user) throw errorResponseMessage.resourceNotFound("User");
 
         if (user.isTransactionPinSet) {
@@ -37,32 +33,24 @@ class PinService extends DBService<IUser> {
         }
 
         const { password: transactionPinHash } = await HashService.hashPassword(pin);
-        await this.Model.updateOne(
-            { _id: userId },
-            {
-                transactionPinHash,
-                isTransactionPinSet: true,
-                transactionPinAttempts: 0,
-                $unset: { transactionPinLockedUntil: 1 },
-            }
-        );
+        await userRepository.update(userId, {
+            transactionPinHash,
+            isTransactionPinSet: true,
+            transactionPinAttempts: 0,
+            transactionPinLockedUntil: null,
+        });
     }
 
-    /**
-     * Change an existing PIN. Verifies the old PIN (with lockout) before re-hashing.
-     */
+    /** Change an existing PIN. Verifies the old PIN (with lockout) before re-hashing. */
     async changePin(userId: string, oldPin: string, newPin: string): Promise<void> {
         await this.verifyPin(userId, oldPin);
 
         const { password: transactionPinHash } = await HashService.hashPassword(newPin);
-        await this.Model.updateOne(
-            { _id: userId },
-            {
-                transactionPinHash,
-                transactionPinAttempts: 0,
-                $unset: { transactionPinLockedUntil: 1 },
-            }
-        );
+        await userRepository.update(userId, {
+            transactionPinHash,
+            transactionPinAttempts: 0,
+            transactionPinLockedUntil: null,
+        });
     }
 
     /**
@@ -73,7 +61,7 @@ class PinService extends DBService<IUser> {
      * Throws on any failure mode (no PIN set, locked, wrong, etc).
      */
     async verifyPin(userId: string, pin: string): Promise<void> {
-        const user = await this.Model.findById(userId).select('+transactionPinHash');
+        const user = await userRepository.findById(userId, { withSecrets: true });
         if (!user) throw errorResponseMessage.resourceNotFound("User");
 
         if (!user.isTransactionPinSet || !user.transactionPinHash) {
@@ -92,15 +80,12 @@ class PinService extends DBService<IUser> {
         const isValid = await HashService.verifyPassword(pin, user.transactionPinHash);
         if (!isValid) {
             const attempts = (user.transactionPinAttempts || 0) + 1;
-            const updates: any = { transactionPinAttempts: attempts };
-
-            if (attempts >= WALLET_LIMITS.MAX_PIN_ATTEMPTS) {
-                updates.transactionPinLockedUntil = new Date(Date.now() + WALLET_LIMITS.PIN_LOCKOUT_MINUTES * 60 * 1000);
-                updates.transactionPinAttempts = 0;
-                logger.warn("Transaction PIN locked", { userId, attempts });
-            }
-
-            await this.Model.updateOne({ _id: userId }, updates);
+            const locked = attempts >= WALLET_LIMITS.MAX_PIN_ATTEMPTS;
+            await userRepository.update(userId, {
+                transactionPinAttempts: locked ? 0 : attempts,
+                ...(locked ? { transactionPinLockedUntil: new Date(Date.now() + WALLET_LIMITS.PIN_LOCKOUT_MINUTES * 60 * 1000) } : {}),
+            });
+            if (locked) logger.warn("Transaction PIN locked", { userId, attempts });
 
             const remaining = WALLET_LIMITS.MAX_PIN_ATTEMPTS - attempts;
             throw errorResponseMessage.createError(
@@ -114,25 +99,18 @@ class PinService extends DBService<IUser> {
 
         // Reset attempts on success
         if ((user.transactionPinAttempts || 0) > 0) {
-            await this.Model.updateOne(
-                { _id: userId },
-                { transactionPinAttempts: 0, $unset: { transactionPinLockedUntil: 1 } }
-            );
+            await userRepository.update(userId, { transactionPinAttempts: 0, transactionPinLockedUntil: null });
         }
     }
 
-    /**
-     * Clear the user's PIN (used by reset flow). Re-set is required afterwards.
-     */
+    /** Clear the user's PIN (used by reset flow). Re-set is required afterwards. */
     async clearPin(userId: string): Promise<void> {
-        await this.Model.updateOne(
-            { _id: userId },
-            {
-                $unset: { transactionPinHash: 1, transactionPinLockedUntil: 1 },
-                isTransactionPinSet: false,
-                transactionPinAttempts: 0,
-            }
-        );
+        await userRepository.update(userId, {
+            transactionPinHash: null,
+            transactionPinLockedUntil: null,
+            isTransactionPinSet: false,
+            transactionPinAttempts: 0,
+        });
     }
 
     /**
@@ -141,20 +119,16 @@ class PinService extends DBService<IUser> {
      * to avoid account enumeration.
      */
     async issueResetToken(email: string): Promise<string | null> {
-        const user = await this.findOne({ email });
+        const user = await userRepository.findByEmail(email);
         if (!user) return null;
 
-        // Sign a RESET_PIN token using the same TokenBuilder pattern as auth flows.
-        // 30-minute expiry per plan.
         return this.tokenBuilder.build().createToken(user, {
             type: TokenType.RESET_PIN,
-            expiresIn: '30m',
+            expiresIn: "30m",
         });
     }
 
-    /**
-     * Validate a RESET_PIN token and set the new PIN. Clears any lockout.
-     */
+    /** Validate a RESET_PIN token and set the new PIN. Clears any lockout. */
     async resetWithToken(token: string, newPin: string): Promise<void> {
         const decoded = await this.tokenBuilder.setToken(token).build().verifyToken();
 
@@ -167,28 +141,23 @@ class PinService extends DBService<IUser> {
             throw errorResponseMessage.unauthorized("Invalid PIN reset token payload");
         }
 
-        const user = await this.findById(userId);
+        const user = await userRepository.findById(userId);
         if (!user) throw errorResponseMessage.resourceNotFound("User");
 
         const { password: transactionPinHash } = await HashService.hashPassword(newPin);
-        await this.Model.updateOne(
-            { _id: userId },
-            {
-                transactionPinHash,
-                isTransactionPinSet: true,
-                transactionPinAttempts: 0,
-                $unset: { transactionPinLockedUntil: 1 },
-            }
-        );
+        await userRepository.update(userId, {
+            transactionPinHash,
+            isTransactionPinSet: true,
+            transactionPinAttempts: 0,
+            transactionPinLockedUntil: null,
+        });
 
         logger.info("Transaction PIN reset successfully", { userId });
     }
 
-    /**
-     * Status snapshot for the frontend pre-flight check.
-     */
+    /** Status snapshot for the frontend pre-flight check. */
     async getStatus(userId: string): Promise<{ isTransactionPinSet: boolean; isLocked: boolean; lockedUntil?: Date }> {
-        const user = await this.findById(userId);
+        const user = await userRepository.findById(userId);
         if (!user) throw errorResponseMessage.resourceNotFound("User");
 
         const lockedUntil = user.transactionPinLockedUntil;

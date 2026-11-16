@@ -13,8 +13,16 @@ interface EnvConfig {
     NODE_ENV: string;
     /** Server port number */
     PORT: number;
-    /** MongoDB connection URI */
-    MONGODB_URI: string;
+    /** PostgreSQL connection string, e.g. postgres://user:pass@host:5432/db */
+    DATABASE_URL: string;
+    /** Use TLS for the database connection (managed databases usually need it) */
+    DATABASE_SSL: boolean;
+    /** Verify the database server's TLS certificate (turn off only for self-signed certs) */
+    DATABASE_SSL_REJECT_UNAUTHORIZED: boolean;
+    /** Maximum connections in the pool */
+    DATABASE_POOL_MAX: number;
+    /** Abort any single statement that runs longer than this (ms) */
+    DATABASE_STATEMENT_TIMEOUT_MS: number;
     /** JWT secret key */
     JWT_SECRET: string;
     /** JWT token expiration time */
@@ -174,7 +182,11 @@ const loadEnvConfig = (): EnvConfig => {
     const config = {
         NODE_ENV: env,
         PORT: parseInt(process.env.PORT || '3500', 10),
-        MONGODB_URI: process.env.MONGODB_URI || 'mongodb://localhost:27017/your-db-name',
+        DATABASE_URL: process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/solution_pay',
+        DATABASE_SSL: process.env.DATABASE_SSL === 'true',
+        DATABASE_SSL_REJECT_UNAUTHORIZED: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== 'false',
+        DATABASE_POOL_MAX: Math.max(1, parseInt(process.env.DATABASE_POOL_MAX || '10', 10) || 10),
+        DATABASE_STATEMENT_TIMEOUT_MS: Math.max(1000, parseInt(process.env.DATABASE_STATEMENT_TIMEOUT_MS || '30000', 10) || 30000),
         JWT_SECRET,
         JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '1d',
         API_VERSION: process.env.API_VERSION || 'v1',

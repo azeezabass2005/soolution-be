@@ -6,7 +6,6 @@
 import BaseController from "../base-controller";
 import {validateTagCreate} from "../../../validators";
 import {Request, Response, NextFunction} from "express";
-import {ITag} from "../../../models/interface";
 
 class TagController extends BaseController {
     private tagService: TagService;
@@ -38,11 +37,7 @@ class TagController extends BaseController {
      */
     private async createTag(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const tagData: Partial<ITag> = req.body;
-            console.log(tagData);
-            const tag = await this.tagService.save({
-                ...tagData,
-            });
+            const tag = await this.tagService.create(String(req.body.title));
             if(!tag) {
                 throw new Error("Failed to create tag");
             }
@@ -61,7 +56,7 @@ class TagController extends BaseController {
      */
     private async getTags(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const tags = await this.tagService.find();
+            const tags = await this.tagService.list();
             this.sendSuccess(res, {tags})
         } catch (error) {
             next(error);

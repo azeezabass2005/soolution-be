@@ -1,5 +1,5 @@
-import Transaction from '../models/transaction.model';
-import WalletTransaction from '../models/wallet-transaction.model';
+import transactionRepository from '../repositories/transaction.repository';
+import walletTransactionRepository from '../repositories/wallet-transaction.repository';
 import TransactionService from '../services/transaction.service';
 import WalletService from '../services/wallet.service';
 import {
@@ -16,7 +16,7 @@ const STALE_PAYSTACK_AFTER_MS = 15 * 60 * 1000; // 15 min
 const STALE_OG_AFTER_MS = config.OGATEWAY_STALE_AFTER_MINUTES * 60 * 1000;
 const MAX_PER_RUN = 50;
 
-const txService = new TransactionService(['user']);
+const txService = new TransactionService();
 const walletSvc = new WalletService();
 
 /**
@@ -26,22 +26,21 @@ const walletSvc = new WalletService();
  */
 async function sweepStaleYC(): Promise<{ scanned: number; synced: number }> {
     const cutoff = new Date(Date.now() - STALE_YC_AFTER_MS);
-    const stale = await Transaction.find({
-        detailType: DETAIL_TYPE.YELLOWCARD,
-        status: { $in: [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] },
-        initiatedAt: { $lte: cutoff },
-    })
-        .limit(MAX_PER_RUN)
-        .sort({ initiatedAt: 1 });
+    const stale = await transactionRepository.listStale(
+        DETAIL_TYPE.YELLOWCARD as 'yellowcard',
+        [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] as ('pending' | 'processing')[],
+        cutoff,
+        MAX_PER_RUN
+    );
 
     let synced = 0;
     for (const tx of stale) {
         try {
-            await txService.pollYellowCardStatus((tx._id as any).toString());
+            await txService.pollYellowCardStatus(tx.id);
             synced += 1;
         } catch (error) {
             logger.warn('Sweeper: YC poll failed', {
-                transactionId: tx._id,
+                transactionId: tx.id,
                 error: error instanceof Error ? error.message : String(error),
             });
         }
@@ -56,25 +55,21 @@ async function sweepStaleYC(): Promise<{ scanned: number; synced: number }> {
  */
 async function sweepStalePaystack(): Promise<{ scanned: number; synced: number }> {
     const cutoff = new Date(Date.now() - STALE_PAYSTACK_AFTER_MS);
-    const stale = await WalletTransaction.find({
-        type: WALLET_TRANSACTION_TYPE.WITHDRAWAL,
-        status: WALLET_TRANSACTION_STATUS.PROCESSING,
-        createdAt: { $lte: cutoff },
-    })
-        .limit(MAX_PER_RUN)
-        .sort({ createdAt: 1 });
+    const stale = await walletTransactionRepository.listStale(
+        WALLET_TRANSACTION_TYPE.WITHDRAWAL as 'withdrawal',
+        WALLET_TRANSACTION_STATUS.PROCESSING as 'processing',
+        cutoff,
+        MAX_PER_RUN
+    );
 
     let synced = 0;
     for (const tx of stale) {
         try {
-            await walletSvc.verifyAndUpdateTransfer(
-                (tx.user as any).toString(),
-                (tx._id as any).toString()
-            );
+            await walletSvc.verifyAndUpdateTransfer(tx.user, tx.id);
             synced += 1;
         } catch (error) {
             logger.warn('Sweeper: Paystack verify failed', {
-                walletTxId: tx._id,
+                walletTxId: tx.id,
                 error: error instanceof Error ? error.message : String(error),
             });
         }
@@ -89,22 +84,21 @@ async function sweepStalePaystack(): Promise<{ scanned: number; synced: number }
  */
 async function sweepStaleOGateway(): Promise<{ scanned: number; synced: number }> {
     const cutoff = new Date(Date.now() - STALE_OG_AFTER_MS);
-    const stale = await Transaction.find({
-        detailType: DETAIL_TYPE.OGATEWAY,
-        status: { $in: [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] },
-        initiatedAt: { $lte: cutoff },
-    })
-        .limit(MAX_PER_RUN)
-        .sort({ initiatedAt: 1 });
+    const stale = await transactionRepository.listStale(
+        DETAIL_TYPE.OGATEWAY as 'ogateway',
+        [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] as ('pending' | 'processing')[],
+        cutoff,
+        MAX_PER_RUN
+    );
 
     let synced = 0;
     for (const tx of stale) {
         try {
-            await txService.pollOGatewayStatus((tx._id as any).toString());
+            await txService.pollOGatewayStatus(tx.id);
             synced += 1;
         } catch (error) {
             logger.warn('Sweeper: OGateway poll failed', {
-                transactionId: tx._id,
+                transactionId: tx.id,
                 error: error instanceof Error ? error.message : String(error),
             });
         }

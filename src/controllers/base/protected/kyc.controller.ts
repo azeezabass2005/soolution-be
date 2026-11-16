@@ -57,7 +57,7 @@ class KycController extends BaseController {
 
     private async getMyApplication(_req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const application = await this.kycService.findOne({ user: res.locals.userId });
+            const application = await this.kycService.findForUser(res.locals.userId);
             this.sendSuccess(res, { application: application ? await this.kycService.toClient(application) : null });
         } catch (error) {
             next(error);
@@ -168,8 +168,8 @@ class KycController extends BaseController {
             const user = await this.userService.findById(req.params.userId);
             if (!user) return next(errorResponseMessage.resourceNotFound("User"));
             this.sendSuccess(res, {
-                ...(await this.tierOverview(String(user._id))),
-                tierHistory: (user.tierHistory || []).slice().reverse(),
+                ...(await this.tierOverview(user.id)),
+                tierHistory: (await this.userService.tierHistory(user.id)).slice().reverse(),
             });
         } catch (error) {
             next(error);
@@ -182,11 +182,8 @@ class KycController extends BaseController {
             const { tier, reason } = ZTierOverride.parse(req.body);
             const user = await this.userService.findById(req.params.userId);
             if (!user) return next(errorResponseMessage.resourceNotFound("User"));
-            await this.userService.updateById(String(user._id), {
-                tier,
-                $push: { tierHistory: { tier, reason: `Set by admin: ${reason}`, by: res.locals.user._id, at: new Date() } },
-            } as any);
-            this.sendSuccess(res, { message: `Moved to Tier ${tier} (${TIER_NAME[tier]})`, ...(await this.tierOverview(String(user._id))) });
+            await this.userService.setTier(user.id, tier, `Set by admin: ${reason}`, res.locals.user.id);
+            this.sendSuccess(res, { message: `Moved to Tier ${tier} (${TIER_NAME[tier]})`, ...(await this.tierOverview(user.id)) });
         } catch (error) {
             zodErrorHandlerOr(error, next);
         }

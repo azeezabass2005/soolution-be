@@ -7,7 +7,12 @@ import {
     TokenType,
     ITokenOptions
 } from './interface';
-import { IUser } from '../models/interface';
+/** Who a token is issued to */
+export interface TokenSubject {
+    id: string;
+    email: string;
+    role?: number;
+}
 import config from '../config/env.config';
 
 /**
@@ -68,7 +73,7 @@ class Token {
      * @returns Generated JWT token
      */
     createToken(
-        user: IUser,
+        user: TokenSubject,
         options: ITokenOptions = {
             type: TokenType.ACCESS,
             expiresIn: '168h'
@@ -77,10 +82,9 @@ class Token {
         const { type = TokenType.ACCESS, expiresIn = '15m', rememberMe, sessionStartedAt, passwordFingerprint } = options;
 
         const payload: ITokenPayload = {
-            userId: user?._id as string,
+            userId: user?.id,
             email: user?.email,
             role: user?.role,
-            username: user?.username,
             ...(passwordFingerprint ? { pfp: passwordFingerprint } : {}),
         };
 

@@ -1,49 +1,66 @@
-/**
- * Service class for Exchange Rate related database operations
- *
- * @description Extends the generic DBService with Exchange Rate specific configurations
- * @extends {DBService<IExchangeRate>}
- */
-import DBService from "../utils/db.utils";
-import {CurrencyCode, IExchangeRate} from "../models/interface";
-import ExchangeRate from "../models/exchange-rate.model";
-import {HydratedDocument} from "mongoose";
+import exchangeRateRepository, { type ExchangeRateUpdate } from "../repositories/exchange-rate.repository";
+import type { ExchangeRate } from "../types/entities";
+import type { CurrencyCode } from "../types/enums";
 import errorResponseMessage from "../common/messages/error-response-message";
+import { isUniqueViolation } from "../db/errors";
 
-class ExchangeRateService extends DBService<IExchangeRate> {
-    /**
-     * Creates an instance of ExchangeRateService
-     *
-     * @constructor
-     */
-    constructor() {
-        super(ExchangeRate);
+/** Admin-managed exchange rates (units of `to` per 1 `from`) */
+class ExchangeRateService {
+    /** Whether a rate exists for the pair (active or not) */
+    public async checkRateExistence(from: CurrencyCode, to: CurrencyCode): Promise<boolean> {
+        return !!(await exchangeRateRepository.findPair(from, to));
     }
 
-    /**
-     * Checks for existence of a rate
-     * @returns {boolean}
-     */
-    public async checkRateExistence(
-        from: CurrencyCode,
-        to: CurrencyCode,
-    ): Promise<boolean> {
-        const existingExchangeRate = await this.findOne({ from : from, to: to });
-        console.log(existingExchangeRate, "This is the existing exchange rate")
-        return !!existingExchangeRate;
+    /** The rate for a pair; with `activeOnly`, only when it's active */
+    public async findPair(from: string, to: string, options: { activeOnly?: boolean } = {}): Promise<ExchangeRate | undefined> {
+        return exchangeRateRepository.findPair(from, to, options);
     }
 
-    /**
-     * Toggle the activeness of an exchange rate
-     */
-    public async toggleActiveness(
-        exchangeRateId: string
-    ): Promise<HydratedDocument<IExchangeRate>> {
-        const exchangeRate = await this.findById(exchangeRateId);
-        if(!exchangeRate) {
-            throw errorResponseMessage.resourceNotFound('Exchange Rate');
+    /** Newest first; optionally only active ones */
+    public async list(filter: { isActive?: boolean } = {}): Promise<ExchangeRate[]> {
+        return exchangeRateRepository.list(filter);
+    }
+
+    public async create(data: { from: CurrencyCode; to: CurrencyCode; rate: number; isActive?: boolean }): Promise<ExchangeRate> {
+        if (typeof data.isActive !== "boolean") {
+            throw errorResponseMessage.payloadIncorrect("isActive is required");
         }
-        return await this.updateById(exchangeRateId, { isActive: !exchangeRate.isActive });
+        try {
+            return await exchangeRateRepository.create({ from: data.from, to: data.to, rate: data.rate, isActive: data.isActive });
+        } catch (error) {
+            if (isUniqueViolation(error, "exchange_rates_pair_key")) {
+                throw errorResponseMessage.resourceAlreadyExist("Exchange Rate");
+            }
+            throw error;
+        }
+    }
+
+    /** Only the rate fields can change */
+    public async update(id: string, patch: Record<string, unknown>): Promise<ExchangeRate | undefined> {
+        const allowed: ExchangeRateUpdate = {};
+        if (typeof patch.from === "string") allowed.from = patch.from as CurrencyCode;
+        if (typeof patch.to === "string") allowed.to = patch.to as CurrencyCode;
+        if (typeof patch.rate === "number") allowed.rate = patch.rate;
+        if (typeof patch.isActive === "boolean") allowed.isActive = patch.isActive;
+        try {
+            return await exchangeRateRepository.update(id, allowed);
+        } catch (error) {
+            if (isUniqueViolation(error, "exchange_rates_pair_key")) {
+                throw errorResponseMessage.resourceAlreadyExist("Exchange Rate");
+            }
+            throw error;
+        }
+    }
+
+    /** Toggle the activeness of an exchange rate */
+    public async toggleActiveness(exchangeRateId: string): Promise<ExchangeRate> {
+        const exchangeRate = await exchangeRateRepository.findById(exchangeRateId);
+        if (!exchangeRate) {
+            throw errorResponseMessage.resourceNotFound("Exchange Rate");
+        }
+        const updated = await exchangeRateRepository.update(exchangeRateId, { isActive: !exchangeRate.isActive });
+        if (!updated) throw errorResponseMessage.resourceNotFound("Exchange Rate");
+        return updated;
     }
 }
 

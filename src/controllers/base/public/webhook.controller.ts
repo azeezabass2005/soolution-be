@@ -19,7 +19,7 @@ class WebhookController extends BaseController {
 
     constructor () {
         super();
-        this.transactionService = new TransactionService(["user"]);
+        this.transactionService = new TransactionService();
         this.smileIdService = new SmileId();
         this.walletService = new WalletService();
         this.setupRoutes();
@@ -58,7 +58,7 @@ class WebhookController extends BaseController {
             event: webhookData?.ResultCode,
             externalId,
         });
-        const eventId = stored?._id?.toString();
+        const eventId = stored?.id;
 
         try {
             if (!signature || !timestamp) {
@@ -119,7 +119,7 @@ class WebhookController extends BaseController {
             event: eventName,
             externalId,
         });
-        const eventId = stored?._id?.toString();
+        const eventId = stored?.id;
 
         if (!signature) {
             logger.warn("OGateway webhook: missing signature header");
@@ -163,7 +163,7 @@ class WebhookController extends BaseController {
             event,
             externalId,
         });
-        const eventId = stored?._id?.toString();
+        const eventId = stored?.id;
 
         if (!signature) {
             logger.warn("YellowCard webhook: missing signature header");
@@ -216,7 +216,7 @@ class WebhookController extends BaseController {
             event,
             externalId,
         });
-        const eventId = stored?._id?.toString();
+        const eventId = stored?.id;
 
         if (!signature) {
             logger.warn("Paystack webhook: missing signature header");
