@@ -4,7 +4,7 @@ import zodErrorHandler from "./zod.error";
 import { WALLET_LIMITS } from "../config/wallet-limits.config";
 import { OGATEWAY_NETWORKS } from "../common/constant";
 
-// Send NGN→GHS: payout via OGateway MoMo or bank. Debits NGN wallet, so PIN required.
+// Send NGN→GHS: Fincra payout to mobile money or a bank. Debits NGN wallet, so PIN required.
 const ZCreateOGatewayPayout = z.object({
     amount: z.coerce.number().positive("Amount must be a positive number"),
     fromAmount: z.coerce.number().positive("fromAmount must be a positive number").optional(),
@@ -29,7 +29,8 @@ const ZCreateOGatewayPayout = z.object({
         .regex(/^\d+$/, "PIN must contain only digits"),
 });
 
-// Receive GHS→NGN: collection via OGateway MoMo. No wallet debit (sender pays), no PIN.
+// Receive GHS→NGN: a Fincra checkout link the payer opens. No wallet debit, no PIN.
+// The payer's details are optional; they're used to address the checkout.
 const ZCreateOGatewayCollection = z.object({
     amount: z.coerce.number().positive("Amount must be a positive number"),
     fromAmount: z.coerce.number().positive("fromAmount must be a positive number").optional(),
@@ -37,11 +38,11 @@ const ZCreateOGatewayCollection = z.object({
     toCurrency: z.literal("NGN"),
 
     sender: z.object({
-        accountName: z.string().min(1, "Sender account name is required"),
-        accountNumber: z.string().min(1, "Sender account number is required"),
-        network: z.enum(OGATEWAY_NETWORKS),
+        accountName: z.string().optional(),
+        accountNumber: z.string().optional(),
+        network: z.string().optional(),
         email: z.string().email("Sender email must be valid").optional(),
-    }),
+    }).optional(),
 });
 
 export const validateCreateOGatewayPayout = async (

@@ -1,5 +1,5 @@
 import yellowCardService from "./yellowcard.service";
-import paystackService from "./paystack.service";
+import fincraService from "./fincra.service";
 import WalletService from "./wallet.service";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import { CURRENCY_COUNTRY } from "../common/payment-link.constants";
@@ -8,11 +8,11 @@ import logger from "../utils/logger.utils";
 /**
  * One list of banks per currency, from whichever provider pays out there,
  * so bank names are picked rather than typed:
- *  - NGN: Paystack (withdrawals and NGN payouts)
+ *  - NGN: Fincra (withdrawals)
+ *  - GHS: Fincra's Ghana banks (GHS sends)
  *  - YellowCard currencies (KES, ZAR, …): YellowCard's bank networks for that country
- *  - GHS: OGateway has no bank list we can read yet, so it stays free text
  *
- * `code` is what the provider needs to pay the account: Paystack's bank code,
+ * `code` is what the provider needs to pay the account: Fincra's bank code,
  * or YellowCard's network id.
  */
 export interface BankOption {
@@ -54,6 +54,9 @@ class BankDirectoryService {
                     .map((b: any) => ({ code: String(b.code), name: String(b.name).trim() })),
                 canResolve: true,
             };
+        } else if (currency === "GHS") {
+            const banks = await fincraService.listBanks("GH", "GHS", "bank_account");
+            value = { currency, banks: banks.map((b) => ({ code: b.code, name: b.name })), canResolve: false };
         } else if (YC_BANK_CURRENCIES.includes(currency)) {
             const data: any = await yellowCardService.getNetworks(CURRENCY_COUNTRY[currency]);
             const networks: any[] = data?.networks || data || [];
@@ -86,9 +89,9 @@ class BankDirectoryService {
         const notFound = () => errorResponseMessage.createError(404, "We couldn't find that account. Check the number and bank.", ErrorSeverity.LOW);
         try {
             if (currency === "NGN") {
-                const result: any = await paystackService.resolveAccountNumber(number, bankCode);
-                if (!result?.account_name) throw notFound();
-                return { accountName: result.account_name, accountNumber: number, bankCode };
+                const result = await fincraService.resolveAccount({ currency: "NGN", accountNumber: number, bankCode });
+                if (!result?.accountName) throw notFound();
+                return { accountName: result.accountName, accountNumber: number, bankCode };
             }
             if (YC_BANK_CURRENCIES.includes(currency)) {
                 const result: any = await yellowCardService.resolveBankAccount(number, bankCode, CURRENCY_COUNTRY[currency]);

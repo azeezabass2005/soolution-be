@@ -6,7 +6,11 @@ import walletTransactionRepository from "../repositories/wallet-transaction.repo
 import accountRepository from "../repositories/account.repository";
 import type { Wallet, WalletTransaction } from "../types/entities";
 import WalletTransactionService from "./wallet-transaction.service";
-import paystackService from "./paystack.service";
+import fincraService, { FincraError } from "./fincra.service";
+import userRepository from "../repositories/user.repository";
+import { decryptIdentity } from "../utils/identity-crypto.utils";
+import { IDENTITY_STATUS, IDENTITY_REQUIRED_CODE } from "../common/identity.constants";
+import journalRepository from "../repositories/journal.repository";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import {
     WALLET_STATUS,
@@ -18,10 +22,11 @@ import {
     SYSTEM_ACCOUNT_CODES,
     WEBHOOK_PROVIDER,
     userWalletAccountCode,
+    fincraCashCode,
+    fincraPayoutInflightCode,
 } from "../common/constant";
 import { WALLET_LIMITS } from "../config/wallet-limits.config";
 import { BASE_WALLET_CURRENCY, WALLET_CURRENCIES, WalletCurrency, isWalletCurrency } from "../common/wallet.constants";
-import config from "../config/env.config";
 import logger from "../utils/logger.utils";
 import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
@@ -32,13 +37,40 @@ import type { PageRequest } from "../db/pagination";
 const auditLogService = new AuditLogService();
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-/** What a profile/DVA owner needs to have for Paystack */
+/** Who the NGN virtual account is for */
 interface DvaOwner {
-    email: string;
-    firstName: string;
-    lastName: string;
-    phoneNumber?: string;
+    id: string;
 }
+
+const FINCRA = WEBHOOK_PROVIDER.FINCRA;
+const NGN_CASH = fincraCashCode("NGN");
+const NGN_PAYOUT_INFLIGHT = fincraPayoutInflightCode("NGN");
+
+/** Fincra's deposit webhook (collection.successful) data, as far as we read it */
+export interface FincraDeposit {
+    reference?: string;
+    virtualAccount?: string;
+    sourceAmount?: number | string;
+    amountReceived?: number | string;
+    fee?: number | string;
+    destinationCurrency?: string;
+    status?: string;
+    senderAccountName?: string;
+    senderBankName?: string;
+    [key: string]: unknown;
+}
+
+/** "Ada Lovelace-Byron" → { firstName: "Ada", lastName: "Lovelace-Byron" } */
+const splitName = (full: string) => {
+    const parts = (full || "").trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return { firstName: "Account", lastName: "Holder" };
+    if (parts.length === 1) return { firstName: parts[0], lastName: parts[0] };
+    return { firstName: parts[0], lastName: parts.slice(1).join(" ") };
+};
+
+/** A Fincra error that means the request certainly didn't create a payout */
+const definitelyRejected = (error: unknown) =>
+    error instanceof FincraError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429;
 
 class WalletService {
     private walletTransactionService: WalletTransactionService;
@@ -136,37 +168,82 @@ class WalletService {
         );
     }
 
-    /** Provision a Paystack DVA for a wallet (lazy — called on first access) */
-    async provisionDVA(walletId: string, user: DvaOwner): Promise<Wallet> {
+    /**
+     * Give the user's NGN wallet its own Fincra virtual account (lazy, on first
+     * access). Fincra checks the BVN against the name, so the user must have
+     * verified their identity. The request is keyed by the wallet, so asking
+     * twice can't open two accounts; an account Fincra is still reviewing is
+     * re-checked instead.
+     */
+    async provisionDVA(walletId: string, owner: DvaOwner): Promise<Wallet> {
         const wallet = await walletRepository.findById(walletId);
         if (!wallet) throw errorResponseMessage.resourceNotFound("Wallet");
-
         if (wallet.isDVAProvisioned) return wallet;
 
-        const customer = await paystackService.createCustomer({
+        // Requested before: see whether Fincra has approved it
+        if (wallet.dvaProvider === FINCRA && wallet.dvaExternalId) {
+            if (wallet.dvaStatus === "declined") {
+                throw errorResponseMessage.createError(409, "We couldn't open your account number. Please contact support.", ErrorSeverity.MEDIUM, { code: "DVA_DECLINED" });
+            }
+            const account = await fincraService.getVirtualAccount(wallet.dvaExternalId);
+            return (await this.applyVirtualAccount(wallet, account)) ?? wallet;
+        }
+
+        const user = await userRepository.findById(owner.id, { withSecrets: true });
+        if (!user) throw errorResponseMessage.resourceNotFound("User");
+        const bvnEnc = user.identity?.bvnEnc;
+        if (user.identity?.status !== IDENTITY_STATUS.VERIFIED || !bvnEnc) {
+            throw errorResponseMessage.createError(403, "Verify your identity to get your account number.", ErrorSeverity.LOW, { code: IDENTITY_REQUIRED_CODE });
+        }
+
+        const account = await fincraService.createVirtualAccount({
+            firstName: user.firstName || "",
+            lastName: user.lastName || "",
             email: user.email,
-            first_name: user.firstName,
-            last_name: user.lastName,
-            phone: user.phoneNumber,
+            bvn: decryptIdentity(bvnEnc),
+            merchantReference: `sp-va-${wallet.id}`,
         });
+        const externalId = String(account?._id || account?.id || "");
+        if (!externalId) throw errorResponseMessage.createError(500, "Our payment provider didn't return an account. Please try again.", ErrorSeverity.HIGH);
+        const pending = await walletRepository.update(wallet.id, { dvaProvider: FINCRA, dvaExternalId: externalId, dvaStatus: String(account?.status || "pending") });
+        logger.info("Fincra virtual account requested", { walletId, externalId, status: account?.status });
+        return (await this.applyVirtualAccount(pending ?? wallet, account)) ?? pending ?? wallet;
+    }
 
-        const dva = await paystackService.createDedicatedAccount(customer.customer_code);
+    /**
+     * Record what Fincra says about a wallet's virtual account (from a fetch or
+     * the virtualaccount.* webhooks). The account is usable once it has a number.
+     */
+    private async applyVirtualAccount(wallet: Wallet, account: any): Promise<Wallet | undefined> {
+        const status = String(account?.status || wallet.dvaStatus || "pending").toLowerCase();
+        const info = account?.accountInformation || {};
+        const accountNumber = info.accountNumber || account?.accountNumber;
+        if (accountNumber && status !== "declined" && status !== "closed") {
+            const updated = await walletRepository.update(wallet.id, {
+                dvaStatus: status,
+                dvaBankName: info.bankName || account?.bankName,
+                dvaAccountNumber: String(accountNumber),
+                dvaAccountName: info.accountName || account?.accountName || account?.KYCInformation?.firstName && `${account.KYCInformation.firstName} ${account.KYCInformation.lastName || ""}`.trim(),
+                isDVAProvisioned: true,
+            });
+            logger.info("Wallet virtual account ready", { walletId: wallet.id, accountNumber });
+            return updated;
+        }
+        if (status !== wallet.dvaStatus) return walletRepository.update(wallet.id, { dvaStatus: status, ...(status === "closed" ? { isDVAProvisioned: false } : {}) });
+        return wallet;
+    }
 
-        const updated = await walletRepository.update(walletId, {
-            paystackCustomerCode: customer.customer_code,
-            paystackCustomerId: customer.id,
-            dvaBankName: dva.bank?.name,
-            dvaAccountNumber: dva.account_number,
-            dvaAccountName: dva.account_name,
-            dvaBankId: dva.bank?.id,
-            dvaId: dva.id,
-            isDVAProvisioned: true,
-        });
-
-        if (!updated) throw errorResponseMessage.resourceNotFound("Wallet");
-
-        logger.info("Wallet DVA provisioned", { walletId, accountNumber: dva.account_number });
-        return updated;
+    /** Fincra's virtualaccount.* webhook: approved, issued, declined, closed */
+    async handleVirtualAccountEvent(account: any): Promise<boolean> {
+        const externalId = String(account?.id || account?._id || "");
+        if (!externalId) return false;
+        const wallet = await walletRepository.findByDvaExternalId(FINCRA, externalId);
+        if (!wallet) {
+            logger.warn("Fincra virtual account event for an unknown account", { externalId, status: account?.status });
+            return false;
+        }
+        await this.applyVirtualAccount(wallet, account);
+        return true;
     }
 
     // ===================== PIN MANAGEMENT =====================
@@ -188,49 +265,49 @@ class WalletService {
     // ===================== FUNDING (Webhook-driven) =====================
 
     /**
-     * Process wallet funding from Paystack webhook (charge.success).
-     * Idempotent on the Paystack reference: a unique index on funding rows means
-     * a duplicate (or concurrent) webhook can never credit twice.
+     * A deposit into a user's Fincra virtual account (collection.successful).
+     * The wallet gets what Fincra settled (amountReceived, after its fee), so
+     * the books always match Fincra. Idempotent on Fincra's reference: a unique
+     * index on funding rows means a repeated (or concurrent) webhook can never
+     * credit twice. Money for an unknown or inactive wallet is held in SUSPENSE.
      */
-    async processFunding(paystackReference: string, amountInKobo: number, webhookData?: any): Promise<WalletTransaction | null> {
-        const amount = Math.round(amountInKobo) / 100; // kobo → NGN
+    async processFunding(deposit: FincraDeposit): Promise<WalletTransaction | null> {
+        const reference = String(deposit.reference || "");
+        const amount = Math.round(Number(deposit.amountReceived ?? deposit.sourceAmount) * 100) / 100;
+        const virtualAccountId = deposit.virtualAccount ? String(deposit.virtualAccount) : undefined;
+        if (!reference || !(amount > 0)) {
+            logger.warn("Fincra deposit without a reference or amount; ignored", { reference, amount: deposit.amountReceived });
+            return null;
+        }
+        if (deposit.destinationCurrency && String(deposit.destinationCurrency).toUpperCase() !== "NGN") {
+            logger.warn("Fincra deposit in a currency other than NGN; ignored", { reference, currency: deposit.destinationCurrency });
+            return null;
+        }
 
-        const existing = await walletTransactionRepository.findByPaystackReference(paystackReference);
+        const existing = await walletTransactionRepository.findByPaystackReference(reference);
         if (existing) {
-            logger.info("Wallet funding already processed (idempotent)", { paystackReference });
+            logger.info("Wallet funding already processed (idempotent)", { reference });
             return null;
         }
 
-        // Paystack sends: data.customer.customer_code and data.authorization.receiver_bank_account_number
-        const customerCode = webhookData?.customer?.customer_code;
-        const dvaAccountNumber = webhookData?.authorization?.receiver_bank_account_number;
+        const details = {
+            virtualAccountId,
+            fee: deposit.fee,
+            sourceAmount: deposit.sourceAmount,
+            sender: deposit.senderAccountName,
+            senderBank: deposit.senderBankName,
+        };
+        logger.info("Processing funding", { reference, virtualAccountId, amount });
 
-        logger.info("Processing funding", { paystackReference, customerCode, dvaAccountNumber, amount });
-
-        let wallet = customerCode ? await walletRepository.findByPaystackCustomerCode(customerCode) : undefined;
-        if (!wallet && dvaAccountNumber) {
-            wallet = await walletRepository.findByDvaAccountNumber(dvaAccountNumber);
-        }
-
-        // No matching wallet — instead of silently dropping the money, post a
-        // suspense entry so the funds are captured in the ledger and can be
-        // attributed manually by an admin later.
+        const wallet = virtualAccountId ? await walletRepository.findByDvaExternalId(FINCRA, virtualAccountId) : undefined;
         if (!wallet) {
-            logger.error("Wallet not found for funding — routing to SUSPENSE", { paystackReference, customerCode, dvaAccountNumber });
-            await this.recordSuspenseFunding({ paystackReference, amount, customerCode, dvaAccountNumber, webhookData });
+            logger.error("Wallet not found for funding — routing to SUSPENSE", { reference, virtualAccountId });
+            await this.recordSuspenseFunding({ reference, amount, details });
             return null;
         }
-
         if (wallet.status !== WALLET_STATUS.ACTIVE) {
             logger.warn("Funding attempted on non-active wallet — routing to SUSPENSE", { walletId: wallet.id, status: wallet.status });
-            await this.recordSuspenseFunding({
-                paystackReference,
-                amount,
-                customerCode,
-                dvaAccountNumber,
-                webhookData,
-                note: `wallet status is ${wallet.status}`,
-            });
+            await this.recordSuspenseFunding({ reference, amount, details, note: `wallet status is ${wallet.status}` });
             return null;
         }
 
@@ -240,20 +317,19 @@ class WalletService {
         let walletTransaction: WalletTransaction;
         try {
             walletTransaction = await withTransaction(async (tx) => {
-                const reference = this.walletTransactionService.generateReference("FND");
+                const ourReference = this.walletTransactionService.generateReference("FND");
 
-                // Money entered the platform via Paystack (CASH_PAYSTACK_NGN) and
-                // we now owe the user (USER_WALLET_NGN:{userId}).
+                // Money entered the platform at Fincra and we now owe the user
                 await ledgerService.post({
                     legs: [
-                        { accountCode: SYSTEM_ACCOUNT_CODES.CASH_PAYSTACK_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount },
+                        { accountCode: NGN_CASH, direction: JOURNAL_DIRECTION.DEBIT, amount },
                         { accountCode: userWalletAccountCode(target.user, target.currency), direction: JOURNAL_DIRECTION.CREDIT, amount },
                     ],
                     source: JOURNAL_SOURCE.FUNDING,
-                    reference,
-                    description: `Wallet funding via Paystack DVA (${paystackReference})`,
-                    externalRef: { provider: WEBHOOK_PROVIDER.PAYSTACK, id: paystackReference },
-                    metadata: { customerCode, dvaAccountNumber },
+                    reference: ourReference,
+                    description: `Wallet funding via Fincra virtual account (${reference})`,
+                    externalRef: { provider: FINCRA, id: reference },
+                    metadata: details,
                     tx,
                 });
 
@@ -269,23 +345,23 @@ class WalletService {
                         type: WALLET_TRANSACTION_TYPE.FUNDING,
                         status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
                         amount,
-                        reference,
+                        reference: ourReference,
                         balanceBefore: round2(updated.balance - amount),
                         balanceAfter: updated.balance,
-                        description: `Wallet funding via bank transfer`,
+                        description: deposit.senderAccountName ? `Bank transfer from ${deposit.senderAccountName}` : "Wallet funding via bank transfer",
                         currency: target.currency,
-                        paystackReference,
+                        // The provider's reference (the column predates Fincra)
+                        paystackReference: reference,
                     },
                     tx
                 );
             });
         } catch (error) {
             if (isUniqueViolation(error, "wallet_transactions_funding_reference_key")) {
-                // A concurrent delivery of the same webhook credited it first
-                logger.info("Wallet funding already processed (concurrent duplicate)", { paystackReference });
+                logger.info("Wallet funding already processed (concurrent duplicate)", { reference });
                 return null;
             }
-            logger.error("Wallet funding failed", { paystackReference, error: error instanceof Error ? error.message : String(error) });
+            logger.error("Wallet funding failed", { reference, error: error instanceof Error ? error.message : String(error) });
             throw error;
         }
 
@@ -298,14 +374,14 @@ class WalletService {
                 target.user,
                 "funding_received",
                 undefined,
-                { amount, reference: walletTransaction.reference, paystackReference },
+                { amount, reference: walletTransaction.reference, providerReference: reference },
                 undefined,
                 undefined,
-                { customerCode, dvaAccountNumber, walletId: target.id }
+                { ...details, walletId: target.id }
             );
         } catch (auditError) {
             logger.warn("Audit log write failed (funding_received)", {
-                paystackReference,
+                reference,
                 error: auditError instanceof Error ? auditError.message : String(auditError),
             });
         }
@@ -317,30 +393,27 @@ class WalletService {
      * Capture an unmatched funding event in the SUSPENSE ledger so the funds
      * are tracked until an admin attributes them.
      */
-    private async recordSuspenseFunding(opts: {
-        paystackReference: string;
-        amount: number;
-        customerCode?: string;
-        dvaAccountNumber?: string;
-        webhookData?: any;
-        note?: string;
-    }): Promise<void> {
+    private async recordSuspenseFunding(opts: { reference: string; amount: number; details: Record<string, unknown>; note?: string }): Promise<void> {
         try {
+            // Fincra retries webhooks: hold each deposit once
+            const held = await journalRepository.paginate(
+                { accountCode: SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN, externalProvider: FINCRA, externalId: opts.reference },
+                { page: 1, limit: 1 }
+            );
+            if (held.paginator.itemsCount > 0) {
+                logger.info("Unmatched deposit already held in suspense", { reference: opts.reference });
+                return;
+            }
             await ledgerService.postStandalone({
                 legs: [
-                    { accountCode: SYSTEM_ACCOUNT_CODES.CASH_PAYSTACK_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: opts.amount },
+                    { accountCode: NGN_CASH, direction: JOURNAL_DIRECTION.DEBIT, amount: opts.amount },
                     { accountCode: SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: opts.amount },
                 ],
                 source: JOURNAL_SOURCE.FUNDING,
-                reference: opts.paystackReference,
-                description: `Unmatched Paystack funding held in suspense${opts.note ? ` — ${opts.note}` : ""}`,
-                externalRef: { provider: WEBHOOK_PROVIDER.PAYSTACK, id: opts.paystackReference },
-                metadata: {
-                    customerCode: opts.customerCode,
-                    dvaAccountNumber: opts.dvaAccountNumber,
-                    webhookData: opts.webhookData,
-                    note: opts.note,
-                },
+                reference: opts.reference,
+                description: `Unmatched Fincra deposit held in suspense${opts.note ? ` — ${opts.note}` : ""}`,
+                externalRef: { provider: FINCRA, id: opts.reference },
+                metadata: { ...opts.details, note: opts.note },
             });
 
             try {
@@ -349,20 +422,21 @@ class WalletService {
                     undefined,
                     "funding_suspense_held",
                     undefined,
-                    { amount: opts.amount, paystackReference: opts.paystackReference },
+                    { amount: opts.amount, providerReference: opts.reference },
                     undefined,
                     undefined,
-                    { customerCode: opts.customerCode, dvaAccountNumber: opts.dvaAccountNumber, note: opts.note }
+                    { ...opts.details, note: opts.note }
                 );
             } catch (auditError) {
                 logger.warn("Audit log write failed (funding_suspense_held)", {
-                    paystackReference: opts.paystackReference,
+                    reference: opts.reference,
                     error: auditError instanceof Error ? auditError.message : String(auditError),
                 });
             }
         } catch (error) {
+            // A repeated webhook for the same unmatched deposit is refused here (same externalRef)
             logger.error("Failed to record suspense funding entry", {
-                paystackReference: opts.paystackReference,
+                reference: opts.reference,
                 error: error instanceof Error ? error.message : String(error),
             });
         }
@@ -412,18 +486,18 @@ class WalletService {
         const reference = this.walletTransactionService.generateReference("WDR");
         const userAccountCode = userWalletAccountCode(userId, wallet.currency);
 
-        // Debit + journal + record commit together; Paystack is called after
+        // Debit + journal + record commit together; Fincra is called after
         const { walletTransaction, initTxGroupId } = await withTransaction(async (tx) => {
             const updated = await walletRepository.debit(wallet.id, amount, tx);
             if (!updated) {
                 throw errorResponseMessage.createError(400, "Insufficient balance or wallet unavailable", ErrorSeverity.HIGH);
             }
 
-            // The user's wallet liability decreases; the money sits in flight until Paystack settles.
+            // The user's wallet liability decreases; the money sits in flight until Fincra settles.
             const post = await ledgerService.post({
                 legs: [
                     { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount },
-                    { accountCode: SYSTEM_ACCOUNT_CODES.PAYSTACK_TRANSFER_INFLIGHT_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount },
+                    { accountCode: NGN_PAYOUT_INFLIGHT, direction: JOURNAL_DIRECTION.CREDIT, amount },
                 ],
                 source: JOURNAL_SOURCE.WITHDRAWAL,
                 reference,
@@ -454,55 +528,55 @@ class WalletService {
             return { walletTransaction: created, initTxGroupId: post.txGroupId };
         });
 
-        // Paystack is called OUTSIDE the transaction — the balance is already debited.
-        // If it fails, the debit is reversed and the record marked failed.
+        // Fincra is called OUTSIDE the transaction — the balance is already debited.
+        // Our reference is the payout's customerReference, so it can't be paid twice.
         try {
-            const createRecipient = (bank_code: string) =>
-                paystackService.createTransferRecipient({ name: accountName, account_number: accountNumber, bank_code });
-
-            // Use the bank the account was resolved against. Only if Paystack's
-            // Test Bank (001) is refused in test mode, retry with Zenith (057).
-            let recipient;
-            try {
-                recipient = await createRecipient(bankCode);
-            } catch (recipientError) {
-                if (bankCode !== "001" || !config.PAYSTACK_SECRET_KEY?.startsWith("sk_test_")) throw recipientError;
-                logger.warn("Paystack: Test Bank recipient refused, retrying with 057", {
-                    reference,
-                    error: (recipientError as any)?.response?.data || (recipientError as any)?.message,
-                });
-                recipient = await createRecipient("057");
-            }
-
-            const transfer = await paystackService.initiateTransfer({
-                amount: Math.round(amount * 100), // kobo
-                recipient: recipient.recipient_code,
-                reason: `Wallet withdrawal - ${reference}`,
-                reference,
+            const payout = await fincraService.createPayout({
+                customerReference: reference,
+                sourceCurrency: "NGN",
+                destinationCurrency: "NGN",
+                amount,
+                paymentDestination: "bank_account",
+                description: `Wallet withdrawal ${reference}`,
+                beneficiary: {
+                    ...splitName(accountName),
+                    accountHolderName: accountName,
+                    accountNumber,
+                    bankCode,
+                    country: "NG",
+                },
             });
-
             await walletTransactionRepository.update(walletTransaction.id, {
                 status: WALLET_TRANSACTION_STATUS.PROCESSING,
-                paystackTransferCode: transfer.transfer_code,
-                paystackRecipientCode: recipient.recipient_code,
+                paystackTransferCode: payout.reference ? String(payout.reference) : reference,
             });
-        } catch (paystackError: any) {
-            logger.error("Paystack transfer failed, reversing balance", {
-                reference,
-                error: paystackError?.response?.data || paystackError?.message,
-            });
+        } catch (providerError: any) {
+            // A timeout or server error may still have created the payout: ask
+            // Fincra before refunding, so a payout that went out isn't refunded too
+            if (!definitelyRejected(providerError)) {
+                const existing = await fincraService.getPayout(reference).catch(() => undefined);
+                if (existing !== null) {
+                    logger.warn("Fincra payout outcome unclear; left processing for the sweeper", { reference, error: providerError?.message });
+                    await walletTransactionRepository.update(walletTransaction.id, {
+                        status: WALLET_TRANSACTION_STATUS.PROCESSING,
+                        ...(existing?.reference ? { paystackTransferCode: String(existing.reference) } : {}),
+                    });
+                    return walletTransaction;
+                }
+            }
 
+            logger.error("Fincra payout failed, reversing balance", { reference, error: providerError?.message, fincra: providerError?.fincra });
             try {
                 await withTransaction(async (tx) => {
                     await walletRepository.credit(wallet.id, amount, tx);
                     await ledgerService.post({
                         legs: [
-                            { accountCode: SYSTEM_ACCOUNT_CODES.PAYSTACK_TRANSFER_INFLIGHT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount },
+                            { accountCode: NGN_PAYOUT_INFLIGHT, direction: JOURNAL_DIRECTION.DEBIT, amount },
                             { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount },
                         ],
                         source: JOURNAL_SOURCE.REVERSAL,
                         reference,
-                        description: `Reversal — Paystack transfer initiation failed`,
+                        description: `Reversal — payout initiation failed`,
                         metadata: { reverses: initTxGroupId },
                         tx,
                     });
@@ -510,25 +584,25 @@ class WalletService {
                         walletTransaction.id,
                         {
                             status: WALLET_TRANSACTION_STATUS.FAILED,
-                            failureReason: withoutProviderName(paystackError?.response?.data?.message, "Transfer initiation failed"),
+                            failureReason: withoutProviderName(providerError?.message, "Transfer initiation failed"),
                         },
                         tx
                     );
                 });
             } catch (reverseError) {
-                logger.error("Reversal of failed Paystack initiation also failed", { reference, error: (reverseError as any)?.message });
+                logger.error("Reversal of failed payout initiation also failed", { reference, error: (reverseError as any)?.message });
                 throw reverseError;
             }
 
-            const providerMessage: string = paystackError?.response?.data?.message || "";
-            if (/resolve account|invalid account|account number/i.test(providerMessage)) {
+            const providerMessage: string = providerError?.message || "";
+            if (/resolve|invalid account|account number|beneficiary|bank code/i.test(providerMessage)) {
                 throw errorResponseMessage.createError(
                     400,
                     "The bank couldn't confirm this account. Check the account number and bank, then try again. Your balance has not been charged.",
                     ErrorSeverity.MEDIUM
                 );
             }
-            throw errorResponseMessage.createError(500, providerMessage || "Failed to initiate transfer with payment provider", ErrorSeverity.HIGH);
+            throw errorResponseMessage.createError(500, "We couldn't send this withdrawal right now. Your balance has not been charged. Please try again shortly.", ErrorSeverity.HIGH);
         }
 
         logger.info("Withdrawal initiated", { walletId: wallet.id, amount, reference });
@@ -555,7 +629,7 @@ class WalletService {
     }
 
     /**
-     * Process successful withdrawal (from Paystack webhook: transfer.success).
+     * Process a successful withdrawal (Fincra payout.successful, or a status check).
      * Settles the in-flight balance against Paystack cash. Idempotent: the
      * wallet transaction is claimed in the same database transaction, so a
      * webhook and a status poll can't both settle it.
@@ -582,16 +656,16 @@ class WalletService {
                 );
                 if (!claimed) return false;
 
-                // Both are assets: in-flight goes down, cash at Paystack goes down (money left Paystack).
+                // Both are assets: in-flight goes down, cash at Fincra goes down (money left Fincra).
                 await ledgerService.post({
                     legs: [
-                        { accountCode: SYSTEM_ACCOUNT_CODES.PAYSTACK_TRANSFER_INFLIGHT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: claimed.amount },
-                        { accountCode: SYSTEM_ACCOUNT_CODES.CASH_PAYSTACK_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: claimed.amount },
+                        { accountCode: NGN_PAYOUT_INFLIGHT, direction: JOURNAL_DIRECTION.DEBIT, amount: claimed.amount },
+                        { accountCode: NGN_CASH, direction: JOURNAL_DIRECTION.CREDIT, amount: claimed.amount },
                     ],
                     source: JOURNAL_SOURCE.WITHDRAWAL,
                     reference: claimed.reference,
-                    description: `Withdrawal settled at Paystack (${reference})`,
-                    externalRef: { provider: WEBHOOK_PROVIDER.PAYSTACK, id: transferCode || reference },
+                    description: `Withdrawal paid out by Fincra (${reference})`,
+                    externalRef: { provider: FINCRA, id: transferCode || reference },
                     tx,
                 });
 
@@ -630,7 +704,7 @@ class WalletService {
     }
 
     /**
-     * Process failed withdrawal (Paystack webhook: transfer.failed / transfer.reversed).
+     * Process a failed withdrawal (Fincra payout.failed, or a status check).
      * Reverses the balance debit. Idempotent in the same way as success.
      */
     async processWithdrawalFailure(transferCode: string, reference: string, reason?: string): Promise<void> {
@@ -664,13 +738,13 @@ class WalletService {
 
                 await ledgerService.post({
                     legs: [
-                        { accountCode: SYSTEM_ACCOUNT_CODES.PAYSTACK_TRANSFER_INFLIGHT_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: claimed.amount },
+                        { accountCode: NGN_PAYOUT_INFLIGHT, direction: JOURNAL_DIRECTION.DEBIT, amount: claimed.amount },
                         { accountCode: userWalletAccountCode(claimed.user, wallet.currency), direction: JOURNAL_DIRECTION.CREDIT, amount: claimed.amount },
                     ],
                     source: JOURNAL_SOURCE.REVERSAL,
                     reference: claimed.reference,
                     description: `Reversal — withdrawal ${claimed.reference} failed (${reason || "no reason given"})`,
-                    externalRef: { provider: WEBHOOK_PROVIDER.PAYSTACK, id: transferCode || claimed.reference },
+                    externalRef: { provider: FINCRA, id: transferCode || claimed.reference },
                     metadata: { reverses: claimed.reference, reason },
                     tx,
                 });
@@ -726,15 +800,12 @@ class WalletService {
     // ===================== TRANSFER VERIFICATION (Polling fallback) =====================
 
     /**
-     * Verify a processing withdrawal directly with Paystack — the fallback for
-     * when webhooks don't arrive. Called by the frontend and the sweeper.
+     * Check a processing withdrawal with Fincra — the fallback for when the
+     * webhook doesn't arrive. Called by the frontend and the sweeper.
      */
     async verifyAndUpdateTransfer(userId: string, transactionId: string): Promise<any> {
         const walletTx = await walletTransactionRepository.findOwned(transactionId, userId, WALLET_TRANSACTION_TYPE.WITHDRAWAL as "withdrawal");
-
-        if (!walletTx) {
-            throw errorResponseMessage.resourceNotFound("Transaction");
-        }
+        if (!walletTx) throw errorResponseMessage.resourceNotFound("Transaction");
 
         if (
             walletTx.status === WALLET_TRANSACTION_STATUS.SUCCESSFUL ||
@@ -744,39 +815,38 @@ class WalletService {
             return { transaction: walletTx, message: `Transaction already ${walletTx.status}` };
         }
 
-        // No transfer code: the Paystack call never succeeded — mark as failed and refund
-        if (!walletTx.paystackTransferCode) {
-            logger.warn("Transfer verification: no transfer code, marking as failed", { transactionId });
+        let payout: any;
+        try {
+            payout = await fincraService.getPayout(walletTx.reference);
+        } catch (error: any) {
+            logger.error("Transfer verification API call failed", { transactionId, error: error?.message });
+            throw errorResponseMessage.createError(500, "Unable to verify transfer status with payment provider. Please try again later.", ErrorSeverity.MEDIUM);
+        }
+
+        // Fincra has no payout with our reference: it was never created. Refund
+        // once it's clearly not just slow to appear.
+        if (!payout) {
+            const ageMs = Date.now() - new Date(walletTx.createdAt).getTime();
+            if (ageMs < 10 * 60 * 1000) return { transaction: walletTx, message: "Transfer is still being set up" };
+            logger.warn("Transfer verification: Fincra has no such payout, marking as failed", { transactionId });
             await this.processWithdrawalFailure("", walletTx.reference, "Transfer was never initiated with payment provider");
             const updated = await walletTransactionRepository.findById(transactionId);
             return { transaction: updated, message: "Transfer failed — balance has been refunded" };
         }
 
-        try {
-            const transfer = await paystackService.verifyTransfer(walletTx.paystackTransferCode);
-            logger.info("Transfer verification result", { reference: walletTx.reference, paystackStatus: transfer.status });
-
-            if (transfer.status === "success") {
-                await this.processWithdrawalSuccess(walletTx.paystackTransferCode, walletTx.reference);
-                const updated = await walletTransactionRepository.findById(transactionId);
-                return { transaction: updated, message: "Withdrawal completed successfully" };
-            } else if (transfer.status === "failed" || transfer.status === "reversed") {
-                await this.processWithdrawalFailure(walletTx.paystackTransferCode, walletTx.reference, transfer.reason || `Transfer ${transfer.status}`);
-                const updated = await walletTransactionRepository.findById(transactionId);
-                return { transaction: updated, message: `Transfer ${transfer.status} — balance has been refunded` };
-            }
-            return { transaction: walletTx, message: `Transfer is still ${transfer.status} on payment provider` };
-        } catch (error: any) {
-            logger.error("Transfer verification API call failed", {
-                transactionId,
-                error: error?.response?.data || error?.message,
-            });
-            throw errorResponseMessage.createError(
-                500,
-                "Unable to verify transfer status with payment provider. Please try again later.",
-                ErrorSeverity.MEDIUM
-            );
+        const status = String(payout.status || "").toLowerCase();
+        logger.info("Transfer verification result", { reference: walletTx.reference, fincraStatus: status });
+        if (status === "successful" || status === "success") {
+            await this.processWithdrawalSuccess(String(payout.reference || ""), walletTx.reference);
+            const updated = await walletTransactionRepository.findById(transactionId);
+            return { transaction: updated, message: "Withdrawal completed successfully" };
         }
+        if (status === "failed" || status === "reversed" || status === "cancelled") {
+            await this.processWithdrawalFailure(String(payout.reference || ""), walletTx.reference, payout.reason || payout.message || `Transfer ${status}`);
+            const updated = await walletTransactionRepository.findById(transactionId);
+            return { transaction: updated, message: `Transfer ${status} — balance has been refunded` };
+        }
+        return { transaction: walletTx, message: `Transfer is still ${status || "processing"} with the payment provider` };
     }
 
     // ===================== WALLET DEBIT/CREDIT (for other services) =====================
@@ -827,35 +897,23 @@ class WalletService {
         return walletTransactionRepository.paginateForUser({ user: userId, type: options.type, wallet }, request);
     }
 
-    /** List Nigerian banks (proxied from Paystack) */
+    /** Nigerian banks Fincra pays out to, in the shape the app has always used */
     async listBanks() {
-        const banks = await paystackService.listBanks("NGN");
-
-        // In test mode, Paystack's bank list doesn't include the test bank
-        // but it's required for test transfers — inject it at the top
-        const isTestMode = config.PAYSTACK_SECRET_KEY?.startsWith("sk_test_");
-        if (isTestMode) {
-            const hasTestBank = banks.some((b: any) => b.code === "001");
-            if (!hasTestBank) {
-                banks.unshift({
-                    id: 0,
-                    name: "Test Bank",
-                    slug: "test-bank",
-                    code: "001",
-                    active: true,
-                    country: "Nigeria",
-                    currency: "NGN",
-                    type: "nuban",
-                });
-            }
-        }
-
-        return banks;
+        const banks = await fincraService.listBanks("NG", "NGN", "bank_account");
+        return banks.map((b) => ({ name: b.name, code: b.code, slug: b.code, active: true, country: "Nigeria", currency: "NGN", type: "nuban" }));
     }
 
-    /** Resolve a bank account number */
+    /** The name on a Nigerian bank account */
     async resolveAccount(accountNumber: string, bankCode: string) {
-        return paystackService.resolveAccountNumber(accountNumber, bankCode);
+        try {
+            const account = await fincraService.resolveAccount({ currency: "NGN", accountNumber, bankCode });
+            return { account_name: account.accountName, account_number: account.accountNumber };
+        } catch (error) {
+            if (error instanceof FincraError && error.status < 500) {
+                throw errorResponseMessage.createError(404, "We couldn't find that account. Check the number and bank.", ErrorSeverity.LOW);
+            }
+            throw error;
+        }
     }
 }
 

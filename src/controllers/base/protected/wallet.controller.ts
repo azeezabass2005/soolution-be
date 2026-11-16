@@ -57,21 +57,25 @@ class WalletController extends BaseController {
             const user = res.locals.user;
             let wallet = await this.walletService.getOrCreateWallet(user.id);
 
-            // Lazy DVA provisioning — non-blocking: if it fails, still return the wallet
+            // Lazy virtual account (Fincra) — non-blocking: if it fails, still return the wallet.
+            // dvaSetup tells the app why there's no account number yet.
+            let dvaSetup: "ready" | "pending" | "identity_required" | "unavailable" = "ready";
             if (!wallet.isDVAProvisioned) {
                 try {
                     wallet = await this.walletService.provisionDVA(wallet.id, user);
+                    if (!wallet.isDVAProvisioned) dvaSetup = "pending";
                 } catch (dvaError: any) {
-                    logger.error("DVA provisioning failed — returning wallet without DVA", {
-                        walletId: wallet.id,
-                        error: dvaError?.message || dvaError,
-                        response: dvaError?.response?.data,
-                    });
-                    // wallet is still the un-provisioned version — frontend will show "being set up"
+                    dvaSetup = dvaError?.details?.code === "IDENTITY_REQUIRED" ? "identity_required" : "unavailable";
+                    if (dvaSetup === "unavailable") {
+                        logger.warn("Virtual account not ready — returning wallet without it", {
+                            walletId: wallet.id,
+                            error: dvaError?.message || dvaError,
+                        });
+                    }
                 }
             }
 
-            return this.sendSuccess(res, { wallet });
+            return this.sendSuccess(res, { wallet: { ...wallet, dvaSetup } });
         } catch (error) {
             return next(error);
         }
@@ -239,22 +243,13 @@ class WalletController extends BaseController {
             wallet = await this.walletService.provisionDVA(wallet.id, user);
             return this.sendSuccess(res, { wallet, message: "Account set up successfully" });
         } catch (error: any) {
-            logger.error("DVA provisioning failed", {
-                error: error?.message || error,
-                response: error?.response?.data,
+            logger.error("Virtual account provisioning failed", { error: error?.message || error, status: error?.status });
+            // Our own errors (e.g. identity not verified) pass through as they are
+            if (error?.response_code) return next(error);
+            res.status(503).json({
+                success: false,
+                message: "We couldn't set up your account number right now. Please try again shortly.",
             });
-
-            // Surface a friendly message for known Paystack errors
-            const paystackMsg = error?.response?.data?.message;
-            if (paystackMsg?.includes("not available for your business")) {
-                res.status(503).json({
-                    success: false,
-                    message: "Dedicated account feature is not yet enabled on our payment provider. Please contact support.",
-                });
-                return;
-            }
-
-            return next(error);
         }
     }
 }

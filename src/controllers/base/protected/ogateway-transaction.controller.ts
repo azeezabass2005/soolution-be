@@ -1,6 +1,8 @@
 import BaseController from "../base-controller";
 import TransactionService from "../../../services/transaction.service";
-import ogatewayService from "../../../services/ogateway.service";
+import ghsRateService from "../../../services/ghs-rate.service";
+import fincraService, { GHS_MOMO_NETWORKS } from "../../../services/fincra.service";
+import config from "../../../config/env.config";
 import { Request, Response, NextFunction } from "express";
 import { isUuid } from "../../../utils/id.utils";
 import {
@@ -8,13 +10,14 @@ import {
     validateCreateOGatewayCollection,
 } from "../../../validators/z-ogateway-transaction";
 import TransactionRateLimitMiddleware from "../../../middlewares/transaction-rate-limit.middleware";
-import { DETAIL_TYPE, OGATEWAY_NETWORKS, TRANSACTION_STATUS } from "../../../common/constant";
+import { DETAIL_TYPE, TRANSACTION_STATUS } from "../../../common/constant";
 import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 
 import transactionLimitService from "../../../services/transaction-limit.service";
 /**
- * OGateway routes — Ghana instant send + receive only.
- * YellowCard continues to handle every other currency.
+ * GHS routes: send to Ghana mobile money or banks, and receive GHS through a
+ * payment link, both through Fincra. Mounted at /protected/ogateway (the path
+ * the app already calls) and /protected/ghs.
  */
 class OGatewayTransactionController extends BaseController {
     private transactionService: TransactionService;
@@ -57,7 +60,7 @@ class OGatewayTransactionController extends BaseController {
             const user = res.locals.user;
             const idempotencyKey =
                 req.body.idempotencyKey || (req.headers["idempotency-key"] as string);
-            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createOGatewayPayoutTransaction(
+            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createGhsPayoutTransaction(
                 { ...req.body, idempotencyKey },
                 user.id,
             ));
@@ -79,15 +82,15 @@ class OGatewayTransactionController extends BaseController {
             const user = res.locals.user;
             const idempotencyKey =
                 req.body.idempotencyKey || (req.headers["idempotency-key"] as string);
-            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createOGatewayCollectionTransaction(
-                { ...req.body, idempotencyKey },
+            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createGhsCollectionTransaction(
+                { ...req.body, idempotencyKey, redirectUrl: `${config.FRONTEND_URL}/dashboard/user/payments` },
                 user.id,
             ));
             return this.sendSuccess(
                 res,
                 {
                     transaction,
-                    message: "Collection request initiated. The sender will receive payment instructions.",
+                    message: "Payment link ready. Share it with the payer to pay by mobile money.",
                 },
                 201,
             );
@@ -123,7 +126,7 @@ class OGatewayTransactionController extends BaseController {
                 ));
             }
 
-            if (transaction.detailType !== DETAIL_TYPE.OGATEWAY) {
+            if (transaction.detailType !== DETAIL_TYPE.FINCRA) {
                 return next(errorResponseMessage.createError(
                     400,
                     "This transaction's status can't be checked here.",
@@ -136,12 +139,12 @@ class OGatewayTransactionController extends BaseController {
                 const detail = transaction.details;
                 return this.sendSuccess(res, {
                     transaction: { ...transaction, details: detail ?? {} },
-                    ogStatus: detail?.ogStatus || transaction.status,
+                    providerStatus: detail?.providerStatus || transaction.status,
                     message: "Transaction is already final.",
                 });
             }
 
-            const result = await this.transactionService.pollOGatewayStatus(transactionId);
+            const result = await this.transactionService.pollGhsStatus(transactionId);
             return this.sendSuccess(res, result);
         } catch (error) {
             return next(error);
@@ -152,7 +155,7 @@ class OGatewayTransactionController extends BaseController {
         try {
             return this.sendSuccess(res, {
                 country: "GH",
-                networks: OGATEWAY_NETWORKS.map((code) => ({ code, name: code })),
+                networks: GHS_MOMO_NETWORKS.map(({ code, name }) => ({ code, name })),
             });
         } catch (error) {
             return next(error);
@@ -160,7 +163,7 @@ class OGatewayTransactionController extends BaseController {
     }
 
     /**
-     * Live OGateway rate quote. Restricted to the GHS pair we actually use
+     * Live GHS rate quote (Fincra plus the platform markup and fee). Restricted to the GHS pair we actually use
      * — guards against the endpoint being abused as a generic FX proxy.
      */
     private async getRates(req: Request, res: Response, next: NextFunction) {
@@ -181,24 +184,20 @@ class OGatewayTransactionController extends BaseController {
                 return next({ response_code: 400, message: "amount must be a positive number" });
             }
 
-            const quote = await ogatewayService.quoteRate(source, destination, amount);
+            const quote = await ghsRateService.quoteRate(source, destination, amount);
             return this.sendSuccess(res, quote);
         } catch (error) {
             return next(error);
         }
     }
 
-    /**
-     * Free-text bank fallback until the full Ghana bank list is pulled in
-     * (see blocker #5 in backend/docs/ogateway-integration-blockers.md).
-     * The frontend treats this as "submit raw code", so an empty list is fine.
-     */
+    /** Ghana banks Fincra pays out to; `code` is what a bank send submits */
     private async getBanks(_req: Request, res: Response, next: NextFunction) {
         try {
+            const banks = await fincraService.listBanks("GH", "GHS", "bank_account");
             return this.sendSuccess(res, {
                 country: "GH",
-                banks: [] as Array<{ code: string; name: string }>,
-                note: "Free-text bank code input until the full Ghana bank list is wired.",
+                banks: banks.map((b) => ({ code: b.code, name: b.name })),
             });
         } catch (error) {
             return next(error);

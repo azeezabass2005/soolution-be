@@ -30,6 +30,7 @@ export const platformSettings = pgTable(
         additionalFeePercent: decimal("additional_fee_percent").notNull().default(0),
         providerFeeOgatewayPercent: decimal("provider_fee_ogateway_percent").notNull().default(1.5),
         providerFeeYellowcardPercent: decimal("provider_fee_yellowcard_percent").notNull().default(0),
+        providerFeeFincraPercent: decimal("provider_fee_fincra_percent").notNull().default(1.5),
         tier1DailyLimitUsd: decimal("tier1_daily_limit_usd").notNull(),
         tier2DailyLimitUsd: decimal("tier2_daily_limit_usd").notNull(),
         updatedBy: uuid("updated_by"),
@@ -41,7 +42,7 @@ export const platformSettings = pgTable(
         check("platform_settings_fee_check", sql`${t.additionalFeePercent} between 0 and 10`),
         check(
             "platform_settings_provider_fee_check",
-            sql`${t.providerFeeOgatewayPercent} between 0 and 10 and ${t.providerFeeYellowcardPercent} between 0 and 10`
+            sql`${t.providerFeeOgatewayPercent} between 0 and 10 and ${t.providerFeeYellowcardPercent} between 0 and 10 and ${t.providerFeeFincraPercent} between 0 and 10`
         ),
         check("platform_settings_limits_check", sql`${t.tier1DailyLimitUsd} >= 0 and ${t.tier2DailyLimitUsd} >= 0`),
     ]

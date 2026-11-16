@@ -7,7 +7,7 @@ import walletRepository from "../../src/repositories/wallet.repository";
 import { withTransaction } from "../../src/db/transaction";
 import ledgerService from "../../src/services/ledger.service";
 import HashService from "../../src/utils/hash.utils";
-import { JOURNAL_DIRECTION, JOURNAL_SOURCE, SYSTEM_ACCOUNT_CODES, userWalletAccountCode } from "../../src/common/constant";
+import { JOURNAL_DIRECTION, JOURNAL_SOURCE, fincraCashCode, userWalletAccountCode } from "../../src/common/constant";
 import type { User } from "../../src/types/entities";
 import type { WalletCurrency } from "../../src/common/wallet.constants";
 
@@ -40,12 +40,12 @@ export async function bootstrapLedger(): Promise<void> {
 
 /**
  * Put money in a user's wallet the way funding does: a balanced posting from
- * Paystack cash plus the wallet's cached balance, in one transaction.
+ * Fincra cash plus the wallet's cached balance, in one transaction.
  */
 export async function fundWallet(userId: string, amount: number, currency: WalletCurrency = "NGN"): Promise<void> {
     const wallet = await new WalletService().getOrCreateWallet(userId, currency);
     // Non-NGN wallets are filled by exchange; for tests, fund them from the FX position
-    const source = currency === "NGN" ? SYSTEM_ACCOUNT_CODES.CASH_PAYSTACK_NGN : `FX_POSITION_${currency}`;
+    const source = currency === "NGN" ? fincraCashCode("NGN") : `FX_POSITION_${currency}`;
     await withTransaction(async (tx) => {
         await ledgerService.post({
             legs: [

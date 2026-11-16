@@ -56,6 +56,8 @@ export const JOURNAL_SOURCE = {
     YC_COLLECT: 'yc_collect',
     OG_SEND: 'og_send',
     OG_COLLECT: 'og_collect',
+    FINCRA_SEND: 'fincra_send',
+    FINCRA_COLLECT: 'fincra_collect',
     FEE: 'fee',
     REVERSAL: 'reversal',
     MANUAL_ATTRIBUTION: 'manual_attribution',
@@ -101,7 +103,16 @@ export const ogCashAccountCode = (currency: string): string => `CASH_OGATEWAY_${
 export const ogPaymentInflightCode = (currency: string): string => `OGATEWAY_PAYMENT_INFLIGHT_${currency}`;
 export const ogCollectionInflightCode = (currency: string): string => `OGATEWAY_COLLECTION_INFLIGHT_${currency}`;
 
+// Fincra accounts. CASH_FINCRA_NGN receives virtual-account deposits and pays
+// NGN withdrawals and NGN→GHS payouts; CASH_FINCRA_GHS holds GHS paid in
+// through payment links (booked at NGN value, like the other GHS rails).
+// Payouts in flight wait for Fincra's webhook.
+export const FINCRA_CURRENCIES = ['NGN', 'GHS'] as const;
+export const fincraCashCode = (currency: string): string => `CASH_FINCRA_${currency}`;
+export const fincraPayoutInflightCode = (currency: string): string => `FINCRA_PAYOUT_INFLIGHT_${currency}`;
+
 export const WEBHOOK_PROVIDER = {
+    FINCRA: 'fincra',
     PAYSTACK: 'paystack',
     YELLOWCARD: 'yellowcard',
     OGATEWAY: 'ogateway',
@@ -189,6 +200,7 @@ export const DETAIL_TYPE = {
     MOBILE_MONEY: 'mobile_money',
     YELLOWCARD: 'yellowcard',
     OGATEWAY: 'ogateway',
+    FINCRA: 'fincra',
 }
 
 export const YELLOWCARD_STATUS = {

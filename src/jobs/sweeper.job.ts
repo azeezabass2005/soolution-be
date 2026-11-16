@@ -8,12 +8,11 @@ import {
     WALLET_TRANSACTION_TYPE,
     WALLET_TRANSACTION_STATUS,
 } from '../common/constant';
-import config from '../config/env.config';
 import logger from '../utils/logger.utils';
 
 const STALE_YC_AFTER_MS = 10 * 60 * 1000; // 10 min
-const STALE_PAYSTACK_AFTER_MS = 15 * 60 * 1000; // 15 min
-const STALE_OG_AFTER_MS = config.OGATEWAY_STALE_AFTER_MINUTES * 60 * 1000;
+const STALE_WITHDRAWAL_AFTER_MS = 15 * 60 * 1000; // 15 min
+const STALE_GHS_AFTER_MS = 15 * 60 * 1000; // 15 min
 const MAX_PER_RUN = 50;
 
 const txService = new TransactionService();
@@ -49,12 +48,12 @@ async function sweepStaleYC(): Promise<{ scanned: number; synced: number }> {
 }
 
 /**
- * Find Paystack withdrawals stuck in PROCESSING and verify the transfer with
- * Paystack. The verifier already syncs status and posts the balanced journal
- * entries (success → settle, failure → reverse).
+ * Find NGN withdrawals stuck in PROCESSING and check the payout with Fincra.
+ * The verifier already syncs status and posts the balanced journal entries
+ * (success → settle, failure → reverse).
  */
-async function sweepStalePaystack(): Promise<{ scanned: number; synced: number }> {
-    const cutoff = new Date(Date.now() - STALE_PAYSTACK_AFTER_MS);
+async function sweepStaleWithdrawals(): Promise<{ scanned: number; synced: number }> {
+    const cutoff = new Date(Date.now() - STALE_WITHDRAWAL_AFTER_MS);
     const stale = await walletTransactionRepository.listStale(
         WALLET_TRANSACTION_TYPE.WITHDRAWAL as 'withdrawal',
         WALLET_TRANSACTION_STATUS.PROCESSING as 'processing',
@@ -68,7 +67,7 @@ async function sweepStalePaystack(): Promise<{ scanned: number; synced: number }
             await walletSvc.verifyAndUpdateTransfer(tx.user, tx.id);
             synced += 1;
         } catch (error) {
-            logger.warn('Sweeper: Paystack verify failed', {
+            logger.warn('Sweeper: withdrawal verify failed', {
                 walletTxId: tx.id,
                 error: error instanceof Error ? error.message : String(error),
             });
@@ -78,14 +77,14 @@ async function sweepStalePaystack(): Promise<{ scanned: number; synced: number }
 }
 
 /**
- * Find OGateway payouts/collections stuck in PROCESSING and ask OGateway
- * for the authoritative status, then sync via the existing webhook
- * handler (so settle/refund/state-machine all reuse one code path).
+ * Find GHS payouts and payment-link payments stuck in PENDING / PROCESSING
+ * and ask Fincra for the status, then sync through the same handlers the
+ * webhook uses (so settle/refund/state-machine share one code path).
  */
-async function sweepStaleOGateway(): Promise<{ scanned: number; synced: number }> {
-    const cutoff = new Date(Date.now() - STALE_OG_AFTER_MS);
+async function sweepStaleGhs(): Promise<{ scanned: number; synced: number }> {
+    const cutoff = new Date(Date.now() - STALE_GHS_AFTER_MS);
     const stale = await transactionRepository.listStale(
-        DETAIL_TYPE.OGATEWAY as 'ogateway',
+        DETAIL_TYPE.FINCRA as 'fincra',
         [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] as ('pending' | 'processing')[],
         cutoff,
         MAX_PER_RUN
@@ -94,10 +93,10 @@ async function sweepStaleOGateway(): Promise<{ scanned: number; synced: number }
     let synced = 0;
     for (const tx of stale) {
         try {
-            await txService.pollOGatewayStatus(tx.id);
+            await txService.pollGhsStatus(tx.id);
             synced += 1;
         } catch (error) {
-            logger.warn('Sweeper: OGateway poll failed', {
+            logger.warn('Sweeper: GHS poll failed', {
                 transactionId: tx.id,
                 error: error instanceof Error ? error.message : String(error),
             });
@@ -107,10 +106,10 @@ async function sweepStaleOGateway(): Promise<{ scanned: number; synced: number }
 }
 
 export async function runStaleTransactionSweep(): Promise<void> {
-    const [yc, paystack, og] = await Promise.all([
+    const [yc, withdrawals, ghs] = await Promise.all([
         sweepStaleYC(),
-        sweepStalePaystack(),
-        sweepStaleOGateway(),
+        sweepStaleWithdrawals(),
+        sweepStaleGhs(),
     ]);
-    logger.info('Sweep complete', { yc, paystack, og });
+    logger.info('Sweep complete', { yc, withdrawals, ghs });
 }

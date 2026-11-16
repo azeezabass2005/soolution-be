@@ -1,9 +1,9 @@
 import exchangeRateRepository from "../repositories/exchange-rate.repository";
 import yellowCardService from "./yellowcard.service";
-import ogatewayService from "./ogateway.service";
+import ghsRateService from "./ghs-rate.service";
 import platformSettingsService from "./platform-settings.service";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
-import { OG_CURRENCIES, YC_CURRENCIES } from "../common/constant";
+import { YC_CURRENCIES } from "../common/constant";
 import { BASE_WALLET_CURRENCY } from "../common/wallet.constants";
 import logger from "../utils/logger.utils";
 
@@ -14,13 +14,13 @@ export interface FxRate {
     rate: number;
     /** NGN per 1 unit before the markup */
     providerRate: number;
-    source: "yellowcard" | "ogateway" | "admin";
+    source: "yellowcard" | "fincra" | "admin";
 }
 
 /**
  * Prices wallet exchanges against NGN with the same sources the send flows
  * use, so converting then sending costs the same as sending directly:
- *   - GHS: OGateway (as instant GHS sends)
+ *   - GHS: Fincra (as GHS sends and payment links)
  *   - other YellowCard currencies: YellowCard + the platform markup
  *   - the rest (RMB): the admin rate table
  * "buy" is NGN → currency (the user pays more NGN per unit), "sell" is
@@ -30,11 +30,11 @@ class FxRateService {
     async ngnPerUnit(currency: string, side: FxSide): Promise<FxRate> {
         if (currency === BASE_WALLET_CURRENCY) return { rate: 1, providerRate: 1, source: "admin" };
         try {
-            if ((OG_CURRENCIES as readonly string[]).includes(currency)) {
+            if (currency === "GHS") {
                 const { providerRate, userRate } = side === "buy"
-                    ? await ogatewayService.getUserFacingRate(BASE_WALLET_CURRENCY, currency, "send")
-                    : await ogatewayService.getUserFacingRate(currency, BASE_WALLET_CURRENCY, "receive");
-                return { rate: userRate, providerRate, source: "ogateway" };
+                    ? await ghsRateService.getUserFacingRate(BASE_WALLET_CURRENCY, currency, "send")
+                    : await ghsRateService.getUserFacingRate(currency, BASE_WALLET_CURRENCY, "receive");
+                return { rate: userRate, providerRate, source: "fincra" };
             }
             if ((YC_CURRENCIES as readonly string[]).includes(currency)) {
                 const providerRate = side === "buy"

@@ -22,15 +22,6 @@ vi.mock("../src/services/yellowcard.service", () => ({
         lookupCollectionBySequenceId: vi.fn(),
     },
 }));
-vi.mock("../src/services/ogateway.service", () => ({
-    default: {
-        getUserFacingRate: vi.fn(async () => ({ providerRate: 100, userRate: 100 })),
-        payoutMobileMoney: vi.fn(),
-        payoutBank: vi.fn(),
-        collectMobileMoney: vi.fn(),
-        getTransactionStatus: vi.fn(),
-    },
-}));
 vi.mock("../src/utils/notification.utils", () => ({
     default: class {
         emailService = { sendNotificationEmail: vi.fn(), sendWelcomeEmail: vi.fn(), sendPasswordResetEmail: vi.fn() };
@@ -41,7 +32,6 @@ vi.mock("../src/utils/notification.utils", () => ({
 }));
 
 import yellowCardService from "../src/services/yellowcard.service";
-import ogatewayService from "../src/services/ogateway.service";
 import { resetTestDatabase, startTestDatabase, stopTestDatabase } from "./helpers/db";
 import { TEST_PIN, accountBalance, bootstrapLedger, createUser, fundWallet, walletBalance } from "./helpers/fixtures";
 import TransactionService from "../src/services/transaction.service";
@@ -51,11 +41,10 @@ import exchangeRateRepository from "../src/repositories/exchange-rate.repository
 import transactionRepository from "../src/repositories/transaction.repository";
 import walletTransactionRepository from "../src/repositories/wallet-transaction.repository";
 import reconciliationService from "../src/services/reconciliation.service";
-import { SYSTEM_ACCOUNT_CODES, ogPaymentInflightCode } from "../src/common/constant";
+import { SYSTEM_ACCOUNT_CODES } from "../src/common/constant";
 import { manualPayoutPendingCode } from "../src/common/wallet.constants";
 
 const yc = yellowCardService as unknown as Record<string, ReturnType<typeof vi.fn>>;
-const og = ogatewayService as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const transactionService = new TransactionService();
 
 const expectLedgerClean = async () => {
@@ -184,51 +173,7 @@ describe("TransactionService", () => {
         });
     });
 
-    describe("OGateway", () => {
-        it("settles a payout once even if the webhook and the sweeper race", async () => {
-            const user = await createUser();
-            await fundWallet(user.id, 100_000);
-            og.payoutMobileMoney.mockResolvedValue([{ id: "og-1", status: "PENDING" }]);
-
-            const created: any = await transactionService.createOGatewayPayoutTransaction(
-                {
-                    amount: 100, // GHS
-                    fromCurrency: "NGN",
-                    toCurrency: "GHS",
-                    destination: { accountType: "momo", accountName: "Kofi", accountNumber: "0240000000", network: "MTN" },
-                    pin: TEST_PIN,
-                },
-                user.id
-            );
-            // 100 GHS × 100 = ₦10,000 + 1.5% OGateway fee
-            expect(await walletBalance(user.id)).toBe(100_000 - 10_150);
-            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(150);
-
-            const webhook = { reference_business: created.reference, id: "og-1", status: "COMPLETED" };
-            await Promise.all([transactionService.handleOGatewayWebhook(webhook), transactionService.handleOGatewayWebhook(webhook)]);
-
-            expect((await transactionRepository.findById(created.id))?.status).toBe("completed");
-            expect(await accountBalance(ogPaymentInflightCode("GHS"))).toBe(0);
-            const walletTx = await walletTransactionRepository.findByPaystackReference(created.reference, "transfer");
-            expect(walletTx?.status).toBe("successful");
-            await expectLedgerClean();
-        });
-
-        it("credits a collection once", async () => {
-            const user = await createUser();
-            og.collectMobileMoney.mockResolvedValue({ id: "og-c1", status: "PENDING" });
-            const created: any = await transactionService.createOGatewayCollectionTransaction(
-                { amount: 100, fromCurrency: "GHS", toCurrency: "NGN", sender: { accountName: "Ama", accountNumber: "0240000001", network: "MTN" } },
-                user.id
-            );
-            const webhook = { reference_business: created.reference, id: "og-c1", status: "COMPLETED" };
-            await Promise.all([transactionService.handleOGatewayWebhook(webhook), transactionService.handleOGatewayWebhook(webhook)]);
-
-            // ₦10,000 gross less the 1.5% fee
-            expect(await walletBalance(user.id)).toBe(9850);
-            await expectLedgerClean();
-        });
-    });
+    // GHS sends and payment-link receives (Fincra) are covered in ghs.test.ts
 
     describe("manual payouts paid from a wallet", () => {
         it("holds the money, and refunds once when an admin rejects it", async () => {

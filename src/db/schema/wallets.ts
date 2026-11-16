@@ -25,12 +25,18 @@ export const wallets = pgTable(
         dvaBankId: integer("dva_bank_id"),
         dvaId: bigint("dva_id", { mode: "number" }),
         isDVAProvisioned: boolean("is_dva_provisioned").notNull().default(false),
+        // Who issued the virtual account ('fincra'), its id there, and its
+        // state while Fincra reviews it (pending → approved | declined)
+        dvaProvider: text("dva_provider"),
+        dvaExternalId: text("dva_external_id"),
+        dvaStatus: text("dva_status"),
         ...timestamps(),
     },
     (t) => [
         uniqueIndex("wallets_user_currency_key").on(t.user, t.currency),
         index("wallets_paystack_customer_idx").on(t.paystackCustomerCode),
         index("wallets_dva_account_idx").on(t.dvaAccountNumber),
+        uniqueIndex("wallets_dva_external_key").on(t.dvaProvider, t.dvaExternalId).where(sql`${t.dvaExternalId} is not null`),
         index("wallets_user_created_idx").on(t.user, t.createdAt),
         // Every debit is guarded in SQL; this is the last line of defence
         check("wallets_balance_non_negative", sql`${t.balance} >= 0`),

@@ -9,7 +9,7 @@ type SettingsRow = typeof platformSettings.$inferSelect;
 export interface PlatformSettingsUpdate {
     rateMarkupPercent?: number;
     additionalFeePercent?: number;
-    providerBaseFeePercent?: { ogateway: number; yellowcard: number };
+    providerBaseFeePercent?: { ogateway: number; yellowcard: number; fincra: number };
     tierDailyLimitUsd?: { tier1: number; tier2: number };
     updatedBy?: string;
 }
@@ -20,7 +20,7 @@ function toSettings(row: SettingsRow): PlatformSettings {
         kind: "singleton",
         rateMarkupPercent: row.rateMarkupPercent,
         additionalFeePercent: row.additionalFeePercent,
-        providerBaseFeePercent: { ogateway: row.providerFeeOgatewayPercent, yellowcard: row.providerFeeYellowcardPercent },
+        providerBaseFeePercent: { ogateway: row.providerFeeOgatewayPercent, yellowcard: row.providerFeeYellowcardPercent, fincra: row.providerFeeFincraPercent },
         tierDailyLimitUsd: { tier1: row.tier1DailyLimitUsd, tier2: row.tier2DailyLimitUsd },
         ...(row.updatedBy ? { updatedBy: row.updatedBy } : {}),
         createdAt: row.createdAt,
@@ -50,6 +50,7 @@ class PlatformSettingsRepository {
         if (patch.providerBaseFeePercent) {
             values.providerFeeOgatewayPercent = patch.providerBaseFeePercent.ogateway;
             values.providerFeeYellowcardPercent = patch.providerBaseFeePercent.yellowcard;
+            values.providerFeeFincraPercent = patch.providerBaseFeePercent.fincra;
         }
         if (patch.tierDailyLimitUsd) {
             values.tier1DailyLimitUsd = patch.tierDailyLimitUsd.tier1;

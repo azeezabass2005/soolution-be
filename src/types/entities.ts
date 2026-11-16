@@ -145,7 +145,7 @@ export interface PlatformSettings {
     /** % the platform charges on top of the provider's base fee */
     additionalFeePercent: number;
     /** The rails' own fees; editable to track provider changes */
-    providerBaseFeePercent: { ogateway: number; yellowcard: number };
+    providerBaseFeePercent: { ogateway: number; yellowcard: number; fincra: number };
     updatedBy?: string;
     createdAt: Date;
     updatedAt: Date;

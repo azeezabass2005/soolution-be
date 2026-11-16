@@ -21,7 +21,8 @@ import IdempotencyService from "./idempotency.service";
 import AuditLogService from "./audit-log.service";
 import { validateTransactionAmount, getTransactionLimits } from "../config/transaction-limits.config";
 import yellowCardService, { YellowCardChannelType, YellowCardCountryConfig } from "./yellowcard.service";
-import ogatewayService from "./ogateway.service";
+import fincraService, { FINCRA_CHECKOUT_METHODS, FincraError } from "./fincra.service";
+import ghsRateService from "./ghs-rate.service";
 import transactionLimitService from "./transaction-limit.service";
 import platformSettingsService from "./platform-settings.service";
 import {
@@ -36,9 +37,8 @@ import {
     SYSTEM_ACCOUNT_CODES,
     WEBHOOK_PROVIDER,
     userWalletAccountCode,
-    ogCashAccountCode,
-    ogPaymentInflightCode,
-    ogCollectionInflightCode,
+    fincraCashCode,
+    fincraPayoutInflightCode,
 } from "../common/constant";
 import WalletService from "./wallet.service";
 import WalletTransactionService from "./wallet-transaction.service";
@@ -85,6 +85,14 @@ const assertYellowCardRoute = (config: YellowCardCountryConfig, flow: "send" | "
  * A provider rejection in words a customer can act on. The provider's own
  * message stays in the logs; never send it to the client (it can name the provider).
  */
+/** "Ama Mensah Owusu" → { firstName: "Ama", lastName: "Mensah Owusu" } */
+const splitFullName = (full: string) => {
+    const parts = (full || "").trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return { firstName: "Account", lastName: "Holder" };
+    if (parts.length === 1) return { firstName: parts[0], lastName: parts[0] };
+    return { firstName: parts[0], lastName: parts.slice(1).join(" ") };
+};
+
 const providerFailureMessage = (providerMessage: string, flow: "send" | "receive"): string => {
     const m = (providerMessage || "").toLowerCase();
     if (/channel|not supported|unsupported/.test(m)) {
@@ -1765,59 +1773,46 @@ class TransactionService {
     };
 
     // ============================================================================
-    // OGateway — Ghana instant send + receive
+    // GHS — Fincra: payouts to Ghana mobile money / banks, and payment-link checkouts
     // ============================================================================
 
-    private generateOGatewaySequenceId = () => {
+    private generateGhsReference = () => {
         const randomPart = crypto.randomUUID().replace(/-/g, "").slice(0, 22).toUpperCase();
         return `SP_TX_${randomPart}`;
     };
 
-    /**
-     * Refund a failed OGateway payout to the wallet that paid for it (see
-     * refundWallet). `feeAmount` only matters for rows created before
-     * multi-currency wallets.
-     */
-    private refundWalletFromOGateway = async (
-        _walletId: any,
-        _userId: string,
-        _ngnAmount: number,
-        _ghsAmount: number,
-        walletTransactionId: any,
-        originalRef: string,
-        reason: string,
-        feeAmount: number = 0,
-    ) => {
+    /** Refund a failed GHS payout to the wallet that paid for it. Idempotent. */
+    private refundGhsPayout = async (walletTransactionId: string, originalRef: string, reason: string) => {
         try {
             await walletSendService.refund(String(walletTransactionId), reason, {
-                feeAmount,
-                providerAccountCode: ogPaymentInflightCode('GHS'),
-                externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: originalRef },
+                providerAccountCode: fincraPayoutInflightCode('GHS'),
+                externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: originalRef },
             });
         } catch (refundError: any) {
-            logger.error("CRITICAL: OGateway wallet refund failed", { walletTransactionId, originalRef, error: refundError?.message });
+            logger.error("CRITICAL: GHS payout refund failed", { walletTransactionId, originalRef, error: refundError?.message });
         }
     };
 
     /**
-     * Send NGN → GHS via OGateway (instant payout to GHS MoMo or bank).
-     * Debits user's NGN wallet at the locked rate, posts journal entries,
-     * dispatches the payout to OGateway. Final state lands via the webhook.
+     * Send NGN → GHS: the user's wallet pays the NGN value (at the locked rate)
+     * plus the fee, and Fincra pays the recipient's mobile money or bank
+     * account from the platform's GHS balance at Fincra. The final state
+     * arrives by webhook (payout.successful / payout.failed) or the sweeper.
      */
-    public createOGatewayPayoutTransaction = async (
+    public createGhsPayoutTransaction = async (
         params: {
             amount: number;          // GHS amount the recipient will receive
-            fromAmount?: number;     // NGN debit amount (computed from locked rate)
+            fromAmount?: number;     // ignored: the NGN amount is worked out here
             fromCurrency: 'NGN';
             toCurrency: 'GHS';
             destination: {
                 accountType: 'momo' | 'bank';
                 accountName: string;
                 accountNumber: string;
-                network?: string;    // MTN / VOD / ATM / ORANGE for MoMo
-                bank?: string;       // Ghana bank code for BANK
+                network?: string;    // MTN / VOD / ATM for mobile money
+                bank?: string;       // bank code, SWIFT code or name for a bank
             };
-            senderName?: string;     // appears on the recipient's account; defaults to platform name
+            senderName?: string;
             idempotencyKey?: string;
             pin: string;
             /** Pay from the NGN wallet (default) or the GHS wallet */
@@ -1825,7 +1820,8 @@ class TransactionService {
         },
         userId: string,
     ) => {
-        const { amount, destination, idempotencyKey, pin } = params;
+        const { destination, idempotencyKey, pin } = params;
+        const amount = Math.round(Number(params.amount) * 100) / 100;
         const walletCurrency = walletSendService.resolveWalletCurrency(params.walletCurrency, 'GHS');
 
         if (!amount || amount <= 0) {
@@ -1836,19 +1832,16 @@ class TransactionService {
         }
         await this.pinService.verifyPin(userId, pin);
 
-        // Compute NGN debit server-side from the live OGateway rate. We're
-        // BUYING GHS for the recipient, so we pull the NGN→GHS quote — that's
-        // the side of OGateway's buy/sell spread we'll actually be charged at.
-        // getUserFacingRate applies the platform's markup so what we book
-        // matches what the user was quoted. Client-supplied fromAmount is ignored.
+        const isMomo = destination.accountType !== 'bank';
+        // Where the money goes, checked before anything is charged
+        const beneficiaryTarget = await this.ghsPayoutTarget(destination);
+
         let providerRate: number;
         let userRate: number;
         try {
-            const quoted = await ogatewayService.getUserFacingRate('NGN', 'GHS', 'send');
-            providerRate = quoted.providerRate;
-            userRate = quoted.userRate;
+            ({ providerRate, userRate } = await ghsRateService.getUserFacingRate('NGN', 'GHS', 'send'));
         } catch (err: any) {
-            logger.error("OGateway rate lookup failed during payout", { error: err?.message });
+            logger.error("GHS rate lookup failed during payout", { error: err?.message });
             throw errorResponseMessage.createError(400, "We couldn't get the NGN→GHS exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
         }
         const ngnAmount = Math.round(amount * userRate * 100) / 100;
@@ -1856,12 +1849,10 @@ class TransactionService {
             throw errorResponseMessage.createError(400, "We couldn't work out the NGN amount from the current rate. Please try again.", ErrorSeverity.HIGH);
         }
 
-        // Fee is charged on top of the converted NGN amount so the recipient
-        // still receives the full GHS amount they were promised.
-        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('ogateway', ngnAmount);
+        // The fee goes on top, so the recipient gets the full GHS amount
+        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('fincra', ngnAmount);
         const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
 
-        // Daily tier limit (throws when this would exceed today's limit)
         const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(userId, [
             { amount: totalDebit, currency: 'NGN' },
             { amount, currency: 'GHS' },
@@ -1879,11 +1870,10 @@ class TransactionService {
             if (duplicate) return duplicate;
         }
 
-        const sequenceId = this.generateOGatewaySequenceId();
+        const reference = this.generateGhsReference();
 
-        // Atomic wallet debit + journal posting. The converted amount sits in
-        // OG_PAYMENT_INFLIGHT_GHS (booked in NGN) awaiting OGateway's webhook;
-        // the fee lands in FEES_NGN on initiation.
+        // Wallet debit + journal, atomically. The converted amount waits in
+        // FINCRA_PAYOUT_INFLIGHT_GHS (booked in NGN) until Fincra confirms.
         const { wallet, walletTransaction, walletDebit, walletFee } = await walletSendService.charge({
             userId,
             walletCurrency,
@@ -1892,74 +1882,40 @@ class TransactionService {
             ngnAmount,
             ngnFee: feeAmount,
             feePercent,
-            providerAccountCode: ogPaymentInflightCode('GHS'),
-            source: JOURNAL_SOURCE.OG_SEND,
-            reference: sequenceId,
-            description: `OGateway send — ${amount} GHS to ${destination.accountName}`,
-            externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: sequenceId },
-            metadata: {
-                destinationAmount: amount,
-                destinationCurrency: 'GHS',
-                destination,
-                feeAmount,
-                feePercent,
-                providerFeePercent,
-                markupPercent,
-                providerRate,
-                userRate,
-            },
+            providerAccountCode: fincraPayoutInflightCode('GHS'),
+            source: JOURNAL_SOURCE.FINCRA_SEND,
+            reference,
+            description: `GHS send — ${amount} GHS to ${destination.accountName}`,
+            externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: reference },
+            metadata: { destinationAmount: amount, destinationCurrency: 'GHS', destination, feeAmount, feePercent, providerFeePercent, markupPercent, providerRate, userRate },
             walletTxDescription: `Transfer to ${destination.accountName} (${amount} GHS)`,
         });
-        const walletTxRef = walletTransaction.reference;
 
-        const lockedRate = userRate;
-
-        // Create the local transaction record.
         let transaction: any;
         let transactionDetails: any;
         try {
             transaction = await transactionRepository.create({
                 usdValue: txUsdValue ?? undefined,
                 user: userId,
-                reference: sequenceId,
-                amount: Math.round(amount * 100) / 100,
+                reference,
+                amount,
                 fromCurrency: 'NGN',
                 currency: 'GHS',
-                detailType: DETAIL_TYPE.OGATEWAY,
+                detailType: DETAIL_TYPE.FINCRA,
                 status: TRANSACTION_STATUS.PENDING,
                 initiatedAt: new Date(),
-                lockedRate,
+                lockedRate: userRate,
                 lockedRateFromCurrency: 'NGN',
                 lockedRateToCurrency: 'GHS',
                 lockedRateAt: new Date(),
             });
-        } catch (dbError: any) {
-            logger.error("Failed to create OGateway transaction record, refunding wallet", {
-                error: dbError?.message, sequenceId,
-            });
-            await this.refundWalletFromOGateway(wallet.id, userId, totalDebit, ngnAmount, walletTransaction.id, walletTxRef, "Transaction record creation failed", feeAmount);
-            throw errorResponseMessage.createError(500, "We couldn't create this transaction. Please try again.", ErrorSeverity.CRITICAL);
-        }
-
-        await walletTransactionRepository.update(walletTransaction.id, {
-            paystackReference: sequenceId,
-            transactionId: transaction.id,
-        });
-
-        if (idempotencyKey) {
-            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
-        }
-
-        const isMomo = destination.accountType === 'momo';
-        try {
+            await walletTransactionRepository.update(walletTransaction.id, { paystackReference: reference, transactionId: transaction.id });
+            if (idempotencyKey) await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
             transactionDetails = await transactionDetailRepository.create({
                 transactionId: transaction.id,
-                type: DETAIL_TYPE.OGATEWAY,
-                ogReference: sequenceId,
-                ogChannel: isMomo ? OGATEWAY_CHANNELS.MOMO : OGATEWAY_CHANNELS.BANK,
-                ogNetwork: isMomo ? destination.network : undefined,
-                ogBank: !isMomo ? destination.bank : undefined,
-                ogStatus: OGATEWAY_STATUS.PENDING,
+                type: DETAIL_TYPE.FINCRA,
+                providerReference: reference,
+                providerStatus: 'pending',
                 fromAmount: totalDebit,
                 feeAmount,
                 feePercent,
@@ -1970,147 +1926,135 @@ class TransactionService {
                 markupPercent,
                 accountName: destination.accountName,
                 accountNumber: destination.accountNumber,
+                ...(isMomo
+                    ? { momoName: destination.accountName, momoNumber: destination.accountNumber, momoNetwork: destination.network }
+                    : { bankName: beneficiaryTarget.bankName }),
                 institutionType: isMomo ? 'momo' : 'bank',
                 country: 'GH',
             });
         } catch (dbError: any) {
-            logger.error("Failed to create OGateway transaction detail", { error: dbError?.message });
-            await this.refundWalletFromOGateway(wallet.id, userId, totalDebit, ngnAmount, walletTransaction.id, walletTxRef, "Transaction detail creation failed", feeAmount);
+            logger.error("Failed to record GHS payout, refunding wallet", { error: dbError?.message, reference });
+            if (transaction?.id) await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
+            await this.refundGhsPayout(walletTransaction.id, walletTransaction.reference, "Transaction record creation failed");
             throw errorResponseMessage.createError(500, "We couldn't create this transaction. Please try again.", ErrorSeverity.CRITICAL);
         }
 
-        // Dispatch to OGateway.
-        try {
-            let payoutResponse: any;
-            if (isMomo) {
-                payoutResponse = await ogatewayService.payoutMobileMoney({
-                    reference: sequenceId,
-                    recipient: {
-                        amount,
-                        currency: 'GHS',
-                        network: destination.network!,
-                        accountName: destination.accountName,
-                        accountNumber: destination.accountNumber,
-                    },
-                });
-            } else {
-                payoutResponse = await ogatewayService.payoutBank({
-                    reference: sequenceId,
-                    senderName: params.senderName || 'Solution Pay',
-                    recipient: {
-                        amount,
-                        currency: 'GHS',
-                        bank: destination.bank!,
-                        accountName: destination.accountName,
-                        accountNumber: destination.accountNumber,
-                    },
-                });
-            }
-
-            // OGateway responses for payouts are arrays of one item.
-            const ogTx = Array.isArray(payoutResponse) ? payoutResponse[0] : payoutResponse;
-            const ogStatus = (ogTx?.status || OGATEWAY_STATUS.INITIATED).toLowerCase();
-
-            await transactionDetailRepository.updateByTransactionId(transaction.id, {
-                    ogId: ogTx?.id,
-                    ogStatus,
-                    ogRawPayload: payoutResponse,
-                },
-            );
-
-            // If OGateway returns COMPLETED synchronously, mark complete now;
-            // otherwise stay in PROCESSING and wait for webhook.
-            const finalStatus = ogStatus === OGATEWAY_STATUS.COMPLETED
-                ? TRANSACTION_STATUS.COMPLETED
-                : TRANSACTION_STATUS.PROCESSING;
-            await transactionRepository.update(transaction.id, {
-                status: finalStatus,
-                ...(finalStatus === TRANSACTION_STATUS.COMPLETED ? { completedAt: new Date() } : {}),
-            });
-
-            if (finalStatus === TRANSACTION_STATUS.COMPLETED) {
-                // Sync: post the final ledger leg + clear wallet-transaction pending.
-                await this.postOGatewayPayoutCompletion(sequenceId, ngnAmount);
-                await walletTransactionRepository.update(walletTransaction.id, {
-                    status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
-                });
-                await this.walletService.adjustLedgerBalance(wallet.id, -walletDebit);
-            }
-
-            logger.info("OGateway payout dispatched", {
-                transactionId: transaction.id,
-                sequenceId,
-                ogId: ogTx?.id,
-                ogStatus,
-                finalStatus,
-            });
-
-            return {
-                ...transaction,
-                status: finalStatus,
-                details: {
-                    ...transactionDetails,
-                    ogId: ogTx?.id,
-                    ogStatus,
-                },
-            };
-        } catch (error: any) {
+        const failAndRefund = async (message: string) => {
             await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
-            await transactionDetailRepository.updateByTransactionId(transaction.id, { ogStatus: OGATEWAY_STATUS.FAILED },
-            );
-            await this.refundWalletFromOGateway(wallet.id, userId, totalDebit, ngnAmount, walletTransaction.id, walletTxRef, "Payment failed", feeAmount);
-            const ogError = error?.ogError || error?.response?.data || error?.data;
-            const ogMessage = ogError?.message || ogError?.error || error?.message || "Payout request failed";
-            logger.error("OGateway payout rejected", { transactionId: transaction.id, providerMessage: ogMessage });
-            throw errorResponseMessage.createError(400, `${providerFailureMessage(ogMessage, "send")} Your wallet has not been charged.`, ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
+            await transactionDetailRepository.updateByTransactionId(transaction.id, { providerStatus: 'failed' });
+            await this.refundGhsPayout(walletTransaction.id, walletTransaction.reference, "Payment failed");
+            logger.error("GHS payout rejected", { transactionId: transaction.id, providerMessage: message });
+            throw errorResponseMessage.createError(400, `${providerFailureMessage(message, "send")} Your wallet has not been charged.`, ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
+        };
+
+        try {
+            const payout = await fincraService.createPayout({
+                customerReference: reference,
+                sourceCurrency: 'GHS',
+                destinationCurrency: 'GHS',
+                amount,
+                paymentDestination: isMomo ? 'mobile_money_wallet' : 'bank_account',
+                description: `Payment from ${params.senderName || 'Solution Pay'}`.slice(0, 100),
+                senderName: params.senderName || 'Solution Pay',
+                beneficiary: {
+                    ...splitFullName(destination.accountName),
+                    accountHolderName: destination.accountName,
+                    accountNumber: beneficiaryTarget.accountNumber,
+                    country: 'GH',
+                    ...beneficiaryTarget.codes,
+                },
+            });
+            const status = String(payout.status || 'processing').toLowerCase();
+            await transactionDetailRepository.updateByTransactionId(transaction.id, { providerId: payout.reference ? String(payout.reference) : undefined, providerStatus: status, providerPayload: payout });
+            await this.claimStatus(transaction, TRANSACTION_STATUS.PROCESSING as TransactionStatus);
+            logger.info("GHS payout sent to Fincra", { transactionId: transaction.id, reference, status });
+            if (status === 'successful' || status === 'failed') {
+                await this.handleFincraPayout({ customerReference: reference, status, reference: payout.reference });
+            }
+            const view = await transactionRepository.findViewById(transaction.id);
+            return view ?? { ...transaction, status: TRANSACTION_STATUS.PROCESSING, details: transactionDetails };
+        } catch (error: any) {
+            if (error?.response_code) throw error;
+            if (!(error instanceof FincraError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429)) {
+                // Unclear whether Fincra took it: look before refunding
+                const existing = await fincraService.getPayout(reference).catch(() => undefined);
+                if (existing !== null) {
+                    logger.warn("GHS payout outcome unclear; left processing for the sweeper", { reference, error: error?.message });
+                    await this.claimStatus(transaction, TRANSACTION_STATUS.PROCESSING as TransactionStatus);
+                    const view = await transactionRepository.findViewById(transaction.id);
+                    return view ?? { ...transaction, status: TRANSACTION_STATUS.PROCESSING, details: transactionDetails };
+                }
+            }
+            return failAndRefund(error?.message || "Payout request failed");
         }
     };
 
+    /** Fincra's account number and codes for a Ghana recipient */
+    private ghsPayoutTarget = async (destination: { accountType: 'momo' | 'bank'; accountNumber: string; network?: string; bank?: string }) => {
+        const number = String(destination.accountNumber || '').replace(/\s+/g, '');
+        if (destination.accountType !== 'bank') {
+            // Fincra takes the number in international form without "+": 233241234567
+            let digits = number.replace(/^\+/, '');
+            if (digits.startsWith('233')) digits = digits.slice(3);
+            if (digits.startsWith('0')) digits = digits.slice(1);
+            if (!/^\d{9}$/.test(digits)) {
+                throw errorResponseMessage.createError(400, "Enter a valid Ghana mobile money number", ErrorSeverity.LOW);
+            }
+            let mobileMoneyCode: string;
+            try {
+                mobileMoneyCode = await fincraService.ghsMobileMoneyCode(destination.network || '');
+            } catch (error: any) {
+                throw errorResponseMessage.createError(400, error?.message || "Choose a mobile money network", ErrorSeverity.LOW);
+            }
+            return { accountNumber: `233${digits}`, codes: { mobileMoneyCode }, bankName: undefined as string | undefined };
+        }
+        const wanted = String(destination.bank || '').trim().toUpperCase();
+        if (!wanted) throw errorResponseMessage.createError(400, "Choose the recipient's bank", ErrorSeverity.LOW);
+        const banks = await fincraService.listBanks('GH', 'GHS', 'bank_account');
+        const bank = banks.find((b) => b.code.toUpperCase() === wanted || (b.swiftCode || '').toUpperCase() === wanted || b.name.toUpperCase() === wanted);
+        if (!bank) throw errorResponseMessage.createError(400, "We don't recognise that bank. Choose it from the list.", ErrorSeverity.LOW);
+        return {
+            accountNumber: number,
+            codes: { bankCode: bank.code, ...(bank.swiftCode ? { bankSwiftCode: bank.swiftCode } : {}) },
+            bankName: bank.name,
+        };
+    };
+
     /**
-     * Receive GHS → NGN via OGateway (instant collection from a GHS MoMo sender).
-     * Creates the local transaction in PENDING; the sender approves on their phone
-     * and OGateway fires a webhook on settlement, at which point we credit the
-     * user's NGN wallet (in handleOGatewayWebhook → creditWalletFromOGatewayCollection).
+     * Receive GHS → NGN: a Fincra checkout link the payer opens to pay by
+     * mobile money. Once Fincra confirms the payment, the user's NGN wallet
+     * gets the GHS at the locked rate, less the fee.
      */
-    public createOGatewayCollectionTransaction = async (
+    public createGhsCollectionTransaction = async (
         params: {
-            amount: number;          // GHS amount the sender pays
-            fromAmount?: number;     // NGN equivalent the user receives (locked rate)
+            amount: number;          // GHS the payer pays
+            fromAmount?: number;     // ignored: worked out here
             fromCurrency: 'GHS';
             toCurrency: 'NGN';
-            sender: {
-                accountName: string;
-                accountNumber: string;
-                network: string;
-                email?: string;
-            };
+            sender?: { accountName?: string; accountNumber?: string; network?: string; email?: string };
             idempotencyKey?: string;
-            /** Set when the payer filled in a payment link */
             paymentLinkId?: string;
-            /** The payer's name and email from the payment link form */
             payer?: { name?: string; email?: string };
+            /** Where Fincra sends the payer afterwards */
+            redirectUrl?: string;
         },
         userId: string,
     ) => {
-        const { amount, sender, idempotencyKey, paymentLinkId } = params;
-
+        const { idempotencyKey, paymentLinkId } = params;
+        const amount = Number(params.amount);
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
         }
+        if (!Number.isInteger(amount)) {
+            throw errorResponseMessage.createError(400, "GHS payments are in whole cedis. Enter an amount without pesewas.", ErrorSeverity.LOW);
+        }
 
-        // Compute the NGN credit server-side from the live OGateway rate. We're
-        // SELLING the GHS the sender pays us, so we pull the GHS→NGN quote —
-        // that's what OGateway will actually pay out to us in NGN. getUserFacingRate
-        // applies the platform markup (downward for receives so the user gets
-        // less NGN, platform keeps the spread). Client-supplied fromAmount is ignored.
         let providerRate: number;
         let userRate: number;
         try {
-            const quoted = await ogatewayService.getUserFacingRate('GHS', 'NGN', 'receive');
-            providerRate = quoted.providerRate;
-            userRate = quoted.userRate;
+            ({ providerRate, userRate } = await ghsRateService.getUserFacingRate('GHS', 'NGN', 'receive'));
         } catch (err: any) {
-            logger.error("OGateway rate lookup failed during collection", { error: err?.message });
+            logger.error("GHS rate lookup failed during collection", { error: err?.message });
             throw errorResponseMessage.createError(400, "We couldn't get the GHS→NGN exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
         }
         const grossNgn = Math.round(amount * userRate * 100) / 100;
@@ -2118,14 +2062,13 @@ class TransactionService {
             throw errorResponseMessage.createError(400, "We couldn't work out the NGN amount from the current rate. Please try again.", ErrorSeverity.HIGH);
         }
 
-        // Daily tier limit (throws when this would exceed today's limit)
         const { usdValue: txUsdValue } = await transactionLimitService.assertAllowed(userId, [
             { amount, currency: 'GHS' },
             { amount: grossNgn, currency: 'NGN' },
         ]);
 
-        // Fee is netted out of the credit so the user receives `gross − fee`.
-        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('ogateway', grossNgn);
+        // The fee comes out of the credit: the user receives gross − fee
+        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('fincra', grossNgn);
         const ngnAmount = Math.round((grossNgn - feeAmount) * 100) / 100;
         if (ngnAmount <= 0) {
             throw errorResponseMessage.createError(400, "Fee exceeds the converted amount. Please increase the amount.", ErrorSeverity.MEDIUM);
@@ -2137,150 +2080,113 @@ class TransactionService {
             if (duplicate) return duplicate;
         }
 
-        const sequenceId = this.generateOGatewaySequenceId();
-        const lockedRate = userRate;
+        const owner = await userRepository.findById(userId);
+        const reference = this.generateGhsReference();
+        const payerName = (params.payer?.name || params.sender?.accountName || '').trim() || 'Customer';
+        const payerEmail = params.payer?.email || params.sender?.email || owner?.email;
+        if (!payerEmail) throw errorResponseMessage.payloadIncorrect("Enter the payer's email address");
 
         const transaction = await transactionRepository.create({
             usdValue: txUsdValue ?? undefined,
             user: userId,
-            reference: sequenceId,
-            amount: Math.round(amount * 100) / 100,
+            reference,
+            amount,
             fromCurrency: 'GHS',
             currency: 'NGN',
-            detailType: DETAIL_TYPE.OGATEWAY,
+            detailType: DETAIL_TYPE.FINCRA,
             status: TRANSACTION_STATUS.PENDING,
             initiatedAt: new Date(),
-            lockedRate,
+            lockedRate: userRate,
             lockedRateFromCurrency: 'GHS',
             lockedRateToCurrency: 'NGN',
             lockedRateAt: new Date(),
             ...(paymentLinkId ? { paymentLink: paymentLinkId, payer: params.payer } : {}),
         });
-
-        if (idempotencyKey) {
-            await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
-        }
+        if (idempotencyKey) await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
 
         const transactionDetails = await transactionDetailRepository.create({
             transactionId: transaction.id,
-            type: DETAIL_TYPE.OGATEWAY,
-            ogReference: sequenceId,
-            ogChannel: OGATEWAY_CHANNELS.MOMO,
-            ogNetwork: sender.network,
-            ogStatus: OGATEWAY_STATUS.PENDING,
+            type: DETAIL_TYPE.FINCRA,
+            providerReference: reference,
+            providerStatus: 'pending',
             fromAmount: ngnAmount,
             feeAmount,
             feePercent,
             providerFeePercent,
             markupPercent,
-            momoName: sender.accountName,
-            momoNumber: sender.accountNumber,
-            momoNetwork: sender.network,
+            momoName: params.sender?.accountName || params.payer?.name,
+            momoNumber: params.sender?.accountNumber,
+            momoNetwork: params.sender?.network,
             institutionType: 'momo',
             country: 'GH',
         });
 
         try {
-            const response = await ogatewayService.collectMobileMoney({
-                amount,
+            const checkout = await fincraService.createCheckout({
                 currency: 'GHS',
-                network: sender.network,
-                accountName: sender.accountName,
-                accountNumber: sender.accountNumber,
-                reason: `Collection for user ${userId}`,
-                reference: sequenceId,
-                email: sender.email,
+                amount,
+                customer: { name: payerName, email: payerEmail },
+                paymentMethods: FINCRA_CHECKOUT_METHODS.GHS,
+                feeBearer: 'business',
+                reference,
+                redirectUrl: params.redirectUrl,
+                metadata: { reference, transactionId: transaction.id },
             });
-
-            const ogStatus = (response?.status || OGATEWAY_STATUS.INITIATED).toLowerCase();
-            await transactionDetailRepository.updateByTransactionId(transaction.id, { ogId: response?.id, ogStatus, ogRawPayload: response },
-            );
-            await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.PROCESSING });
-
-            logger.info("OGateway collection created", {
-                transactionId: transaction.id, sequenceId, ogId: response?.id, ogStatus,
+            await transactionDetailRepository.updateByTransactionId(transaction.id, {
+                checkoutUrl: checkout.link,
+                providerId: checkout.reference,
+                providerStatus: 'initiated',
+                providerPayload: checkout,
             });
-
+            await this.claimStatus(transaction, TRANSACTION_STATUS.PROCESSING as TransactionStatus);
+            logger.info("GHS checkout created", { transactionId: transaction.id, reference });
             return {
                 ...transaction,
                 status: TRANSACTION_STATUS.PROCESSING,
-                details: {
-                    ...transactionDetails,
-                    ogId: response?.id,
-                    ogStatus,
-                },
+                details: { ...transactionDetails, checkoutUrl: checkout.link, providerStatus: 'initiated' },
+                checkoutUrl: checkout.link,
             };
         } catch (error: any) {
             await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
-            await transactionDetailRepository.updateByTransactionId(transaction.id, { ogStatus: OGATEWAY_STATUS.FAILED },
-            );
-            const ogError = error?.ogError || error?.response?.data || error?.data;
-            const ogMessage = ogError?.message || ogError?.error || error?.message || "Collection request failed";
-            logger.error("OGateway collection rejected", { transactionId: transaction.id, providerMessage: ogMessage });
-            throw errorResponseMessage.createError(400, providerFailureMessage(ogMessage, "receive"), ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
+            await transactionDetailRepository.updateByTransactionId(transaction.id, { providerStatus: 'failed' });
+            const message = error?.message || "Collection request failed";
+            logger.error("GHS checkout rejected", { transactionId: transaction.id, providerMessage: message });
+            throw errorResponseMessage.createError(400, providerFailureMessage(message, "receive"), ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
         }
     };
 
     /**
-     * On payout completion, settle the in-flight float to CASH_OGATEWAY_GHS.
-     * Posted in NGN-equivalent amounts (locked rate already captured on tx record).
+     * A payment-link payment settled: credit the owner's NGN wallet at the
+     * locked rate, less the fee. The GHS sits in the platform's Fincra GHS
+     * balance (CASH_FINCRA_GHS, booked at NGN value).
      */
-    private postOGatewayPayoutCompletion = async (reference: string, ngnAmount: number) => {
-        try {
-            await ledgerService.postStandalone({
-                legs: [
-                    { accountCode: ogPaymentInflightCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: ngnAmount },
-                    { accountCode: ogCashAccountCode('GHS'), direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
-                ],
-                source: JOURNAL_SOURCE.OG_SEND,
-                reference,
-                description: `OGateway payout settled — float drawn down`,
-                externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: reference },
-            });
-        } catch (error) {
-            logger.error("OGateway payout settlement journal post failed", { reference, error: (error as any)?.message });
-        }
-    };
-
-    /**
-     * On collection completion, credit the user's NGN wallet at the locked rate
-     * and post the settling journal entries.
-     */
-    private creditWalletFromOGatewayCollection = async (transaction: Transaction, detail: TransactionDetail) => {
+    private creditWalletFromGhsCollection = async (transaction: Transaction, detail: TransactionDetail) => {
         const userId = transaction.user;
-        // detail.fromAmount is the NET amount credited to the user (already
-        // fee-deducted). The platform receives the GROSS = net + fee from the
-        // rail, and books the fee into FEES_NGN.
-        const ngnAmount = detail.fromAmount || transaction.amount;
+        const ngnAmount = detail.fromAmount || 0;
         const feeAmount = detail.feeAmount || 0;
         const grossNgn = Math.round((ngnAmount + feeAmount) * 100) / 100;
+        if (!(ngnAmount > 0)) {
+            logger.error("CRITICAL: GHS collection has no NGN amount to credit", { transactionId: transaction.id });
+            return;
+        }
 
         try {
-            const wallet = await this.walletService.findBaseWallet(userId);
-            if (!wallet) {
-                logger.error("Wallet not found for OGateway collection credit", { userId });
-                return;
-            }
-            await this.walletService.getOrCreateWallet(userId);
-
+            const wallet = await this.walletService.getOrCreateWallet(userId);
             await withTransaction(async (tx) => {
                 const credited = await this.walletService.creditBalance(wallet.id, ngnAmount, tx);
                 if (!credited) throw errorResponseMessage.createError(500, "Wallet not found for collection credit", ErrorSeverity.CRITICAL);
 
-                const userAccountCode = userWalletAccountCode(userId, wallet.currency);
                 const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
-                    { accountCode: ogCashAccountCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: grossNgn },
-                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
+                    { accountCode: fincraCashCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: grossNgn },
+                    { accountCode: userWalletAccountCode(userId, wallet.currency), direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
                 ];
-                if (feeAmount > 0) {
-                    legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
-                }
+                if (feeAmount > 0) legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
                 await ledgerService.post({
                     legs,
-                    source: JOURNAL_SOURCE.OG_COLLECT,
+                    source: JOURNAL_SOURCE.FINCRA_COLLECT,
                     reference: transaction.reference,
-                    description: `OGateway collection settled — ${transaction.amount} GHS → ₦${ngnAmount.toFixed(2)} (fee ₦${feeAmount.toFixed(2)})`,
-                    externalRef: { provider: WEBHOOK_PROVIDER.OGATEWAY, id: transaction.reference },
+                    description: `GHS received — ${transaction.amount} GHS → ₦${ngnAmount.toFixed(2)} (fee ₦${feeAmount.toFixed(2)})`,
+                    externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: transaction.reference },
                     metadata: { fromAmount: transaction.amount, fromCurrency: 'GHS', feeAmount, grossNgn },
                     tx,
                 });
@@ -2302,81 +2208,58 @@ class TransactionService {
 
                 await this.walletService.adjustLedgerBalance(wallet.id, ngnAmount, tx);
             });
-
-            logger.info("Wallet credited from OGateway collection", {
-                userId, walletId: wallet.id, ngnAmount, ghsAmount: transaction.amount,
-            });
+            logger.info("Wallet credited from GHS collection", { userId, ngnAmount, ghsAmount: transaction.amount });
         } catch (error: any) {
-            logger.error("CRITICAL: Failed to credit wallet from OGateway collection", {
-                userId, transactionId: transaction.id, ngnAmount, error: error?.message,
-            });
+            // The unique funding reference makes a second credit impossible; anything else needs ops
+            logger.error("CRITICAL: Failed to credit wallet from GHS collection", { userId, transactionId: transaction.id, ngnAmount, error: error?.message });
         }
     };
 
     /**
-     * Handle an OGateway webhook event. Called by webhook.controller after
-     * the HMAC-SHA512 signature has been verified.
-     *
-     * OGateway payload shape (per docs):
-     *   {
-     *     id, amount, fee, currency, status: 'COMPLETED' | 'FAILED',
-     *     channel, network, customer: { accountName, accountNumber },
-     *     reference_business, provider_message, message, telco_response,
-     *     created_at, updated_at, metadata?, instructions?, virtual_account?
-     *   }
+     * A payout's outcome, from Fincra's payout.* webhook or a status check.
+     * Only the caller that moves the transaction's status settles or refunds,
+     * so a webhook and a poll arriving together act once.
      */
-    public handleOGatewayWebhook = async (webhookData: any) => {
-        const reference = webhookData?.reference_business;
-        if (!reference) {
-            logger.warn("OGateway webhook missing reference_business", { keys: Object.keys(webhookData || {}) });
-            return;
-        }
+    public handleFincraPayout = async (data: { customerReference?: string; reference?: string; status?: string; reason?: string; message?: string; [key: string]: unknown }) => {
+        const reference = String(data.customerReference || '');
+        if (!reference) return false;
+        const detail = await transactionDetailRepository.findByProviderReference(reference);
+        if (!detail) return false;
+        const transaction = await transactionRepository.findById(detail.transactionId);
+        if (!transaction) return false;
 
-        const detail = await transactionDetailRepository.findByOgReference(reference);
-        if (!detail) {
-            logger.warn("OGateway webhook: no matching transaction detail", { reference });
-            return;
-        }
+        const status = String(data.status || '').toLowerCase();
+        await transactionDetailRepository.update(detail.id, {
+            providerStatus: status || detail.providerStatus,
+            providerId: data.reference ? String(data.reference) : detail.providerId,
+            providerPayload: data,
+        });
+        const findWalletTx = () => walletTransactionRepository.findByPaystackReference(transaction.reference, WALLET_TRANSACTION_TYPE.TRANSFER as "transfer");
 
-        const transactionId = detail.transactionId;
-        const transaction = await transactionRepository.findById(transactionId);
-        if (!transaction) {
-            logger.warn("OGateway webhook: no matching transaction", { transactionId });
-            return;
-        }
-
-        const status = (webhookData?.status || '').toLowerCase();
-
-        await transactionDetailRepository.update(detail.id, { ogRawPayload: webhookData, ogStatus: status, ogId: webhookData?.id || detail.ogId });
-
-        const isSendFlow = transaction.fromCurrency === 'NGN' && transaction.currency === 'GHS';
-        const isReceiveFlow = transaction.fromCurrency === 'GHS' && transaction.currency === 'NGN';
-
-        // ===== Send flow (NGN→GHS payout) =====
-        if (isSendFlow) {
-            const findWalletTx = async () => walletTransactionRepository.findByPaystackReference(transaction.reference, WALLET_TRANSACTION_TYPE.TRANSFER as "transfer");
-
-            if (status === OGATEWAY_STATUS.COMPLETED) {
-                // Only the caller that moves the status settles, so a webhook and
-                // the sweeper's poll arriving together can't both post it.
-                if (await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() })) {
-                    // detail.fromAmount is the total wallet debit (converted + fee).
-                    // The OG_PAYMENT_INFLIGHT_GHS leg only holds the converted
-                    // portion, so we drain it by `fromAmount - feeAmount`.
-                    const totalDebit = detail.fromAmount || transaction.amount;
-                    const feeAmount = detail.feeAmount || 0;
-                    const convertedNgn = Math.round((totalDebit - feeAmount) * 100) / 100;
-                    await this.postOGatewayPayoutCompletion(transaction.reference, convertedNgn);
-
-                    const walletTx = await findWalletTx();
-                    if (walletTx) {
-                        await walletTransactionRepository.update(walletTx.id, {
-                            status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
+        if (status === 'successful' || status === 'success') {
+            if (await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() })) {
+                const convertedNgn = Math.round(((detail.fromAmount || 0) - (detail.feeAmount || 0)) * 100) / 100;
+                if (convertedNgn > 0) {
+                    try {
+                        await ledgerService.postStandalone({
+                            legs: [
+                                { accountCode: fincraPayoutInflightCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: convertedNgn },
+                                { accountCode: fincraCashCode('GHS'), direction: JOURNAL_DIRECTION.CREDIT, amount: convertedNgn },
+                            ],
+                            source: JOURNAL_SOURCE.FINCRA_SEND,
+                            reference: transaction.reference,
+                            description: `GHS payout settled by Fincra`,
+                            externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: transaction.reference },
                         });
-                        await this.walletService.adjustLedgerBalance(walletTx.wallet, -walletTx.amount);
+                    } catch (error) {
+                        logger.error("GHS payout settlement journal post failed", { reference, error: (error as any)?.message });
                     }
                 }
-
+                const walletTx = await findWalletTx();
+                if (walletTx) {
+                    await walletTransactionRepository.update(walletTx.id, { status: WALLET_TRANSACTION_STATUS.SUCCESSFUL });
+                    await this.walletService.adjustLedgerBalance(walletTx.wallet, -walletTx.amount);
+                }
                 const user = await userRepository.findById(transaction.user);
                 if (user?.email) {
                     try {
@@ -2387,124 +2270,96 @@ class TransactionService {
                             actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
                         });
                     } catch (e) {
-                        logger.warn("Failed to send OGateway completion notification", { error: e });
+                        logger.warn("Failed to send GHS payout notification", { error: e });
                     }
                 }
-                return;
             }
-
-            if (status === OGATEWAY_STATUS.FAILED) {
-                await this.claimStatus(transaction, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date() });
-                // The refund claims the wallet transaction itself, so it happens once
-                const walletTx = await findWalletTx();
-                if (walletTx && walletTx.status !== WALLET_TRANSACTION_STATUS.FAILED && walletTx.status !== WALLET_TRANSACTION_STATUS.REVERSED) {
-                    const totalDebit = walletTx.amount;
-                    const feeAmount = detail.feeAmount || 0;
-                    const convertedNgn = Math.round((totalDebit - feeAmount) * 100) / 100;
-                    await this.refundWalletFromOGateway(
-                        walletTx.wallet,
-                        walletTx.user,
-                        totalDebit,
-                        convertedNgn,
-                        walletTx.id,
-                        walletTx.reference,
-                        'Payment failed',
-                        feeAmount,
-                    );
-                }
-                return;
-            }
+            return true;
         }
 
-        // ===== Receive flow (GHS→NGN collection) =====
-        if (isReceiveFlow) {
-            if (status === OGATEWAY_STATUS.COMPLETED) {
-                // Only the caller that moves the status credits the wallet
-                if (await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() })) {
-                    await this.creditWalletFromOGatewayCollection(transaction, detail);
-                }
-                return;
-            }
-            if (status === OGATEWAY_STATUS.FAILED) {
-                await this.claimStatus(transaction, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date() });
-                return;
-            }
+        if (status === 'failed' || status === 'cancelled' || status === 'reversed') {
+            await this.claimStatus(transaction, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date() });
+            const walletTx = await findWalletTx();
+            if (walletTx) await this.refundGhsPayout(walletTx.id, walletTx.reference, 'Payment failed');
+            return true;
         }
 
-        // Intermediate state — just record it.
-        logger.info("OGateway webhook intermediate status", { transactionId, status });
+        logger.info("GHS payout intermediate status", { transactionId: transaction.id, status });
+        return true;
     };
 
     /**
-     * Pull-side counterpart to the OGateway webhook. The sweeper calls this
-     * for transactions stuck in PROCESSING past the staleness window when
-     * the webhook never arrived. We hit `GET /payments/{ogId}`, build a
-     * webhook-shaped payload from the response, and feed it back through
-     * {@link handleOGatewayWebhook} so settle/refund/state-machine/fee
-     * reversal all go through the same code path — no second implementation
-     * to drift out of sync.
+     * A checkout's outcome (charge.successful webhook or a status check). The
+     * status is always confirmed with Fincra by our reference, so only a
+     * payment Fincra itself reports as successful, for the full amount,
+     * credits anything.
      */
-    public pollOGatewayStatus = async (
-        transactionId: string,
-    ): Promise<{ transaction?: any; ogStatus: string; message?: string }> => {
+    public handleFincraCheckout = async (reference: string) => {
+        const detail = await transactionDetailRepository.findByProviderReference(reference);
+        if (!detail || !detail.checkoutUrl) return false;
+        const transaction = await transactionRepository.findById(detail.transactionId);
+        if (!transaction) return false;
+
+        let checkout: any;
+        try {
+            checkout = await fincraService.getCheckout(reference);
+        } catch (error: any) {
+            if (error instanceof FincraError && error.status === 404) return true; // not started yet
+            throw error;
+        }
+        const status = String(checkout?.status || '').toLowerCase();
+        await transactionDetailRepository.update(detail.id, { providerStatus: status || detail.providerStatus, providerPayload: checkout });
+
+        if (status === 'success' || status === 'successful') {
+            const paid = Number(checkout?.amount ?? checkout?.amountReceived ?? 0);
+            if (String(checkout?.currency || 'GHS').toUpperCase() !== 'GHS' || paid + 0.001 < transaction.amount) {
+                logger.error("CRITICAL: GHS checkout paid a different amount; not credited", { reference, expected: transaction.amount, paid, currency: checkout?.currency });
+                return true;
+            }
+            if (await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() })) {
+                await this.creditWalletFromGhsCollection(transaction, detail);
+            }
+            return true;
+        }
+        if (status === 'failed' || status === 'expired' || status === 'cancelled') {
+            await this.claimStatus(transaction, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date() });
+        }
+        return true;
+    };
+
+    /** Check a processing GHS transaction with Fincra (the UI, payment-link page and sweeper use this) */
+    public pollGhsStatus = async (transactionId: string): Promise<{ transaction?: any; providerStatus: string; message?: string }> => {
         const transaction = await transactionRepository.findById(transactionId);
-        if (!transaction) {
-            logger.warn("pollOGatewayStatus: transaction not found", { transactionId });
-            return { ogStatus: "unknown", message: "Transaction not found" };
-        }
-
-        const resultFromCurrentState = async (fallbackStatus: string, message?: string) => {
-            const refreshed = await transactionRepository.findViewById(transactionId);
-            const baseTransaction = refreshed || (await transactionRepository.toViews([transaction]))[0];
-
-            return {
-                transaction: { ...baseTransaction, details: baseTransaction.details ?? {} },
-                ogStatus: baseTransaction.details?.ogStatus || fallbackStatus,
-                message,
-            };
-        };
-
+        if (!transaction) return { providerStatus: "unknown", message: "Transaction not found" };
         const detail = await transactionDetailRepository.findByTransactionId(transaction.id);
-        if (!detail) {
-            logger.warn("pollOGatewayStatus: detail not found", { transactionId });
-            return resultFromCurrentState(
-                String(transaction.status || "unknown"),
-                "Transaction detail not found",
-            );
-        }
-        const ogId = (detail as any).ogId;
-        const ogReference = (detail as any).ogReference;
-        if (!ogId) {
-            logger.warn("pollOGatewayStatus: no ogId on detail — cannot query OGateway", {
-                transactionId,
-                ogReference,
-            });
-            return resultFromCurrentState(
-                (detail as any).ogStatus || String(transaction.status || "unknown"),
-                "This transaction has no payment reference yet.",
-            );
-        }
-
-        const remote = await ogatewayService.getTransactionStatus(ogId);
-        const remoteStatus = String(remote?.status || '').toLowerCase();
-        if (!remoteStatus) {
-            logger.warn("pollOGatewayStatus: remote returned no status", { transactionId, ogId });
-            return resultFromCurrentState(
-                (detail as any).ogStatus || String(transaction.status || "unknown"),
-                "We couldn't check the latest status. We'll keep trying.",
-            );
-        }
-
-        const synthetic = {
-            reference_business: remote?.reference_business || ogReference,
-            id: remote?.id || ogId,
-            status: remoteStatus,
-            provider_message: remote?.provider_message,
-            message: remote?.message,
-            ...remote,
+        const current = async (message?: string) => {
+            const view = await transactionRepository.findViewById(transactionId);
+            return { transaction: view, providerStatus: view?.details?.providerStatus || String(view?.status || "unknown"), message };
         };
-        await this.handleOGatewayWebhook(synthetic);
-        return resultFromCurrentState(remoteStatus);
+        if (!detail?.providerReference) return current("This transaction has no payment reference yet.");
+
+        if (detail.checkoutUrl) {
+            await this.handleFincraCheckout(detail.providerReference);
+            // A link the payer never paid stops being checked after two days
+            const fresh = await transactionRepository.findById(transactionId);
+            const ageMs = Date.now() - new Date(transaction.createdAt).getTime();
+            if (fresh && (fresh.status === TRANSACTION_STATUS.PENDING || fresh.status === TRANSACTION_STATUS.PROCESSING) && ageMs > 48 * 60 * 60 * 1000) {
+                await this.claimStatus(fresh, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date() });
+                await transactionDetailRepository.update(detail.id, { providerStatus: 'expired' });
+            }
+            return current();
+        }
+        const payout = await fincraService.getPayout(detail.providerReference);
+        if (!payout) {
+            // Never reached Fincra: refund once it's clearly not just slow to appear
+            const ageMs = Date.now() - new Date(transaction.createdAt).getTime();
+            if (ageMs > 10 * 60 * 1000) {
+                await this.handleFincraPayout({ customerReference: detail.providerReference, status: 'failed', reason: 'Not received by the payment provider' });
+            }
+            return current();
+        }
+        await this.handleFincraPayout({ ...payout, customerReference: detail.providerReference });
+        return current();
     };
 
     /**

@@ -47,6 +47,7 @@ protectedRouter.use(`${path}/identity`, identityController);
 protectedRouter.use(`${path}/dashboard`, dashboardController);
 protectedRouter.use(`${path}/yellowcard`, yellowCardTransactionController);
 protectedRouter.use(`${path}/ogateway`, ogatewayTransactionController);
+protectedRouter.use(`${path}/ghs`, ogatewayTransactionController);
 protectedRouter.use(`${path}/wallet`, walletController);
 protectedRouter.use(`${path}/pin`, pinController);
 protectedRouter.use(`${path}/beneficiaries`, beneficiaryController);

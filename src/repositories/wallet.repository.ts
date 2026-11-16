@@ -37,6 +37,16 @@ class WalletRepository {
         return row ? stripNulls(row) : undefined;
     }
 
+    /** The wallet a provider's virtual account (e.g. Fincra's 24-character id) belongs to */
+    async findByDvaExternalId(provider: string, externalId: string): Promise<Wallet | undefined> {
+        const [row] = await exec()
+            .select()
+            .from(wallets)
+            .where(and(eq(wallets.dvaProvider, provider), eq(wallets.dvaExternalId, externalId)))
+            .limit(1);
+        return row ? stripNulls(row) : undefined;
+    }
+
     /** Oldest first */
     async listByUser(userId: string): Promise<Wallet[]> {
         if (!isUuid(userId)) return [];

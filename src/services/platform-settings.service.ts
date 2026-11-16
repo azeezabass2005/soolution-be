@@ -3,7 +3,7 @@ import type { PlatformSettings as IPlatformSettings } from "../types/entities";
 import logger from "../utils/logger.utils";
 import { DEFAULT_TIER_DAILY_LIMIT_USD, USER_TIER, UserTier } from "../common/tier.constants";
 
-export type ProviderKey = 'ogateway' | 'yellowcard';
+export type ProviderKey = 'ogateway' | 'yellowcard' | 'fincra';
 export type RateDirection = 'send' | 'receive';
 
 /**
@@ -49,7 +49,7 @@ class PlatformSettingsService {
         patch: Partial<{
             rateMarkupPercent: number;
             additionalFeePercent: number;
-            providerBaseFeePercent: Partial<{ ogateway: number; yellowcard: number }>;
+            providerBaseFeePercent: Partial<{ ogateway: number; yellowcard: number; fincra: number }>;
             tierDailyLimitUsd: Partial<{ tier1: number; tier2: number }>;
         }>,
         adminUserId: string,
@@ -66,6 +66,9 @@ class PlatformSettingsService {
                 yellowcard: typeof patch.providerBaseFeePercent.yellowcard === 'number'
                     ? patch.providerBaseFeePercent.yellowcard
                     : current.providerBaseFeePercent.yellowcard,
+                fincra: typeof patch.providerBaseFeePercent.fincra === 'number'
+                    ? patch.providerBaseFeePercent.fincra
+                    : current.providerBaseFeePercent.fincra,
             };
         }
         if (patch.tierDailyLimitUsd) {

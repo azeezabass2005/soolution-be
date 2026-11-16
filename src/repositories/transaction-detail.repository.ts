@@ -29,6 +29,12 @@ class TransactionDetailRepository {
         return row ? stripNulls(row) : undefined;
     }
 
+    /** By our provider reference (Fincra payout customerReference / checkout reference) */
+    async findByProviderReference(reference: string): Promise<TransactionDetail | undefined> {
+        const [row] = await exec().select().from(transactionDetails).where(eq(transactionDetails.providerReference, reference)).limit(1);
+        return row ? stripNulls(row) : undefined;
+    }
+
     async updateByTransactionId(transactionId: string, patch: TransactionDetailUpdate, tx?: Executor): Promise<TransactionDetail | undefined> {
         if (!isUuid(transactionId)) return undefined;
         const values = definedOnly(patch as Record<string, unknown>);

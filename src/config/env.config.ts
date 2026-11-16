@@ -122,6 +122,8 @@ interface EnvConfig {
     /** Public key (pk_…), sent as x-pub-key when creating checkout payment links */
     FINCRA_PUBLIC_KEY: string;
     FINCRA_BUSINESS_ID: string;
+    /** Fincra portal → Settings → secret keys → webhook key; signs every webhook */
+    FINCRA_WEBHOOK_SECRET: string;
 
     /** Spotflow lab (admin-only, local exploration of NGN/GHS virtual accounts); mode follows the key */
     SPOTFLOW_LAB_ENABLED: boolean;
@@ -246,11 +248,13 @@ const loadEnvConfig = (): EnvConfig => {
         PAYSTACK_PUBLIC_KEY: process.env.PAYSTACK_PUBLIC_KEY || '',
         PAYSTACK_BASE_URL: process.env.PAYSTACK_BASE_URL || 'https://api.paystack.co',
 
-        // Fincra lab — off unless explicitly enabled; sandbox unless FINCRA_ENV=live
+        // Fincra: NGN accounts, payouts and GHS payment links. The admin lab tab stays off
+        // unless FINCRA_LAB_ENABLED; sandbox unless FINCRA_ENV=live
         FINCRA_LAB_ENABLED: process.env.FINCRA_LAB_ENABLED === 'true',
         FINCRA_ENV: (process.env.FINCRA_ENV === 'live' ? 'live' : 'sandbox') as 'sandbox' | 'live',
         FINCRA_SECRET_KEY: process.env.FINCRA_SECRET_KEY || '',
         FINCRA_PUBLIC_KEY: process.env.FINCRA_PUBLIC_KEY || '',
+        FINCRA_WEBHOOK_SECRET: process.env.FINCRA_WEBHOOK_SECRET || '',
         FINCRA_BUSINESS_ID: process.env.FINCRA_BUSINESS_ID || '',
 
         // Spotflow lab — off unless explicitly enabled; sk_test_ / sk_live_ picks the mode

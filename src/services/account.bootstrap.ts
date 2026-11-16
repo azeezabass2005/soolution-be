@@ -8,6 +8,9 @@ import {
     ycPaymentInflightCode,
     ycCollectionInflightCode,
     OG_CURRENCIES,
+    FINCRA_CURRENCIES,
+    fincraCashCode,
+    fincraPayoutInflightCode,
     ogCashAccountCode,
     ogPaymentInflightCode,
     ogCollectionInflightCode,
@@ -108,6 +111,26 @@ function buildSystemAccountList(): SystemAccountSpec[] {
             currency,
             name: `YellowCard collections in flight (${currency})`,
             description: `Inbound ${currency} collections awaiting deposit settlement.`,
+        });
+    }
+
+    // Fincra: cash per currency (NGN deposits, GHS payment links) and payouts in flight
+    for (const currency of FINCRA_CURRENCIES) {
+        accounts.push({
+            code: fincraCashCode(currency),
+            type: ACCOUNT_TYPE.ASSET,
+            currency,
+            name: `Cash at Fincra (${currency})`,
+            description: currency === 'NGN'
+                ? 'NGN held at Fincra: virtual-account deposits in, withdrawals and GHS payouts out.'
+                : `${currency} held at Fincra from payment links, booked at its NGN value.`,
+        });
+        accounts.push({
+            code: fincraPayoutInflightCode(currency),
+            type: ACCOUNT_TYPE.ASSET,
+            currency,
+            name: `Fincra payouts in flight (${currency})`,
+            description: `${currency} payouts sent to Fincra and awaiting its webhook (booked in NGN).`,
         });
     }
 

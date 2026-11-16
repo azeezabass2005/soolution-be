@@ -4,7 +4,7 @@
  * credits the user's NGN wallet.
  */
 
-/** Currencies a payer can pay a link in. GHS goes through OGateway, the rest through YellowCard. */
+/** Currencies a payer can pay a link in. GHS goes through Fincra's checkout, the rest through YellowCard. */
 export const PAYMENT_LINK_CURRENCIES = ["GHS", "KES", "XAF", "ZAR", "TZS", "UGX", "XOF", "RWF", "BWP", "ZMW", "MWK"] as const;
 export type PaymentLinkCurrency = (typeof PAYMENT_LINK_CURRENCIES)[number];
 

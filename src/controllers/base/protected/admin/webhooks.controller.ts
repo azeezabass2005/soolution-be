@@ -5,6 +5,7 @@ import webhookEventService from '../../../../services/webhook-event.service';
 import errorResponseMessage from '../../../../common/messages/error-response-message';
 import { WEBHOOK_PROVIDER } from '../../../../common/constant';
 import TransactionService from '../../../../services/transaction.service';
+import fincraWebhookService from "../../../../services/fincra-webhook.service";
 import WalletService from '../../../../services/wallet.service';
 import logger from '../../../../utils/logger.utils';
 
@@ -95,7 +96,7 @@ class AdminWebhooksController extends BaseController {
 
     /**
      * Route a stored payload back to the original processing path. Limited to
-     * Paystack and YellowCard — Smile ID replays are intentionally not
+     * Fincra and YellowCard — Smile ID replays are intentionally not
      * supported here because they mutate user verification state.
      */
     private async dispatchToHandler(provider: string, payload: any): Promise<void> {
@@ -103,27 +104,9 @@ class AdminWebhooksController extends BaseController {
             await this.transactionService.handleYellowCardWebhook(payload);
             return;
         }
-        if (provider === WEBHOOK_PROVIDER.PAYSTACK) {
-            const event = payload?.event;
-            const data = payload?.data;
-            switch (event) {
-                case 'charge.success':
-                    await this.walletService.processFunding(data.reference, data.amount, data);
-                    return;
-                case 'transfer.success':
-                    await this.walletService.processWithdrawalSuccess(data.transfer_code, data.reference);
-                    return;
-                case 'transfer.failed':
-                case 'transfer.reversed':
-                    await this.walletService.processWithdrawalFailure(
-                        data.transfer_code,
-                        data.reference,
-                        data.reason || `Transfer ${event.split('.')[1]}`
-                    );
-                    return;
-                default:
-                    throw errorResponseMessage.payloadIncorrect(`Cannot replay Paystack event: ${event}`);
-            }
+        if (provider === WEBHOOK_PROVIDER.FINCRA) {
+            await fincraWebhookService.handle(payload);
+            return;
         }
         throw errorResponseMessage.payloadIncorrect(`Replay not supported for provider: ${provider}`);
     }

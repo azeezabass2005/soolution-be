@@ -27,6 +27,7 @@ import identityService from "./identity.service";
 import yellowCardService from "./yellowcard.service";
 import { TRANSFER_DETAILS_REQUIRED_CODE } from "../common/identity.constants";
 import logger from "../utils/logger.utils";
+import config from "../config/env.config";
 
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const IN_FLIGHT = [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] as TransactionStatus[];
@@ -103,6 +104,10 @@ class PaymentLinkService {
         const data = parse<{ currency: string; amount?: number; title?: string; description?: string; usage: "single" | "reusable" }>(ZCreatePaymentLink, body);
         // YellowCard collects every currency except GHS and needs the owner's KYC details
         if (data.currency !== "GHS") await identityService.assertTransferDetails(userId);
+        // Fincra's GHS checkout takes whole cedis
+        if (data.currency === "GHS" && data.amount !== undefined && !Number.isInteger(data.amount)) {
+            throw badRequest("GHS links are in whole cedis. Enter an amount without pesewas.", { issues: [{ path: "amount", message: "Use a whole number" }] });
+        }
 
         const active = await paymentLinkRepository.countActive(userId);
         if (active >= MAX_ACTIVE_PAYMENT_LINKS) {
@@ -219,7 +224,7 @@ class PaymentLinkService {
     /**
      * How a payer can pay in this currency. YellowCard currencies follow its
      * country config (the channel types it can collect through right now);
-     * GHS goes through OGateway, mobile money only. Falls back to our own list
+     * GHS goes through Fincra's checkout, mobile money only. Falls back to our own list
      * if YellowCard can't be reached, so the page still loads.
      */
     private async payMethods(currency: string): Promise<("momo" | "bank")[]> {
@@ -289,18 +294,20 @@ class PaymentLinkService {
         const payer = { name: input.method === "momo" ? input.momoName : input.accountName, email: input.email };
 
         if (link.currency === "GHS") {
-            return this.transactionService.createOGatewayCollectionTransaction({
+            // Fincra's checkout page takes the payment; the payer comes back here after
+            return this.transactionService.createGhsCollectionTransaction({
                 amount,
                 fromCurrency: "GHS",
                 toCurrency: "NGN",
                 sender: {
-                    accountName: input.momoName!,
-                    accountNumber: toLocal(input.momoNumber!, country),
-                    network: toOgatewayNetwork(input.momoNetwork!),
-                    email: input.email || owner.email || undefined,
+                    accountName: input.momoName || undefined,
+                    accountNumber: input.momoNumber ? toLocal(input.momoNumber, country) : undefined,
+                    network: input.momoNetwork ? toOgatewayNetwork(input.momoNetwork) : undefined,
+                    email: input.email || undefined,
                 },
                 paymentLinkId,
                 payer,
+                redirectUrl: `${config.FRONTEND_URL}/pay/${encodeURIComponent(link.slug)}`,
             }, owner.id);
         }
 
@@ -335,8 +342,8 @@ class PaymentLinkService {
 
         if (!FINAL.includes(transaction.status as string)) {
             try {
-                if (transaction.detailType === DETAIL_TYPE.OGATEWAY) {
-                    await this.transactionService.pollOGatewayStatus(transaction.id);
+                if (transaction.detailType === DETAIL_TYPE.FINCRA) {
+                    await this.transactionService.pollGhsStatus(transaction.id);
                 } else if (transaction.detailType === DETAIL_TYPE.YELLOWCARD) {
                     await this.transactionService.pollYellowCardCollectionStatus(transaction.id);
                 }
@@ -379,6 +386,10 @@ class PaymentLinkService {
                 : FINAL.includes(status) ? "failed"
                 : "processing",
             createdAt: transaction.createdAt,
+            /** GHS: where the payer completes the payment (Fincra's page) */
+            ...(transaction.checkoutUrl || transaction.details?.checkoutUrl
+                ? { checkoutUrl: transaction.checkoutUrl || transaction.details?.checkoutUrl }
+                : {}),
         };
     }
 }

@@ -128,6 +128,15 @@ export const transactionDetails = pgTable(
         ogStatus: text("og_status"),
         ogRawPayload: jsonb("og_raw_payload").$type<unknown>(),
 
+        // Fincra (GHS payouts and payment-link checkouts). providerReference is
+        // ours (payout customerReference / checkout reference), providerId Fincra's.
+        providerReference: text("provider_reference"),
+        providerId: text("provider_id"),
+        providerStatus: text("provider_status"),
+        providerQuoteReference: text("provider_quote_reference"),
+        checkoutUrl: text("checkout_url"),
+        providerPayload: jsonb("provider_payload").$type<unknown>(),
+
         // Fee / markup snapshot
         feeAmount: decimal("fee_amount").notNull().default(0),
         feePercent: decimal("fee_percent").notNull().default(0),
@@ -147,6 +156,7 @@ export const transactionDetails = pgTable(
         index("transaction_details_yc_payment_idx").on(t.ycPaymentId),
         index("transaction_details_og_reference_idx").on(t.ogReference),
         index("transaction_details_og_id_idx").on(t.ogId),
+        uniqueIndex("transaction_details_provider_reference_key").on(t.providerReference).where(sql`${t.providerReference} is not null`),
     ]
 );
 

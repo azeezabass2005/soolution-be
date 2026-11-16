@@ -12,6 +12,7 @@ import { accounts } from "../src/db/schema";
 import { eq } from "drizzle-orm";
 
 const { CASH_PAYSTACK_NGN, SUSPENSE_NGN, FEES_NGN } = SYSTEM_ACCOUNT_CODES;
+import { fincraCashCode } from "../src/common/constant";
 
 describe("LedgerService", () => {
     beforeAll(startTestDatabase);
@@ -191,15 +192,15 @@ describe("LedgerService", () => {
         expect(clean.ledgerProof.unbalancedGroups).toHaveLength(0);
 
         // Tamper with a cached balance
-        await accountRepository.setBalance(CASH_PAYSTACK_NGN, 999);
+        await accountRepository.setBalance(fincraCashCode("NGN"), 999);
         const drift = await reconciliationService.runFullReconciliation({ runMode: "cron" });
         expect(drift.status).toBe("mismatch");
-        expect(drift.accountProof.mismatches).toEqual([{ code: CASH_PAYSTACK_NGN, expected: 1000, actual: 999, delta: -1 }]);
+        expect(drift.accountProof.mismatches).toEqual([{ code: fincraCashCode("NGN"), expected: 1000, actual: 999, delta: -1 }]);
         const alerts = await reconciliationService.listAlerts({ acknowledged: false }, {});
         expect(alerts.data.some((alert) => alert.code === "account_balance_drift")).toBe(true);
 
         // refreshAccountBalance repairs it from the journal
-        expect(await ledgerService.refreshAccountBalance(CASH_PAYSTACK_NGN)).toBe(1000);
+        expect(await ledgerService.refreshAccountBalance(fincraCashCode("NGN"))).toBe(1000);
         expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
     });
 });

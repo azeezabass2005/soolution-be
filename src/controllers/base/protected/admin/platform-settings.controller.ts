@@ -49,7 +49,10 @@ class AdminPlatformSettingsController extends BaseController {
                 if (typeof providerBaseFeePercent !== 'object' || providerBaseFeePercent === null) {
                     return next(invalid('providerBaseFeePercent must be an object'));
                 }
-                const { ogateway, yellowcard } = providerBaseFeePercent;
+                const { ogateway, yellowcard, fincra } = providerBaseFeePercent;
+                if (fincra !== undefined && !inRange(fincra, 0, 10)) {
+                    return next(invalid('providerBaseFeePercent.fincra must be between 0 and 10'));
+                }
                 if (ogateway !== undefined && !inRange(ogateway, 0, 10)) {
                     return next(invalid('providerBaseFeePercent.ogateway must be between 0 and 10'));
                 }
