@@ -7,6 +7,8 @@ vi.mock("../src/services/fincra.service", async (importOriginal) => {
         ...actual,
         default: {
             ngnPerGhs: vi.fn(async () => 100),
+            // Fincra's cost for the exact amount: ₦99/GHS plus a ₦0.50/GHS fee
+            quote: vi.fn(async (q: any) => ({ reference: "q-1", sourceAmount: q.amount * 99, destinationAmount: q.amount, amountToCharge: q.amount * 99.5 })),
             ghsMobileMoneyCode: vi.fn(async (network: string) => (network === "MTN" ? "MTN" : "AIRTEL")),
             listBanks: vi.fn(async () => [{ code: "GH-ACCESS", name: "Access Bank Ghana", swiftCode: "ABNGGHAC" }]),
             createPayout: vi.fn(),
@@ -63,12 +65,13 @@ describe("GHS through Fincra", () => {
     beforeEach(async () => {
         vi.clearAllMocks();
         fincra.getPayout.mockResolvedValue(null);
+        fincra.quote.mockImplementation(async (q: any) => ({ reference: "q-1", sourceAmount: q.amount * 99, destinationAmount: q.amount, amountToCharge: q.amount * 99.5 }));
         await resetTestDatabase();
         await bootstrapLedger();
     });
 
     describe("sending to mobile money", () => {
-        it("charges NGN at the rate plus the fee, and pays out from the GHS balance", async () => {
+        it("charges NGN at the rate plus the fee, and pays out from the NGN balance at Fincra's quote", async () => {
             const user = await createUser();
             await fundWallet(user.id, 50_000);
             fincra.createPayout.mockResolvedValue({ reference: "FP_GH_1", status: "processing" });
@@ -79,9 +82,10 @@ describe("GHS through Fincra", () => {
             expect(await walletBalance(user.id)).toBe(39_850);
             expect(fincra.createPayout).toHaveBeenCalledWith(expect.objectContaining({
                 customerReference: transaction.reference,
-                sourceCurrency: "GHS",
+                sourceCurrency: "NGN",
                 destinationCurrency: "GHS",
-                amount: 100,
+                amount: 9_900, // the quote's NGN source amount
+                quoteReference: "q-1",
                 paymentDestination: "mobile_money_wallet",
                 beneficiary: expect.objectContaining({ accountNumber: "233241234567", mobileMoneyCode: "MTN", firstName: "Kofi", lastName: "Mensah", country: "GH" }),
             }));
@@ -92,7 +96,10 @@ describe("GHS through Fincra", () => {
             await Promise.all([fincraWebhookService.handle(success), fincraWebhookService.handle(success)]);
             expect((await transactionRepository.findById(transaction.id))?.status).toBe("completed");
             expect(await accountBalance(fincraPayoutInflightCode("GHS"))).toBe(0);
-            expect(await accountBalance(fincraCashCode("GHS"))).toBe(-10_000);
+            expect(await accountBalance(fincraCashCode("GHS"))).toBe(0);
+            // Fincra took ₦9,950 from the NGN balance; ₦50 of the ₦10,000 is spread
+            expect(await accountBalance(fincraCashCode("NGN"))).toBe(50_000 - 9_950);
+            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(200);
             expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
         });
 
@@ -121,6 +128,15 @@ describe("GHS through Fincra", () => {
             expect((await transactionRepository.findById(transaction.id))?.status).toBe("completed");
             expect(await walletBalance(user.id)).toBe(39_850);
             expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
+        it("refuses before charging when Fincra's cost is above what the user would pay", async () => {
+            const user = await createUser();
+            await fundWallet(user.id, 50_000);
+            fincra.quote.mockResolvedValue({ reference: "q-2", sourceAmount: 10_200, destinationAmount: 100, amountToCharge: 10_250 });
+            await expect(send(user.id)).rejects.toMatchObject({ response_code: 409 });
+            expect(fincra.createPayout).not.toHaveBeenCalled();
+            expect(await walletBalance(user.id)).toBe(50_000);
         });
 
         it("refunds at once when Fincra refuses the payout", async () => {

@@ -134,6 +134,8 @@ export const transactionDetails = pgTable(
         providerId: text("provider_id"),
         providerStatus: text("provider_status"),
         providerQuoteReference: text("provider_quote_reference"),
+        /** NGN Fincra deducts for an NGN→GHS payout (the quote's amountToCharge) */
+        providerCost: decimal("provider_cost"),
         checkoutUrl: text("checkout_url"),
         providerPayload: jsonb("provider_payload").$type<unknown>(),
 

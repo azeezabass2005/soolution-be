@@ -1,0 +1,1 @@
+ALTER TABLE "transaction_details" ADD COLUMN "provider_cost" numeric;

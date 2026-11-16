@@ -1871,6 +1871,36 @@ class TransactionService {
             if (duplicate) return duplicate;
         }
 
+        // Fincra pays the GHS out of the platform's NGN balance, at a quote
+        // for this exact amount (valid ~30s, so it's taken just before paying).
+        // It deducts amountToCharge (the NGN plus its fee), which must never
+        // be more than the user pays us.
+        let quote: Awaited<ReturnType<typeof fincraService.quote>>;
+        try {
+            quote = await fincraService.quote({
+                sourceCurrency: 'NGN',
+                destinationCurrency: 'GHS',
+                amount,
+                action: 'receive',
+                transactionType: 'disbursement',
+                paymentDestination: isMomo ? 'mobile_money_wallet' : 'bank_account',
+            });
+        } catch (err: any) {
+            logger.error("Fincra quote failed during GHS payout", { error: err?.message });
+            throw errorResponseMessage.createError(400, "We couldn't get the NGN→GHS exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
+        }
+        const quoteSourceNgn = Number(quote.sourceAmount);
+        const providerCost = Math.round(Number(quote.amountToCharge ?? quote.sourceAmount) * 100) / 100;
+        if (!(quoteSourceNgn > 0) || !(providerCost > 0) || Number(quote.destinationAmount ?? amount) + 0.001 < amount) {
+            logger.error("Fincra returned an unusable quote", { quote });
+            throw errorResponseMessage.createError(400, "We couldn't get the NGN→GHS exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
+        }
+        if (providerCost > totalDebit) {
+            // The rate moved past what we charge: refuse rather than send at a loss
+            logger.warn("GHS payout refused: Fincra's cost exceeds the user's charge", { amount, totalDebit, providerCost, userRate, providerRate });
+            throw errorResponseMessage.createError(409, "The exchange rate just changed. Please check the new amount and try again.", ErrorSeverity.LOW, { code: "RATE_CHANGED" });
+        }
+
         const reference = this.generateGhsReference();
 
         // Wallet debit + journal, atomically. The converted amount waits in
@@ -1920,6 +1950,8 @@ class TransactionService {
                 fromAmount: totalDebit,
                 feeAmount,
                 feePercent,
+                providerQuoteReference: quote.reference,
+                providerCost,
                 fundingCurrency: walletCurrency,
                 fundingAmount: walletDebit,
                 fundingFee: walletFee,
@@ -1951,9 +1983,11 @@ class TransactionService {
         try {
             const payout = await fincraService.createPayout({
                 customerReference: reference,
-                sourceCurrency: 'GHS',
+                sourceCurrency: 'NGN',
                 destinationCurrency: 'GHS',
-                amount,
+                // Fincra wants the quote's NGN source amount here, not the GHS
+                amount: quoteSourceNgn,
+                quoteReference: quote.reference,
                 paymentDestination: isMomo ? 'mobile_money_wallet' : 'bank_account',
                 description: `Payment from ${params.senderName || 'Solution Pay'}`.slice(0, 100),
                 senderName: params.senderName || 'Solution Pay',
@@ -2256,15 +2290,28 @@ class TransactionService {
                 if (!(await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() }, tx))) return false;
                 const convertedNgn = Math.round(((detail.fromAmount || 0) - (detail.feeAmount || 0)) * 100) / 100;
                 if (convertedNgn > 0) {
+                    const cost = detail.providerCost;
+                    const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
+                        { accountCode: fincraPayoutInflightCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: convertedNgn },
+                    ];
+                    if (cost && cost > 0) {
+                        // Paid from the NGN balance: Fincra took `cost`; the rest of the
+                        // converted amount (our rate markup less Fincra's fee) is revenue
+                        legs.push({ accountCode: fincraCashCode('NGN'), direction: JOURNAL_DIRECTION.CREDIT, amount: cost });
+                        const spread = Math.round((convertedNgn - cost) * 100) / 100;
+                        if (spread > 0) legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: spread });
+                        if (spread < 0) legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.DEBIT, amount: -spread });
+                    } else {
+                        // Payouts made before this change were paid from the GHS balance
+                        legs.push({ accountCode: fincraCashCode('GHS'), direction: JOURNAL_DIRECTION.CREDIT, amount: convertedNgn });
+                    }
                     await ledgerService.post({
-                        legs: [
-                            { accountCode: fincraPayoutInflightCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: convertedNgn },
-                            { accountCode: fincraCashCode('GHS'), direction: JOURNAL_DIRECTION.CREDIT, amount: convertedNgn },
-                        ],
+                        legs,
                         source: JOURNAL_SOURCE.FINCRA_SEND,
                         reference: transaction.reference,
                         description: `GHS payout settled by Fincra`,
                         externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: transaction.reference },
+                        metadata: cost ? { providerCost: cost, quoteReference: detail.providerQuoteReference } : undefined,
                         tx,
                     });
                 }
