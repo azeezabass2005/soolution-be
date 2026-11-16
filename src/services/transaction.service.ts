@@ -23,7 +23,7 @@ import AuditLogService from "./audit-log.service";
 import { validateTransactionAmount, getTransactionLimits } from "../config/transaction-limits.config";
 import yellowCardService, { YellowCardChannelType, YellowCardCountryConfig } from "./yellowcard.service";
 import fincraService, { FINCRA_CHECKOUT_METHODS, FincraError } from "./fincra.service";
-import ghsRateService from "./ghs-rate.service";
+import ghsRateService, { type GhsPrice } from "./ghs-rate.service";
 import transactionLimitService from "./transaction-limit.service";
 import platformSettingsService from "./platform-settings.service";
 import {
@@ -1839,26 +1839,31 @@ class TransactionService {
 
         let providerRate: number;
         let userRate: number;
+        let price: GhsPrice;
         try {
-            ({ providerRate, userRate } = await ghsRateService.getUserFacingRate('NGN', 'GHS', 'send'));
+            // The admin's pricing for NGN→GHS: Fincra's rate plus the buffer, and the fees
+            price = await ghsRateService.price('send', amount);
+            ({ providerRate, userRate } = price);
         } catch (err: any) {
             logger.error("GHS rate lookup failed during payout", { error: err?.message });
             throw errorResponseMessage.createError(400, "We couldn't get the NGN→GHS exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
         }
-        const ngnAmount = Math.round(amount * userRate * 100) / 100;
+        const ngnAmount = price.subtotalNgn;
         if (!ngnAmount || ngnAmount <= 0) {
             throw errorResponseMessage.createError(400, "We couldn't work out the NGN amount from the current rate. Please try again.", ErrorSeverity.HIGH);
         }
 
-        // The fee goes on top, so the recipient gets the full GHS amount
-        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('fincra', ngnAmount);
-        const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
+        // The fees go on top, so the recipient gets the full GHS amount
+        const feeAmount = price.feeAmount;
+        const feePercent = price.feePercent;
+        const providerFeePercent = ngnAmount > 0 ? Math.round((price.providerFee / ngnAmount) * 100 * 10_000) / 10_000 : 0;
+        const totalDebit = price.totalNgn;
 
         const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(userId, [
             { amount: totalDebit, currency: 'NGN' },
             { amount, currency: 'GHS' },
         ]);
-        const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
+        const markupPercent = (await platformSettingsService.getPricing()).send['NGN-GHS']?.rate.percent ?? 0;
 
         await walletSendService.assertCanPay(
             userId,
@@ -2086,13 +2091,16 @@ class TransactionService {
 
         let providerRate: number;
         let userRate: number;
+        let price: GhsPrice;
         try {
-            ({ providerRate, userRate } = await ghsRateService.getUserFacingRate('GHS', 'NGN', 'receive'));
+            // The admin's pricing for GHS→NGN: Fincra's rate less the buffer, and the fees
+            price = await ghsRateService.price('receive', amount);
+            ({ providerRate, userRate } = price);
         } catch (err: any) {
             logger.error("GHS rate lookup failed during collection", { error: err?.message });
             throw errorResponseMessage.createError(400, "We couldn't get the GHS→NGN exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
         }
-        const grossNgn = Math.round(amount * userRate * 100) / 100;
+        const grossNgn = price.subtotalNgn;
         if (!grossNgn || grossNgn <= 0) {
             throw errorResponseMessage.createError(400, "We couldn't work out the NGN amount from the current rate. Please try again.", ErrorSeverity.HIGH);
         }
@@ -2102,13 +2110,15 @@ class TransactionService {
             { amount: grossNgn, currency: 'NGN' },
         ]);
 
-        // The fee comes out of the credit: the user receives gross − fee
-        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('fincra', grossNgn);
-        const ngnAmount = Math.round((grossNgn - feeAmount) * 100) / 100;
+        // The fees come out of the credit: the user receives gross − fees
+        const feeAmount = price.feeAmount;
+        const feePercent = price.feePercent;
+        const providerFeePercent = grossNgn > 0 ? Math.round((price.providerFee / grossNgn) * 100 * 10_000) / 10_000 : 0;
+        const ngnAmount = price.totalNgn;
         if (ngnAmount <= 0) {
             throw errorResponseMessage.createError(400, "Fee exceeds the converted amount. Please increase the amount.", ErrorSeverity.MEDIUM);
         }
-        const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
+        const markupPercent = (await platformSettingsService.getPricing()).receive['GHS-NGN']?.rate.percent ?? 0;
 
         if (idempotencyKey) {
             const duplicate = await this.findDuplicate(idempotencyKey, userId);

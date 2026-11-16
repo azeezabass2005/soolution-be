@@ -1,3 +1,4 @@
+import type { PricingConfig } from "../common/pricing";
 import type {
     accounts,
     auditLogs,
@@ -138,7 +139,7 @@ export type ExchangeRate = NullToOptional<typeof exchangeRates.$inferSelect>;
 export interface PlatformSettings {
     id: string;
     kind: "singleton";
-    /** Daily transaction limits in USD per tier (Tier 3 is unlimited) */
+    /** Daily transaction limits in NGN per tier (Tier 3 is unlimited) */
     tierDailyLimitNgn: { tier1: number; tier2: number };
     /** % the platform adds on top of the provider's FX rate */
     rateMarkupPercent: number;
@@ -146,6 +147,8 @@ export interface PlatformSettings {
     additionalFeePercent: number;
     /** The rails' own fees; editable to track provider changes */
     providerBaseFeePercent: { ogateway: number; yellowcard: number; fincra: number };
+    /** Stored pricing (partial); read it through platformSettingsService.getPricing() */
+    pricing?: Partial<PricingConfig>;
     updatedBy?: string;
     createdAt: Date;
     updatedAt: Date;

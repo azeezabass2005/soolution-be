@@ -31,6 +31,7 @@ import logger from "../utils/logger.utils";
 import config from "../config/env.config";
 import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
+import platformSettingsService from "./platform-settings.service";
 import AuditLogService from "./audit-log.service";
 import { withoutProviderName } from "../utils/provider-names.utils";
 import type { PageRequest } from "../db/pagination";
@@ -73,6 +74,22 @@ const splitName = (full: string) => {
 const definitelyRejected = (error: unknown) =>
     error instanceof FincraError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429;
 
+
+/**
+ * Journal legs for a withdrawal of `amount` with `fee` on top. "initiate"
+ * moves the money from the user to in-flight and the fee to revenue;
+ * "reverse" puts both back.
+ */
+function withdrawalLegs(userAccountCode: string, amount: number, fee: number, kind: "initiate" | "reverse") {
+    const out = kind === "initiate" ? JOURNAL_DIRECTION.DEBIT : JOURNAL_DIRECTION.CREDIT;
+    const back = kind === "initiate" ? JOURNAL_DIRECTION.CREDIT : JOURNAL_DIRECTION.DEBIT;
+    const legs = [
+        { accountCode: userAccountCode, direction: out, amount: Math.round((amount + fee) * 100) / 100 },
+        { accountCode: NGN_PAYOUT_INFLIGHT, direction: back, amount },
+    ];
+    if (fee > 0) legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: back, amount: fee });
+    return legs;
+}
 
 /** A withdrawal in one of these has settled one way or the other and must not move again */
 const WITHDRAWAL_SETTLED = [
@@ -344,6 +361,15 @@ class WalletService {
         await this.ensureUserLedgerAccount(wallet.user, wallet);
         const target = wallet;
 
+        // SolutionPay's funding fee (admin pricing) comes out of what Fincra settled.
+        // A deposit too small to cover it is credited in full rather than swallowed.
+        let fee = (await platformSettingsService.priceFees("funding", amount)).total;
+        if (fee >= amount) {
+            logger.warn("Deposit smaller than the funding fee; credited without a fee", { reference, amount, fee });
+            fee = 0;
+        }
+        const credit = round2(amount - fee);
+
         let walletTransaction: WalletTransaction | null;
         try {
             walletTransaction = await withTransaction(async (tx) => {
@@ -352,21 +378,23 @@ class WalletService {
                 if (await journalRepository.existsByExternalRef(SYSTEM_ACCOUNT_CODES.SUSPENSE_NGN, FINCRA, reference, tx)) return null;
                 const ourReference = this.walletTransactionService.generateReference("FND");
 
-                // Money entered the platform at Fincra and we now owe the user
+                // Money entered the platform at Fincra: we owe the user the deposit less our fee
+                const legs = [
+                    { accountCode: NGN_CASH, direction: JOURNAL_DIRECTION.DEBIT, amount },
+                    { accountCode: userWalletAccountCode(target.user, target.currency), direction: JOURNAL_DIRECTION.CREDIT, amount: credit },
+                ];
+                if (fee > 0) legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: fee });
                 await ledgerService.post({
-                    legs: [
-                        { accountCode: NGN_CASH, direction: JOURNAL_DIRECTION.DEBIT, amount },
-                        { accountCode: userWalletAccountCode(target.user, target.currency), direction: JOURNAL_DIRECTION.CREDIT, amount },
-                    ],
+                    legs,
                     source: JOURNAL_SOURCE.FUNDING,
                     reference: ourReference,
                     description: `Wallet funding via Fincra virtual account (${reference})`,
                     externalRef: { provider: FINCRA, id: reference },
-                    metadata: details,
+                    metadata: { ...details, fundingFee: fee },
                     tx,
                 });
 
-                const updated = await walletRepository.credit(target.id, amount, tx, { alsoLedger: true, requireActive: true });
+                const updated = await walletRepository.credit(target.id, credit, tx, { alsoLedger: true, requireActive: true });
                 if (!updated) {
                     throw errorResponseMessage.createError(500, "Failed to update wallet balance", ErrorSeverity.CRITICAL);
                 }
@@ -377,9 +405,10 @@ class WalletService {
                         user: target.user,
                         type: WALLET_TRANSACTION_TYPE.FUNDING,
                         status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
-                        amount,
+                        amount: credit,
+                        ...(fee > 0 ? { fee } : {}),
                         reference: ourReference,
-                        balanceBefore: round2(updated.balance - amount),
+                        balanceBefore: round2(updated.balance - credit),
                         balanceAfter: updated.balance,
                         description: deposit.senderAccountName ? `Bank transfer from ${deposit.senderAccountName}` : "Wallet funding via bank transfer",
                         currency: target.currency,
@@ -402,7 +431,7 @@ class WalletService {
             logger.info("Deposit already held in suspense; not credited again", { reference });
             return null;
         }
-        logger.info("Wallet funded successfully", { walletId: target.id, amount, reference: walletTransaction.reference });
+        logger.info("Wallet funded successfully", { walletId: target.id, amount: credit, fee, reference: walletTransaction.reference });
 
         // Best-effort: a logging failure does NOT block the funding result.
         try {
@@ -518,8 +547,15 @@ class WalletService {
         if (wallet.status !== WALLET_STATUS.ACTIVE) {
             throw errorResponseMessage.createError(400, "Wallet is not active", ErrorSeverity.HIGH);
         }
-        if (wallet.balance < amount) {
-            throw errorResponseMessage.createError(400, "Insufficient wallet balance", ErrorSeverity.MEDIUM);
+        // The admin's withdrawal fee (Fincra's passed on + SolutionPay's) is charged on top
+        const fee = (await platformSettingsService.priceFees("withdrawal", amount)).total;
+        const charge = round2(amount + fee);
+        if (wallet.balance < charge) {
+            throw errorResponseMessage.createError(
+                400,
+                fee > 0 ? `Insufficient wallet balance. This withdrawal costs ₦${charge.toLocaleString("en-NG")} including the ₦${fee.toLocaleString("en-NG")} fee.` : "Insufficient wallet balance",
+                ErrorSeverity.MEDIUM
+            );
         }
 
         await this.ensureUserLedgerAccount(userId, wallet);
@@ -529,17 +565,15 @@ class WalletService {
 
         // Debit + journal + record commit together; Fincra is called after
         const { walletTransaction, initTxGroupId } = await withTransaction(async (tx) => {
-            const updated = await walletRepository.debit(wallet.id, amount, tx);
+            const updated = await walletRepository.debit(wallet.id, charge, tx);
             if (!updated) {
                 throw errorResponseMessage.createError(400, "Insufficient balance or wallet unavailable", ErrorSeverity.HIGH);
             }
 
-            // The user's wallet liability decreases; the money sits in flight until Fincra settles.
+            // The user's wallet liability decreases; the money sits in flight until Fincra settles,
+            // and the fee is earned now (it's returned if the payout fails)
             const post = await ledgerService.post({
-                legs: [
-                    { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.DEBIT, amount },
-                    { accountCode: NGN_PAYOUT_INFLIGHT, direction: JOURNAL_DIRECTION.CREDIT, amount },
-                ],
+                legs: withdrawalLegs(userAccountCode, amount, fee, "initiate"),
                 source: JOURNAL_SOURCE.WITHDRAWAL,
                 reference,
                 description: `Withdrawal initiated to ${accountName} (${accountNumber})`,
@@ -554,8 +588,9 @@ class WalletService {
                     type: WALLET_TRANSACTION_TYPE.WITHDRAWAL,
                     status: WALLET_TRANSACTION_STATUS.PENDING,
                     amount,
+                    ...(fee > 0 ? { fee } : {}),
                     reference,
-                    balanceBefore: round2(updated.balance + amount),
+                    balanceBefore: round2(updated.balance + charge),
                     balanceAfter: updated.balance,
                     description: `Withdrawal to ${accountName} (${accountNumber})`,
                     currency: wallet.currency,
@@ -609,12 +644,9 @@ class WalletService {
             logger.error("Fincra payout failed, reversing balance", { reference, error: providerError?.message, fincra: providerError?.fincra });
             try {
                 await withTransaction(async (tx) => {
-                    await walletRepository.credit(wallet.id, amount, tx);
+                    await walletRepository.credit(wallet.id, charge, tx);
                     await ledgerService.post({
-                        legs: [
-                            { accountCode: NGN_PAYOUT_INFLIGHT, direction: JOURNAL_DIRECTION.DEBIT, amount },
-                            { accountCode: userAccountCode, direction: JOURNAL_DIRECTION.CREDIT, amount },
-                        ],
+                        legs: withdrawalLegs(userAccountCode, amount, fee, "reverse"),
                         source: JOURNAL_SOURCE.REVERSAL,
                         reference,
                         description: `Reversal — payout initiation failed`,
@@ -716,7 +748,7 @@ class WalletService {
                 });
 
                 // The balance was debited at initiation; the ledger balance follows on settlement
-                await walletRepository.adjustLedgerBalance(claimed.wallet, -claimed.amount, tx);
+                await walletRepository.adjustLedgerBalance(claimed.wallet, -round2(claimed.amount + (claimed.fee ?? 0)), tx);
                 return true;
             });
 
@@ -782,16 +814,16 @@ class WalletService {
                 );
                 if (!claimed) return false;
 
-                const wallet = await walletRepository.credit(claimed.wallet, claimed.amount, tx);
+                // The fee comes back too: the user is charged nothing for a failed withdrawal
+                const fee = claimed.fee ?? 0;
+                const refund = round2(claimed.amount + fee);
+                const wallet = await walletRepository.credit(claimed.wallet, refund, tx);
                 if (!wallet) {
                     throw errorResponseMessage.createError(500, "Wallet not found for reversal", ErrorSeverity.CRITICAL);
                 }
 
                 await ledgerService.post({
-                    legs: [
-                        { accountCode: NGN_PAYOUT_INFLIGHT, direction: JOURNAL_DIRECTION.DEBIT, amount: claimed.amount },
-                        { accountCode: userWalletAccountCode(claimed.user, wallet.currency), direction: JOURNAL_DIRECTION.CREDIT, amount: claimed.amount },
-                    ],
+                    legs: withdrawalLegs(userWalletAccountCode(claimed.user, wallet.currency), claimed.amount, fee, "reverse"),
                     source: JOURNAL_SOURCE.REVERSAL,
                     reference: claimed.reference,
                     description: `Reversal — withdrawal ${claimed.reference} failed (${reason || "no reason given"})`,
@@ -806,9 +838,9 @@ class WalletService {
                         user: claimed.user,
                         type: WALLET_TRANSACTION_TYPE.REVERSAL,
                         status: WALLET_TRANSACTION_STATUS.SUCCESSFUL,
-                        amount: claimed.amount,
+                        amount: refund,
                         reference: reversalRef,
-                        balanceBefore: round2(wallet.balance - claimed.amount),
+                        balanceBefore: round2(wallet.balance - refund),
                         balanceAfter: wallet.balance,
                         description: `Reversal of failed withdrawal (${claimed.reference})`,
                         currency: wallet.currency,

@@ -53,6 +53,8 @@ class OGatewayTransactionController extends BaseController {
         this.router.get("/networks", this.getNetworks.bind(this));
         this.router.get("/banks", this.getBanks.bind(this));
         this.router.get("/rates", this.getRates.bind(this));
+        // The full price of sending or receiving `amount` GHS (rate, both fees, total)
+        this.router.get("/price", this.getPrice.bind(this));
     }
 
     private async createPayout(req: Request, res: Response, next: NextFunction) {
@@ -186,6 +188,18 @@ class OGatewayTransactionController extends BaseController {
 
             const quote = await ghsRateService.quoteRate(source, destination, amount);
             return this.sendSuccess(res, quote);
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async getPrice(req: Request, res: Response, next: NextFunction) {
+        try {
+            const direction = String(req.query.direction || "");
+            const amount = Number(req.query.amount);
+            if (direction !== "send" && direction !== "receive") return next({ response_code: 400, message: "direction must be send or receive" });
+            if (!isFinite(amount) || amount <= 0) return next({ response_code: 400, message: "amount must be a positive number" });
+            return this.sendSuccess(res, await ghsRateService.price(direction, amount));
         } catch (error) {
             return next(error);
         }

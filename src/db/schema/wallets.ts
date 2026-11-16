@@ -108,6 +108,8 @@ export const walletTransactions = pgTable(
         sendNgnAmount: decimal("send_ngn_amount"),
         sendNgnFee: decimal("send_ngn_fee"),
         sendFee: decimal("send_fee"),
+        /** NGN fee charged on a funding or withdrawal, on top of `amount` (withdrawal) or out of the deposit (funding) */
+        fee: decimal("fee"),
         providerAccountCode: text("provider_account_code"),
         transactionId: uuid("transaction_id").references(() => transactions.id, { onDelete: "set null" }),
         ...timestamps(),

@@ -3,6 +3,7 @@ import BaseController from '../../base-controller';
 import RoleMiddleware from '../../../../middlewares/role.middleware';
 import platformSettingsService from '../../../../services/platform-settings.service';
 import errorResponseMessage, { ErrorSeverity } from '../../../../common/messages/error-response-message';
+import { PricingError } from '../../../../common/pricing';
 
 const invalid = (message: string) => errorResponseMessage.createError(400, message, ErrorSeverity.LOW);
 
@@ -25,7 +26,8 @@ class AdminPlatformSettingsController extends BaseController {
     private async get(_req: Request, res: Response, next: NextFunction) {
         try {
             const settings = await platformSettingsService.getSettings();
-            return this.sendSuccess(res, { settings });
+            // The effective pricing, defaults filled in
+            return this.sendSuccess(res, { settings: { ...settings, pricing: await platformSettingsService.getPricing() } });
         } catch (error) {
             return next(error);
         }
@@ -34,7 +36,7 @@ class AdminPlatformSettingsController extends BaseController {
     private async put(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            const { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn } = req.body ?? {};
+            const { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn, pricing } = req.body ?? {};
 
             const inRange = (v: any, min: number, max: number) =>
                 typeof v === 'number' && isFinite(v) && v >= min && v <= max;
@@ -80,11 +82,12 @@ class AdminPlatformSettingsController extends BaseController {
             }
 
             const updated = await platformSettingsService.updateSettings(
-                { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn },
+                { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn, pricing },
                 user.id,
             );
-            return this.sendSuccess(res, { settings: updated });
+            return this.sendSuccess(res, { settings: { ...updated, pricing: await platformSettingsService.getPricing() } });
         } catch (error) {
+            if (error instanceof PricingError) return next(invalid(error.message));
             return next(error);
         }
     }

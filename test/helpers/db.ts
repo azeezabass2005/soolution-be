@@ -7,6 +7,7 @@ import { migrate as migratePg } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
 import { sql } from "drizzle-orm";
 import { schema, setDatabase, type Database } from "../../src/db/client";
+import platformSettingsService from "../../src/services/platform-settings.service";
 
 const migrationsFolder = path.resolve(__dirname, "../../drizzle");
 
@@ -47,6 +48,7 @@ export async function resetTestDatabase(): Promise<void> {
     const names: string[] = (result.rows ?? result).map((row: { tablename: string }) => row.tablename);
     if (!names.length) return;
     await db.execute(sql.raw(`truncate table ${names.map((name) => `"${name}"`).join(", ")} restart identity cascade`));
+    platformSettingsService.clearCache();
 }
 
 export async function stopTestDatabase(): Promise<void> {

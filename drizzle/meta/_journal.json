@@ -29,6 +29,13 @@
       "when": 1794860447674,
       "tag": "0003_ngn_tier_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794861910495,
+      "tag": "0004_admin_pricing",
+      "breakpoints": true
     }
   ]
 }

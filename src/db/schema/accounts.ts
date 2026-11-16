@@ -3,6 +3,7 @@ import { boolean, check, index, jsonb, pgTable, smallint, text, uniqueIndex, uui
 import { decimal, id, timestamps, timestamptz } from "../columns";
 import { users } from "./users";
 import type { UserTier } from "../../common/tier.constants";
+import type { PricingConfig } from "../../common/pricing";
 import type { KycStatus, KycStep, KycType } from "../../common/kyc.constants";
 import type { BeneficiaryKind, CurrencyCode, VerificationKind, VerificationStatus } from "../../types/enums";
 
@@ -36,6 +37,8 @@ export const platformSettings = pgTable(
         tier2DailyLimitNgn: decimal("tier2_daily_limit_ngn").notNull().default(150_000_000),
         tier1DailyLimitUsd: decimal("tier1_daily_limit_usd"),
         tier2DailyLimitUsd: decimal("tier2_daily_limit_usd"),
+        /** Fees and rate buffers per operation (see common/pricing.ts); null = defaults */
+        pricing: jsonb("pricing").$type<Partial<PricingConfig>>(),
         updatedBy: uuid("updated_by"),
         ...timestamps(),
     },

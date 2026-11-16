@@ -24,6 +24,7 @@ import fincraWebhookService from "../src/services/fincra-webhook.service";
 import { resetTestDatabase, startTestDatabase, stopTestDatabase } from "./helpers/db";
 import { TEST_PIN, accountBalance, bootstrapLedger, createUser, fundWallet, walletBalance } from "./helpers/fixtures";
 import WalletService from "../src/services/wallet.service";
+import platformSettingsService from "../src/services/platform-settings.service";
 import fxExchangeService from "../src/services/fx-exchange.service";
 import walletTransactionRepository from "../src/repositories/wallet-transaction.repository";
 import walletRepository from "../src/repositories/wallet.repository";
@@ -286,6 +287,56 @@ describe("WalletService", () => {
             const results = await Promise.allSettled(Array.from({ length: 5 }, () => walletService.debitBalance(wallet!.id, 400)));
             expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(2);
             expect(await walletBalance(user.id)).toBe(200);
+        });
+    });
+
+    describe("admin pricing", () => {
+        const admin = "00000000-0000-4000-8000-000000000001";
+
+        it("takes SolutionPay's funding fee out of the deposit, once", async () => {
+            await platformSettingsService.updateSettings({ pricing: { funding: { NGN: { platformFee: { percent: 0, fixed: 200, min: 0, cap: 0 } } } } }, admin);
+            const user = await userWithAccount("va-fee");
+            await fincraWebhookService.handle(deposit("fc-fee", "va-fee", 9_900, 100)); // Fincra kept ₦100
+            await fincraWebhookService.handle(deposit("fc-fee", "va-fee", 9_900, 100));
+            expect(await walletBalance(user.id)).toBe(9_700);
+            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(200);
+            expect(await accountBalance(NGN_CASH)).toBe(9_900);
+            const [row] = (await walletService.getTransactionHistory(user.id, { page: 1, limit: 5, type: "funding" })).data;
+            expect(row).toMatchObject({ amount: 9_700, fee: 200 });
+            expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
+        it("charges the withdrawal fee on top, keeps it on success, refunds it on failure", async () => {
+            // Fincra's ₦50 passed on, plus SolutionPay's 1% held between ₦100 and ₦500
+            await platformSettingsService.updateSettings({ pricing: { withdrawal: { NGN: {
+                providerFee: { percent: 0, fixed: 50, min: 0, cap: 0 },
+                platformFee: { percent: 1, fixed: 0, min: 100, cap: 500 },
+            } } } }, admin);
+            const user = await createUser();
+            await fundWallet(user.id, 100_000);
+            fincra.createPayout.mockResolvedValue({ reference: "FP_FEE", status: "processing" });
+
+            const paid = await walletService.initiateWithdrawal(user.id, 5_000, "058", "0123456789", "Ada", TEST_PIN); // fee 50 + 100
+            const failed = await walletService.initiateWithdrawal(user.id, 80_000, "058", "0123456789", "Ada", TEST_PIN); // fee 50 + 500 (capped)
+            expect(fincra.createPayout).toHaveBeenCalledWith(expect.objectContaining({ amount: 5_000 }));
+            expect(await walletBalance(user.id)).toBe(100_000 - 5_150 - 80_550);
+            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(700);
+
+            await fincraWebhookService.handle({ event: "payout.successful", data: { customerReference: paid.reference, status: "successful" } });
+            await fincraWebhookService.handle({ event: "payout.failed", data: { customerReference: failed.reference, status: "failed" } });
+            expect(await walletBalance(user.id)).toBe(100_000 - 5_150);
+            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(150);
+            expect(await accountBalance(NGN_INFLIGHT)).toBe(0);
+            expect((await walletRepository.findByUserAndCurrency(user.id, "NGN"))?.ledgerBalance).toBe(100_000 - 5_150);
+            expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
+        it("refuses a withdrawal the balance can't cover with its fee", async () => {
+            await platformSettingsService.updateSettings({ pricing: { withdrawal: { NGN: { platformFee: { percent: 0, fixed: 100, min: 0, cap: 0 } } } } }, admin);
+            const user = await createUser();
+            await fundWallet(user.id, 5_000);
+            await expect(walletService.initiateWithdrawal(user.id, 5_000, "058", "0123456789", "Ada", TEST_PIN)).rejects.toMatchObject({ response_code: 400 });
+            expect(fincra.createPayout).not.toHaveBeenCalled();
         });
     });
 

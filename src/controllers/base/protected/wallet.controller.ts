@@ -5,6 +5,8 @@ import { validateSetPin, validateChangePin, validateInitiateWithdrawal, validate
 import logger from "../../../utils/logger.utils";
 import fxExchangeService from "../../../services/fx-exchange.service";
 import { WALLET_CURRENCIES } from "../../../common/wallet.constants";
+import platformSettingsService from "../../../services/platform-settings.service";
+import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 
 class WalletController extends BaseController {
     private walletService: WalletService;
@@ -25,6 +27,8 @@ class WalletController extends BaseController {
         // Multi-currency wallets
         this.router.get("/list", this.listWallets.bind(this));
         this.router.get("/currencies", this.listCurrencies.bind(this));
+        // What a withdrawal or deposit of `amount` costs, from the admin's pricing
+        this.router.get("/fees", this.getFees.bind(this));
         this.router.post("/create", this.createWallet.bind(this));
 
         // Exchange between wallets: lock a rate, then exchange with the PIN
@@ -75,7 +79,9 @@ class WalletController extends BaseController {
                 }
             }
 
-            return this.sendSuccess(res, { wallet: { ...wallet, dvaSetup } });
+            // SolutionPay's deposit fee rule, so the app can say what a transfer in costs
+            const fundingFee = (await platformSettingsService.getPricing()).funding.NGN.platformFee;
+            return this.sendSuccess(res, { wallet: { ...wallet, dvaSetup, fundingFee } });
         } catch (error) {
             return next(error);
         }
@@ -85,6 +91,25 @@ class WalletController extends BaseController {
         try {
             const wallets = await this.walletService.listWallets(res.locals.user.id);
             return this.sendSuccess(res, { wallets });
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async getFees(req: Request, res: Response, next: NextFunction) {
+        try {
+            const operation = String(req.query.operation || "");
+            const amount = Number(req.query.amount);
+            if (operation !== "withdrawal" && operation !== "funding") {
+                return next(errorResponseMessage.createError(400, "operation must be withdrawal or funding", ErrorSeverity.LOW));
+            }
+            if (!isFinite(amount) || amount <= 0) {
+                return next(errorResponseMessage.createError(400, "amount must be a positive number", ErrorSeverity.LOW));
+            }
+            const { pricing: _rules, ...fees } = await platformSettingsService.priceFees(operation, amount);
+            // Funding: the fee comes out of the deposit; withdrawal: it's added on top
+            const total = operation === "funding" ? Math.round((amount - fees.total) * 100) / 100 : Math.round((amount + fees.total) * 100) / 100;
+            return this.sendSuccess(res, { operation, amount, ...fees, fee: fees.total, [operation === "funding" ? "credited" : "charged"]: total });
         } catch (error) {
             return next(error);
         }

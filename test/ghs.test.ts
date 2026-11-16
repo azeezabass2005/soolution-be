@@ -130,6 +130,24 @@ describe("GHS through Fincra", () => {
             expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
         });
 
+        it("prices with the admin's rate buffer and fees for the pair", async () => {
+            const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
+            await platformSettingsService.updateSettings({ pricing: { send: { "NGN-GHS": {
+                rate: { percent: 2, fixed: 1 },                              // ₦100 → ₦103 per GHS
+                providerFee: { percent: 0, fixed: 0, min: 0, cap: 0 },
+                platformFee: { percent: 1, fixed: 50, min: 0, cap: 200 },    // 1% + ₦50, at most ₦200
+            } } } }, "00000000-0000-4000-8000-000000000001");
+            const user = await createUser();
+            await fundWallet(user.id, 50_000);
+            fincra.createPayout.mockResolvedValue({ reference: "FP_GH_P", status: "processing" });
+
+            await send(user.id);
+            // 100 GHS × ₦103 = ₦10,300; fee min(103 + 50, 200) = ₦153
+            expect(await walletBalance(user.id)).toBe(50_000 - 10_453);
+            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(153);
+            expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
         it("refuses before charging when Fincra's cost is above what the user would pay", async () => {
             const user = await createUser();
             await fundWallet(user.id, 50_000);

@@ -2,6 +2,10 @@ import platformSettingsRepository from "../repositories/platform-settings.reposi
 import type { PlatformSettings as IPlatformSettings } from "../types/entities";
 import logger from "../utils/logger.utils";
 import { DEFAULT_TIER_DAILY_LIMIT_NGN, USER_TIER, UserTier } from "../common/tier.constants";
+import {
+    FeeBreakdown, FeePricing, FxPricing, PricingConfig, ZERO_FEE, ZERO_RATE,
+    applyRateRule, parsePricing, priceFees, withDefaults,
+} from "../common/pricing";
 
 export type ProviderKey = 'ogateway' | 'yellowcard' | 'fincra';
 export type RateDirection = 'send' | 'receive';
@@ -24,6 +28,11 @@ class PlatformSettingsService {
 
     private bustCache() {
         this.cache = null;
+    }
+
+    /** Forget the cached settings (tests reset the database underneath it) */
+    public clearCache() {
+        this.bustCache();
     }
 
     public async getSettings(): Promise<IPlatformSettings> {
@@ -51,6 +60,8 @@ class PlatformSettingsService {
             additionalFeePercent: number;
             providerBaseFeePercent: Partial<{ ogateway: number; yellowcard: number; fincra: number }>;
             tierDailyLimitNgn: Partial<{ tier1: number; tier2: number }>;
+            /** Partial pricing: what's given replaces, the rest is kept (throws PricingError) */
+            pricing: unknown;
         }>,
         adminUserId: string,
     ): Promise<IPlatformSettings> {
@@ -78,6 +89,7 @@ class PlatformSettingsService {
                 tier2: patch.tierDailyLimitNgn.tier2 ?? limits.tier2,
             };
         }
+        if (patch.pricing !== undefined) update.pricing = parsePricing(patch.pricing, this.pricingOf(current));
         update.updatedBy = adminUserId;
 
         const before = {
@@ -85,6 +97,7 @@ class PlatformSettingsService {
             additionalFeePercent: current.additionalFeePercent,
             providerBaseFeePercent: current.providerBaseFeePercent,
             tierDailyLimitNgn: this.tierLimits(current),
+            pricing: this.pricingOf(current),
         };
 
         const updated = await platformSettingsRepository.update(update);
@@ -98,10 +111,47 @@ class PlatformSettingsService {
                 additionalFeePercent: updated.additionalFeePercent,
                 providerBaseFeePercent: updated.providerBaseFeePercent,
                 tierDailyLimitNgn: updated.tierDailyLimitNgn,
+                pricing: this.pricingOf(updated),
             },
         });
 
         return updated;
+    }
+
+    /**
+     * The full pricing config. Until an admin saves one, it's built from the
+     * older single knobs (markup %, Fincra %, additional %) so nothing changes.
+     */
+    private pricingOf(settings: IPlatformSettings): PricingConfig {
+        if (settings.pricing) return withDefaults(settings.pricing);
+        const fx = (): FxPricing => ({
+            providerFee: { ...ZERO_FEE, percent: settings.providerBaseFeePercent?.fincra ?? 0 },
+            platformFee: { ...ZERO_FEE, percent: settings.additionalFeePercent ?? 0 },
+            rate: { ...ZERO_RATE, percent: settings.rateMarkupPercent ?? 0 },
+        });
+        return { ...withDefaults(null), send: { "NGN-GHS": fx() }, receive: { "GHS-NGN": fx() } };
+    }
+
+    public async getPricing(): Promise<PricingConfig> {
+        return this.pricingOf(await this.getSettings());
+    }
+
+    /** Fees for an operation on `amount` (NGN). Funding charges only SolutionPay's fee: Fincra takes its own. */
+    public async priceFees(operation: "funding" | "withdrawal", amount: number): Promise<FeeBreakdown & { pricing: FeePricing }>;
+    public async priceFees(operation: "send" | "receive", amount: number, pair: string): Promise<FeeBreakdown & { pricing: FeePricing }>;
+    public async priceFees(operation: keyof PricingConfig, amount: number, pair?: string) {
+        const pricing = await this.getPricing();
+        const rules: FeePricing | undefined = operation === "funding" || operation === "withdrawal"
+            ? pricing[operation].NGN
+            : pricing[operation][pair || ""];
+        const fees = priceFees(rules, amount, { providerFeeCharged: operation !== "funding" });
+        return { ...fees, pricing: rules ?? { providerFee: ZERO_FEE, platformFee: ZERO_FEE } };
+    }
+
+    /** The user's rate for a pair (NGN per 1 foreign unit) from the provider's, with the pair's buffer */
+    public async applyPairRate(operation: "send" | "receive", pair: string, providerRate: number): Promise<number> {
+        const pricing = await this.getPricing();
+        return applyRateRule(pricing[operation][pair]?.rate, providerRate, operation);
     }
 
     private tierLimits(settings: IPlatformSettings) {
