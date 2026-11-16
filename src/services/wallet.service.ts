@@ -28,6 +28,7 @@ import {
 import { WALLET_LIMITS } from "../config/wallet-limits.config";
 import { BASE_WALLET_CURRENCY, WALLET_CURRENCIES, WalletCurrency, isWalletCurrency } from "../common/wallet.constants";
 import logger from "../utils/logger.utils";
+import config from "../config/env.config";
 import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
 import AuditLogService from "./audit-log.service";
@@ -204,13 +205,25 @@ class WalletService {
             throw errorResponseMessage.createError(403, "Verify your identity to get your account number.", ErrorSeverity.LOW, { code: IDENTITY_REQUIRED_CODE });
         }
 
-        const account = await fincraService.createVirtualAccount({
+        const request = {
             firstName: user.firstName || "",
             lastName: user.lastName || "",
             email: user.email,
             bvn: decryptIdentity(bvnEnc),
             merchantReference: `sp-va-${wallet.id}`,
-        });
+        };
+        // Moniepoint (FINCRA_VA_CHANNEL) by default. If Fincra refuses that bank,
+        // the user still gets an account number, at Fincra's default bank.
+        const channel = config.FINCRA_VA_CHANNEL || undefined;
+        let account: any;
+        try {
+            account = await fincraService.createVirtualAccount({ ...request, channel });
+        } catch (error) {
+            const refused = error instanceof FincraError && error.status >= 400 && error.status < 500 && error.status !== 409 && error.status !== 429;
+            if (!channel || !refused) throw error;
+            logger.warn("Fincra refused the preferred bank for a virtual account; using Fincra's default bank", { walletId, channel, error: (error as Error).message });
+            account = await fincraService.createVirtualAccount(request);
+        }
         const externalId = String(account?._id || account?.id || "");
         if (!externalId) throw errorResponseMessage.createError(500, "Our payment provider didn't return an account. Please try again.", ErrorSeverity.HIGH);
         const pending = await walletRepository.update(wallet.id, { dvaProvider: FINCRA, dvaExternalId: externalId, dvaStatus: String(account?.status || "pending") });

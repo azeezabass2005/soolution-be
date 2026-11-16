@@ -74,11 +74,24 @@ describe("WalletService", () => {
 
             const provisioned = await walletService.provisionDVA(wallet!.id, { id: user.id });
             expect(provisioned).toMatchObject({ isDVAProvisioned: true, dvaAccountNumber: "9012345678", dvaBankName: "Wema Bank", dvaProvider: "fincra" });
-            expect(fincra.createVirtualAccount).toHaveBeenCalledWith(expect.objectContaining({ bvn: "22212345678", firstName: "Ada", lastName: "Lovelace", merchantReference: `sp-va-${wallet!.id}` }));
+            expect(fincra.createVirtualAccount).toHaveBeenCalledWith(expect.objectContaining({ bvn: "22212345678", firstName: "Ada", lastName: "Lovelace", channel: "moniepoint", merchantReference: `sp-va-${wallet!.id}` }));
 
             // Asking again doesn't open another
             await walletService.provisionDVA(wallet!.id, { id: user.id });
             expect(fincra.createVirtualAccount).toHaveBeenCalledTimes(1);
+        });
+
+        it("falls back to Fincra's default bank when it refuses Moniepoint", async () => {
+            const user = await createUser();
+            await userRepository.updateIdentity(user.id, { bvnEnc: encryptIdentity("22212345678"), status: "verified" } as any);
+            fincra.createVirtualAccount
+                .mockRejectedValueOnce(new FincraError("channel not enabled", 422))
+                .mockResolvedValueOnce({ _id: "65f0a1b2c3d4e5f6a7b8c9d2", status: "approved", accountInformation: { accountNumber: "9012345670", bankName: "Globus Bank" } });
+            const wallet = await walletRepository.findByUserAndCurrency(user.id, "NGN");
+
+            const provisioned = await walletService.provisionDVA(wallet!.id, { id: user.id });
+            expect(provisioned).toMatchObject({ isDVAProvisioned: true, dvaBankName: "Globus Bank" });
+            expect(fincra.createVirtualAccount).toHaveBeenLastCalledWith(expect.not.objectContaining({ channel: expect.anything() }));
         });
 
         it("waits for Fincra's approval webhook when the account is pending", async () => {

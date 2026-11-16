@@ -122,6 +122,8 @@ interface EnvConfig {
     /** Public key (pk_…), sent as x-pub-key when creating checkout payment links */
     FINCRA_PUBLIC_KEY: string;
     FINCRA_BUSINESS_ID: string;
+    /** Bank for users' NGN account numbers (Fincra's `channel`); Moniepoint unless set */
+    FINCRA_VA_CHANNEL: string;
     /** Fincra portal → Settings → secret keys → webhook key; signs every webhook */
     FINCRA_WEBHOOK_SECRET: string;
 
@@ -256,6 +258,7 @@ const loadEnvConfig = (): EnvConfig => {
         FINCRA_PUBLIC_KEY: process.env.FINCRA_PUBLIC_KEY || '',
         FINCRA_WEBHOOK_SECRET: process.env.FINCRA_WEBHOOK_SECRET || '',
         FINCRA_BUSINESS_ID: process.env.FINCRA_BUSINESS_ID || '',
+        FINCRA_VA_CHANNEL: (process.env.FINCRA_VA_CHANNEL || 'moniepoint').trim().toLowerCase(),
 
         // Spotflow lab — off unless explicitly enabled; sk_test_ / sk_live_ picks the mode
         SPOTFLOW_LAB_ENABLED: process.env.SPOTFLOW_LAB_ENABLED === 'true',
