@@ -57,6 +57,13 @@
       "when": 1795020980590,
       "tag": "0007_identity_address",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795025704556,
+      "tag": "0008_fx_conversions",
+      "breakpoints": true
     }
   ]
 }

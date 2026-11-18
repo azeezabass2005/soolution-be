@@ -15,6 +15,8 @@ vi.mock("../src/services/fincra.service", async (importOriginal) => {
             getPayout: vi.fn(async () => null),
             createCheckout: vi.fn(),
             getCheckout: vi.fn(),
+            convert: vi.fn(),
+            getConversion: vi.fn(),
         },
     };
 });
@@ -315,6 +317,67 @@ describe("GHS through Fincra", () => {
             const status = await paymentLinkService.paymentStatus(link.slug, payment.reference);
             expect(status.status).toBe("completed");
             expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
+        describe("converting the received GHS to NGN at Fincra", () => {
+            const config = () => import("../src/config/env.config").then((m) => m.default as any);
+            beforeEach(async () => { (await config()).FINCRA_AUTO_CONVERT_GHS = true; });
+            afterAll(async () => { (await config()).FINCRA_AUTO_CONVERT_GHS = false; });
+
+            it("converts what Fincra settled once the payment is confirmed, and books the difference", async () => {
+                const { default: ghsConversionService } = await import("../src/services/ghs-conversion.service");
+                const { default: fxConversionRepository } = await import("../src/repositories/fx-conversion.repository");
+                const { owner, payment } = await pay();
+                fincra.convert.mockResolvedValue({ reference: "cnv-1", quote: { reference: "q-cnv" } });
+                fincra.getConversion.mockResolvedValue({ status: "processing" });
+                // Fincra kept GHS 1 of the 100 as its fee
+                fincra.getCheckout.mockResolvedValue({ status: "success", amount: 100, amountReceived: 99, currency: "GHS" });
+                await fincraWebhookService.handle({ event: "charge.successful", data: { metadata: { reference: payment.reference } } });
+                expect(await walletBalance(owner.id)).toBe(9_850);
+
+                const transaction = await transactionRepository.findByReference(payment.reference);
+                await ghsConversionService.processDue(new Date(Date.now() + 60_000));
+                expect(fincra.convert).toHaveBeenCalledWith(expect.objectContaining({ sourceCurrency: "GHS", destinationCurrency: "NGN", amount: 99 }));
+                expect(await fxConversionRepository.findByTransaction(transaction!.id)).toMatchObject({ status: "processing", providerReference: "cnv-1", bookedNgn: 10_000 });
+
+                // Fincra finishes: GHS 99 became ₦9,700. The ₦10,000 booked comes off the GHS cash; ₦300 is an FX loss.
+                fincra.getConversion.mockResolvedValue({ status: "successful", amountCharged: 99, amountReceived: 9_700 });
+                const webhook = { event: "conversion.successful", data: { reference: "cnv-1" } };
+                await Promise.all([fincraWebhookService.handle(webhook), fincraWebhookService.handle(webhook)]);
+                expect(await accountBalance(fincraCashCode("GHS"))).toBe(0);
+                expect(await accountBalance(fincraCashCode("NGN"))).toBe(9_700);
+                expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FX_CONVERSION_NGN)).toBe(-300);
+                expect(await fxConversionRepository.findByTransaction(transaction!.id)).toMatchObject({ status: "successful", amountReceived: 9_700 });
+                expect(fincra.convert).toHaveBeenCalledTimes(1);
+                expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+            });
+
+            it("retries later when Fincra can't convert yet (e.g. the GHS isn't settled)", async () => {
+                const { default: ghsConversionService } = await import("../src/services/ghs-conversion.service");
+                const { default: fxConversionRepository } = await import("../src/repositories/fx-conversion.repository");
+                const { FincraError } = await import("../src/services/fincra.service");
+                const { payment } = await pay();
+                fincra.convert.mockRejectedValue(new FincraError("Insufficient balance", 422));
+                fincra.getCheckout.mockResolvedValue({ status: "success", amount: 100, currency: "GHS" });
+                await fincraWebhookService.handle({ event: "charge.successful", data: { metadata: { reference: payment.reference } } });
+                const transaction = await transactionRepository.findByReference(payment.reference);
+                const now = Date.now() + 60_000;
+                await ghsConversionService.processDue(new Date(now));
+                const waiting = await fxConversionRepository.findByTransaction(transaction!.id);
+                expect(waiting).toMatchObject({ status: "pending", lastError: "Insufficient balance" });
+                expect(new Date(waiting!.nextAttemptAt).getTime()).toBeGreaterThan(now);
+
+                // Next time it works, with a new reference
+                fincra.convert.mockResolvedValue({ reference: "cnv-2", quote: { reference: "q-2" } });
+                fincra.getConversion.mockResolvedValue({ status: "successful", amountCharged: 100, amountReceived: 10_050 });
+                await ghsConversionService.processDue(new Date(now + 3 * 60 * 60_000));
+                const done = await fxConversionRepository.findByTransaction(transaction!.id);
+                expect(done).toMatchObject({ status: "successful", amountReceived: 10_050 });
+                const references = fincra.convert.mock.calls.map((c: any[]) => c[0].customerReference);
+                expect(new Set(references).size).toBe(references.length);
+                expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FX_CONVERSION_NGN)).toBe(50);
+                expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+            });
         });
 
         it("credits once however many charge webhooks and status checks race", async () => {

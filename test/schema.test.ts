@@ -11,6 +11,6 @@ describe("migrations", () => {
     it("creates every table", async () => {
         const result: any = await db.execute(sql`select count(*)::int as n from pg_tables where schemaname = 'public'`);
         const rows = result.rows ?? result;
-        expect(rows[0].n).toBe(27);
+        expect(rows[0].n).toBe(28);
     });
 });

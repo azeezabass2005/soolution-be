@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, index, jsonb, pgTable, text, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, index, integer, jsonb, pgTable, text, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { decimal, id, timestamps, timestamptz } from "../columns";
 import { users } from "./users";
 import type { AlipayPlatform, DetailType, InstitutionType, PaymentLinkCollectField, PaymentLinkUsage, TransactionStatus } from "../../types/enums";
@@ -214,5 +214,43 @@ export const auditLogs = pgTable(
         index("audit_logs_user_idx").on(t.userId, t.createdAt),
         index("audit_logs_action_idx").on(t.action, t.createdAt),
         index("audit_logs_created_idx").on(t.createdAt),
+    ]
+);
+
+/**
+ * Turning received foreign currency into naira at the provider: every GHS
+ * payment-link receipt at Fincra is converted to NGN once it's confirmed.
+ * One row per receipt; retried until Fincra reports it done, then booked.
+ */
+export const fxConversions = pgTable(
+    "fx_conversions",
+    {
+        id: id(),
+        transactionId: uuid("transaction_id").notNull().references(() => transactions.id),
+        provider: text("provider").notNull(),
+        sourceCurrency: text("source_currency").notNull(),
+        destinationCurrency: text("destination_currency").notNull(),
+        /** What's converted, in the source currency (what the provider settled to us) */
+        sourceAmount: decimal("source_amount").notNull(),
+        /** The NGN value the receipt was booked at in the provider's cash account */
+        bookedNgn: decimal("booked_ngn").notNull(),
+        /** pending (to start or retry) | processing (sent, awaiting the result) | successful | failed (gave up) */
+        status: text("status").$type<"pending" | "processing" | "successful" | "failed">().notNull().default("pending"),
+        /** Ours, unique per attempt: Fincra refuses a repeat */
+        customerReference: text("customer_reference"),
+        quoteReference: text("quote_reference"),
+        providerReference: text("provider_reference"),
+        amountReceived: decimal("amount_received"),
+        rate: decimal("rate"),
+        attempts: integer("attempts").notNull().default(0),
+        lastError: text("last_error"),
+        nextAttemptAt: timestamptz("next_attempt_at").notNull().defaultNow(),
+        completedAt: timestamptz("completed_at"),
+        ...timestamps(),
+    },
+    (t) => [
+        uniqueIndex("fx_conversions_transaction_key").on(t.transactionId),
+        uniqueIndex("fx_conversions_provider_reference_key").on(t.providerReference),
+        index("fx_conversions_due_idx").on(t.status, t.nextAttemptAt),
     ]
 );

@@ -1,5 +1,6 @@
 import transactionRepository from '../repositories/transaction.repository';
 import walletTransactionRepository from '../repositories/wallet-transaction.repository';
+import ghsConversionService from '../services/ghs-conversion.service';
 import TransactionService from '../services/transaction.service';
 import WalletService from '../services/wallet.service';
 import {
@@ -115,12 +116,23 @@ async function closeUnpaidGhsAccounts(): Promise<number> {
     }
 }
 
+/** GHS receipts still to be converted to NGN at Fincra, retried and checked */
+async function convertReceivedGhs(): Promise<number> {
+    try {
+        return (await ghsConversionService.processDue()).due;
+    } catch (error) {
+        logger.warn('Sweeper: GHS conversions failed', { error: error instanceof Error ? error.message : String(error) });
+        return 0;
+    }
+}
+
 export async function runStaleTransactionSweep(): Promise<void> {
-    const [yc, withdrawals, ghs, ghsAccountsClosed] = await Promise.all([
+    const [yc, withdrawals, ghs, ghsAccountsClosed, ghsConversions] = await Promise.all([
         sweepStaleYC(),
         sweepStaleWithdrawals(),
         sweepStaleGhs(),
         closeUnpaidGhsAccounts(),
+        convertReceivedGhs(),
     ]);
-    logger.info('Sweep complete', { yc, withdrawals, ghs, ghsAccountsClosed });
+    logger.info('Sweep complete', { yc, withdrawals, ghs, ghsAccountsClosed, ghsConversions });
 }

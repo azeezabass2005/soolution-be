@@ -1,5 +1,6 @@
 import WalletService from "./wallet.service";
 import TransactionService from "./transaction.service";
+import ghsConversionService from "./ghs-conversion.service";
 import logger from "../utils/logger.utils";
 
 export type FincraWebhookOutcome = "processed" | "ignored";
@@ -64,6 +65,14 @@ class FincraWebhookService {
                 if (!reference) return { outcome: "ignored", note: "charge without our reference" };
                 const known = await this.transactionService.handleFincraCheckout(reference);
                 return known ? { outcome: "processed" } : { outcome: "ignored", note: "unknown checkout reference" };
+            }
+
+            case "conversion.successful": {
+                // Our own GHS → NGN conversions (see ghs-conversion.service)
+                const reference = String(data?.reference || "");
+                if (!reference) return { outcome: "ignored", note: "conversion without a reference" };
+                const known = await ghsConversionService.handleWebhook(reference);
+                return known ? { outcome: "processed" } : { outcome: "ignored", note: "unknown conversion reference" };
             }
 
             default:

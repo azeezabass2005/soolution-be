@@ -7,6 +7,8 @@ process.env.LOG_LEVEL ||= "error";
 process.env.ADMIN_EMAILS ||= "admin@example.test";
 process.env.ADMIN_PHONE_NUMBERS ||= "";
 process.env.LEGACY_COOKIE_DOMAINS ||= ".example.test";
+// GHS → NGN conversions are switched on in the tests that cover them
+process.env.FINCRA_AUTO_CONVERT_GHS ||= "false";
 
 import "../src/polyfills";
 

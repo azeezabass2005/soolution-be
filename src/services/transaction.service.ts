@@ -31,6 +31,7 @@ export const GHS_ACCOUNT_LIFETIME_MS = 30 * 60 * 1000;
 /** Extra time before an unpaid one is closed, for transfers still on their way */
 const GHS_ACCOUNT_GRACE_MS = 6 * 60 * 60 * 1000;
 import ghsRateService, { GhsLimitError, type GhsPrice } from "./ghs-rate.service";
+import ghsConversionService from "./ghs-conversion.service";
 import transactionLimitService from "./transaction-limit.service";
 import platformSettingsService from "./platform-settings.service";
 import {
@@ -2771,13 +2772,28 @@ class TransactionService {
                 return true;
             }
             const wallet = await this.walletService.getOrCreateWallet(transaction.user);
+            // What Fincra settled to our GHS balance (it keeps its fee, which we bear): that's what gets converted
+            const reportedReceived = Number(checkout?.amountReceived);
+            const reportedFee = Number(checkout?.fee);
+            const settledGhs = reportedReceived > 0 && reportedReceived <= paid + 0.001
+                ? reportedReceived
+                : reportedFee > 0 && reportedFee < paid ? paid - reportedFee : transaction.amount;
             const credited = await withTransaction(async (tx) => {
                 if (!(await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() }, tx))) return false;
                 await this.creditWalletFromGhsCollection(transaction, detail, wallet.id, tx);
                 await transactionDetailRepository.update(detail.id, { providerStatus: status, providerPayload: checkout }, tx);
+                // Turn the cedis into naira at Fincra (booked against the NGN value credited above)
+                await ghsConversionService.queueForReceipt({
+                    transactionId: transaction.id,
+                    ghsAmount: settledGhs,
+                    bookedNgn: Math.round(((detail.fromAmount || 0) + (detail.feeAmount || 0)) * 100) / 100,
+                }, tx);
                 return true;
             });
-            if (credited) logger.info("Wallet credited from GHS collection", { userId: transaction.user, transactionId: transaction.id, ghsAmount: transaction.amount });
+            if (credited) {
+                logger.info("Wallet credited from GHS collection", { userId: transaction.user, transactionId: transaction.id, ghsAmount: transaction.amount, settledGhs });
+                ghsConversionService.kick(transaction.id);
+            }
             return true;
         }
 

@@ -62,6 +62,13 @@ function buildSystemAccountList(): SystemAccountSpec[] {
             description: 'Incoming funds that could not be matched to a user. Cleared by manual attribution.',
         },
         {
+            code: SYSTEM_ACCOUNT_CODES.FX_CONVERSION_NGN,
+            type: ACCOUNT_TYPE.REVENUE,
+            currency: 'NGN',
+            name: 'FX conversion gain/loss (NGN)',
+            description: 'Difference between what received GHS was booked at and the NGN the provider gave when it was converted. Credit: gain; debit: loss.',
+        },
+        {
             code: SYSTEM_ACCOUNT_CODES.FEES_NGN,
             type: ACCOUNT_TYPE.REVENUE,
             currency: 'NGN',

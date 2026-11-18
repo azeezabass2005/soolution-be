@@ -448,6 +448,49 @@ class FincraService {
         };
     }
 
+    // ───────────────────────── Conversions ─────────────────────────
+
+    /**
+     * Convert between the business's own balances (e.g. GHS → NGN), at a
+     * conversion quote taken just before (quotes last ~30 seconds).
+     * `customerReference` is ours and unique: Fincra refuses a repeat.
+     * https://docs.fincra.com/reference/initiate-currency-conversion
+     */
+    async convert(input: { sourceCurrency: string; destinationCurrency: string; amount: number; customerReference: string }) {
+        const quote = await this.quote({
+            sourceCurrency: input.sourceCurrency,
+            destinationCurrency: input.destinationCurrency,
+            amount: input.amount,
+            action: "send",
+            transactionType: "conversion",
+            paymentDestination: "fliqpay_wallet",
+        });
+        const business = await this.getBusinessId();
+        const res = await this.request("post", "/conversions/initiate", {
+            body: { business, quoteReference: quote.reference, customerReference: input.customerReference },
+        });
+        const data = res?.data ?? {};
+        if (!data.reference) throw new FincraError(res?.message || "Fincra didn't start the conversion", 502, res);
+        return { quote, reference: String(data.reference), id: data.id };
+    }
+
+    /** A conversion by Fincra's reference: status, amountCharged, amountReceived, rates */
+    async getConversion(reference: string) {
+        const res = await this.request("get", `/conversions/reference/${encodeURIComponent(reference)}`);
+        return (res?.data ?? null) as null | {
+            status?: string;
+            reference?: string;
+            customerReference?: string;
+            amountCharged?: number | string;
+            amountReceived?: number | string;
+            sourceCurrency?: string;
+            destinationCurrency?: string;
+            sourceExchangeRate?: number | string;
+            destinationExchangeRate?: number | string;
+            message?: string;
+        };
+    }
+
     // ───────────────────────── Payouts ─────────────────────────
 
     /**

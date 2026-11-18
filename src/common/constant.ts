@@ -64,6 +64,7 @@ export const JOURNAL_SOURCE = {
     MANUAL_ATTRIBUTION: 'manual_attribution',
     FX: 'fx',
     MANUAL_PAYOUT: 'manual_payout',
+    FX_CONVERSION: 'fx_conversion',
 } as const;
 
 // Fixed system account codes. Per-user wallet accounts use the dynamic
@@ -80,6 +81,8 @@ export const SYSTEM_ACCOUNT_CODES = {
     USER_WALLETS_NGN_TOTAL: 'USER_WALLETS_NGN_TOTAL',
     SUSPENSE_NGN: 'SUSPENSE_NGN',
     FEES_NGN: 'FEES_NGN',
+    /** Gain (credit) or loss (debit) when received GHS is converted to NGN at the provider */
+    FX_CONVERSION_NGN: 'FX_CONVERSION_NGN',
     PAYSTACK_TRANSFER_INFLIGHT_NGN: 'PAYSTACK_TRANSFER_INFLIGHT_NGN',
     REVERSAL_CLEARING_NGN: 'REVERSAL_CLEARING_NGN',
     YC_FLOAT_NGN: 'YC_FLOAT_NGN',
