@@ -361,9 +361,17 @@ class WalletService {
         await this.ensureUserLedgerAccount(wallet.user, wallet);
         const target = wallet;
 
-        // SolutionPay's funding fee (admin pricing) comes out of what Fincra settled.
-        // A deposit too small to cover it is credited in full rather than swallowed.
-        let fee = (await platformSettingsService.priceFees("funding", amount)).total;
+        // The user pays the admin's total funding fee (e.g. 1% capped at ₦500) on what
+        // they sent. Fincra already kept its part; SolutionPay takes the rest from what
+        // Fincra settled. A deposit too small to cover it is credited in full.
+        const gross = Number(deposit.sourceAmount);
+        const grossAmount = isFinite(gross) && gross >= amount ? round2(gross) : amount;
+        const reportedFee = Number(deposit.fee);
+        // Fincra's fee as reported, or the gap between sent and settled; unknown falls back to its rule
+        const providerTaken = deposit.fee !== undefined && deposit.fee !== null && isFinite(reportedFee) && reportedFee >= 0
+            ? reportedFee
+            : grossAmount > amount ? round2(grossAmount - amount) : undefined;
+        let fee = (await platformSettingsService.priceFunding(grossAmount, providerTaken)).platformFee;
         if (fee >= amount) {
             logger.warn("Deposit smaller than the funding fee; credited without a fee", { reference, amount, fee });
             fee = 0;

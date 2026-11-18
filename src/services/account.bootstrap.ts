@@ -20,7 +20,7 @@ import {
 import logger from '../utils/logger.utils';
 import {
     WALLET_CURRENCIES,
-    MANUAL_PAYOUT_CURRENCIES,
+    MANUAL_HOLD_CURRENCIES,
     fxPositionCode,
     manualPayoutPendingCode,
 } from '../common/wallet.constants';
@@ -183,7 +183,7 @@ function buildSystemAccountList(): SystemAccountSpec[] {
             description: `Net ${currency} from wallet exchanges. Credit: ${currency} taken in; debit: ${currency} owed to users that treasury must source. Sends from ${currency} wallets close it.`,
         });
     }
-    for (const currency of MANUAL_PAYOUT_CURRENCIES) {
+    for (const currency of MANUAL_HOLD_CURRENCIES) {
         accounts.push({
             code: manualPayoutPendingCode(currency),
             type: ACCOUNT_TYPE.LIABILITY,

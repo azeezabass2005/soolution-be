@@ -1,8 +1,8 @@
 import { sql } from "drizzle-orm";
-import { boolean, index, integer, pgTable, smallint, text, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, index, integer, pgTable, smallint, text, uniqueIndex, uuid, jsonb } from "drizzle-orm/pg-core";
 import { id, timestamps, timestamptz } from "../columns";
 import type { UserTier } from "../../common/tier.constants";
-import type { IdentityStatus } from "../../common/identity.constants";
+import type { IdentityAddressParts, IdentityProofOfAddress, IdentityStatus } from "../../common/identity.constants";
 import { ROLE_MAP } from "../../common/constant";
 
 export const USER_PURPOSES = ["business", "personal", "travel", "investment", "savings", "others", "spending"] as const;
@@ -39,6 +39,10 @@ export const users = pgTable(
         identityDob: text("identity_dob"),
         identityIdPhone: text("identity_id_phone"),
         identityAddress: text("identity_address"),
+        /** The home address as typed: { street, city, state, lga?, country } */
+        identityAddressParts: jsonb("identity_address_parts").$type<IdentityAddressParts>(),
+        /** Proof of address the user uploaded (kept for review, not verified): { key, name, mimeType, size, uploadedAt } */
+        identityProofOfAddress: jsonb("identity_proof_of_address").$type<IdentityProofOfAddress>(),
         identityDetailsUpdatedAt: timestamptz("identity_details_updated_at"),
         identityVerifiedName: text("identity_verified_name"),
         identityVerifiedAt: timestamptz("identity_verified_at"),

@@ -30,6 +30,49 @@ import { decryptIdentity, encryptIdentity } from "../utils/identity-crypto.utils
 import { matchNameOnId } from "../utils/name-match.utils";
 import config from "../config/env.config";
 import logger from "../utils/logger.utils";
+import { FileUploadFactory } from "./file-upload.factory";
+import type { IdentityAddressParts, IdentityProofOfAddress } from "../common/identity.constants";
+
+/** Proof of address: an image or PDF, up to 5 MB */
+const PROOF_OF_ADDRESS_UPLOAD = {
+    maxFileSize: 5 * 1024 * 1024,
+    allowedMimeTypes: ["image/jpeg", "image/png", "image/webp", "application/pdf"],
+    allowedExtensions: [".jpg", ".jpeg", ".png", ".webp", ".pdf"],
+    uploadPath: "identity/proof-of-address/",
+};
+const proofUploads = FileUploadFactory.createCustomUploadService(PROOF_OF_ADDRESS_UPLOAD);
+
+const clean = (value: unknown, max: number) => (typeof value === "string" ? value.trim().replace(/\s+/g, " ").slice(0, max) : "");
+
+/** The typed date of birth (YYYY-MM-DD, 18 or over), or a problem */
+const parseDob = (value: unknown): { dob?: string; problem?: string } => {
+    const typed = typeof value === "string" ? value.trim() : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(typed) || isNaN(Date.parse(typed))) return { problem: "Enter your date of birth" };
+    if (yearsSince(typed) < 18) return { problem: "You must be at least 18 to use Solution Pay" };
+    if (yearsSince(typed) > 120) return { problem: "Check your date of birth" };
+    return { dob: typed };
+};
+
+/** The typed home address: street, city, state, and LGA in Nigeria */
+export const parseAddressParts = (value: any): { parts?: IdentityAddressParts; problem?: { field: string; message: string } } => {
+    const country = clean(value?.country, 2).toUpperCase() || "NG";
+    const parts: IdentityAddressParts = {
+        street: clean(value?.street, 200),
+        city: clean(value?.city, 80),
+        state: clean(value?.state, 80),
+        ...(country === "NG" ? { lga: clean(value?.lga, 80) } : {}),
+        country,
+    };
+    if (parts.street.length < 5) return { problem: { field: "street", message: "Enter your house number and street" } };
+    if (parts.city.length < 2) return { problem: { field: "city", message: "Enter your city or town" } };
+    if (parts.state.length < 2) return { problem: { field: "state", message: country === "NG" ? "Choose your state" : "Enter your state or region" } };
+    if (country === "NG" && !(parts.lga && parts.lga.length >= 2)) return { problem: { field: "lga", message: "Choose your LGA" } };
+    return { parts };
+};
+
+/** "12 Allen Avenue, Ikeja, Ikeja LGA, Lagos, NG" */
+export const joinAddress = (parts: IdentityAddressParts) =>
+    [parts.street, parts.city, parts.lga ? `${parts.lga} LGA` : "", parts.state, parts.country].filter(Boolean).join(", ").slice(0, 300);
 
 const SMILE_METHOD = "smile_id_bvn";
 const PASSING = { id: ["Verified", "Passed"], liveness: ["Passed"], compare: ["Completed", "Passed"] };
@@ -184,7 +227,7 @@ class IdentityService {
     }
 
     /** Starts a BVN check: validates, enforces limits, and submits to Smile ID */
-    async submitBvn(user: IUser, bvn: unknown, images: unknown, nin?: unknown): Promise<IdentityStatusView> {
+    async submitBvn(user: IUser, bvn: unknown, images: unknown, nin?: unknown, personal?: { dob?: unknown; address?: unknown }): Promise<IdentityStatusView> {
         const userId = user.id;
         if ((user.tier ?? USER_TIER.UNVERIFIED) >= USER_TIER.INDIVIDUAL || user.identity?.status === IDENTITY_STATUS.VERIFIED) {
             throw errorResponseMessage.createError(409, "Your identity is already verified", ErrorSeverity.LOW, { code: "IDENTITY_ALREADY_VERIFIED" });
@@ -192,6 +235,13 @@ class IdentityService {
         if (!isBvn(bvn)) throw badRequest("Enter your 11-digit BVN", "INVALID_BVN");
         if (!isNin(nin)) throw badRequest("Enter your 11-digit NIN", "INVALID_NIN");
         if (nin === bvn) throw badRequest("Your NIN and BVN are different numbers. Check your NIN.", "INVALID_NIN");
+        // Date of birth, home address and proof of address come before the selfie
+        const { dob, problem: dobProblem } = parseDob(personal?.dob);
+        if (dobProblem) throw badRequest(dobProblem, "INVALID_DOB");
+        const { parts: addressParts, problem: addressProblem } = parseAddressParts(personal?.address);
+        if (addressProblem) throw errorResponseMessage.createError(400, addressProblem.message, ErrorSeverity.LOW, { code: "INVALID_ADDRESS", field: addressProblem.field });
+        const stored = await userRepository.findById(userId);
+        if (!stored?.identity?.proofOfAddress) throw badRequest("Upload a proof of address", "PROOF_OF_ADDRESS_REQUIRED");
         const selfie = this.validateImages(images);
 
         const existing = await verificationRepository.findPendingBvn(userId);
@@ -257,7 +307,7 @@ class IdentityService {
 
         await userRepository.updateIdentity(
             userId,
-            { status: IDENTITY_STATUS.PENDING, failureReason: null },
+            { status: IDENTITY_STATUS.PENDING, failureReason: null, dob, address: joinAddress(addressParts!), addressParts, detailsUpdatedAt: new Date() },
             { statusIsNot: IDENTITY_STATUS.VERIFIED }
         );
         await this.auditLog.logAction(undefined, userId, "IDENTITY_BVN_SUBMITTED", undefined, { verificationId: verification.id, bvnLast4: bvn.slice(-4) });
@@ -388,7 +438,9 @@ class IdentityService {
 
         let outcome = this.evaluate(result, user);
         if (outcome.passed) {
-            const info = personalInfoFrom(result);
+            const record = personalInfoFrom(result);
+            // What the user typed at verification wins over the BVN record (often out of date)
+            const info = { ...record, dob: user.identity?.dob ? undefined : record.dob, address: user.identity?.address ? undefined : record.address };
             this.logRecordFields("bvn", info);
             try {
                 await userRepository.updateIdentity(user.id, {
@@ -696,6 +748,59 @@ class IdentityService {
     }
 
     /** For the admin user page: state, attempts and recent checks */
+    /** Saves the user's proof of address (replacing an earlier one). Kept for review, not verified. */
+    async uploadProofOfAddress(user: IUser, file: Express.Multer.File | undefined): Promise<{ name: string; uploadedAt: string }> {
+        if (!file) throw badRequest("Choose a file to upload", "PROOF_OF_ADDRESS_REQUIRED");
+        if (!PROOF_OF_ADDRESS_UPLOAD.allowedMimeTypes.includes(file.mimetype)) throw badRequest("Upload a photo or PDF", "INVALID_FILE");
+        if (file.size > PROOF_OF_ADDRESS_UPLOAD.maxFileSize) throw badRequest("That file is over 5 MB", "INVALID_FILE");
+        const upload = await proofUploads.uploadFile(file, {
+            folder: `${PROOF_OF_ADDRESS_UPLOAD.uploadPath}${user.id}/`,
+            customFilename: `proof-${Date.now()}`,
+            makePublic: false,
+        });
+        if (!upload.success || !upload.file) throw errorResponseMessage.unableToComplete(upload.error || "We couldn't upload that file. Please try again.");
+        const previous = (await userRepository.findById(user.id))?.identity?.proofOfAddress;
+        const proof: IdentityProofOfAddress = {
+            key: upload.file.key,
+            name: clean(file.originalname, 120) || "proof-of-address",
+            mimeType: file.mimetype,
+            size: file.size,
+            uploadedAt: new Date().toISOString(),
+        };
+        await userRepository.updateIdentity(user.id, { proofOfAddress: proof });
+        if (previous?.key && previous.key !== proof.key) {
+            proofUploads.deleteFile(previous.key).catch(() => false);
+        }
+        return { name: proof.name, uploadedAt: proof.uploadedAt };
+    }
+
+    /** Everything the user gave at verification, for admins (never the full BVN or NIN) */
+    private async adminDetails(userId: string) {
+        const user = await userRepository.findById(userId);
+        const identity = user?.identity;
+        if (!identity) return null;
+        let proofUrl: string | undefined;
+        if (identity.proofOfAddress?.key) {
+            try {
+                proofUrl = await proofUploads.getFileUrl(identity.proofOfAddress.key, 15 * 60);
+            } catch (error: any) {
+                logger.warn("Proof of address link failed", { userId, error: error?.message });
+            }
+        }
+        return {
+            bvnLast4: identity.bvnLast4,
+            ninLast4: identity.ninLast4,
+            dob: identity.dob,
+            address: identity.address,
+            addressParts: identity.addressParts,
+            phoneOnId: identity.idPhone,
+            proofOfAddress: identity.proofOfAddress
+                ? { name: identity.proofOfAddress.name, mimeType: identity.proofOfAddress.mimeType, size: identity.proofOfAddress.size, uploadedAt: identity.proofOfAddress.uploadedAt, url: proofUrl }
+                : null,
+            detailsUpdatedAt: identity.detailsUpdatedAt,
+        };
+    }
+
     async adminSummary(userId: string) {
         const [status, recent] = await Promise.all([
             this.getStatus(userId),
@@ -708,6 +813,7 @@ class IdentityService {
             verifiedName: user?.identity?.verifiedName,
             verifiedAt: user?.identity?.verifiedAt,
             method: user?.identity?.method,
+            details: await this.adminDetails(userId),
             checks: recent.map((check) => ({
                 id: check.id,
                 kind: check.kind,

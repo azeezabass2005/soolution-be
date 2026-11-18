@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import BaseController from "../base-controller";
+import { MulterMiddleware } from "../../../middlewares/multer.middleware";
 import identityService from "../../../services/identity.service";
 import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 import { ROLE_MAP } from "../../../common/constant";
@@ -24,6 +25,8 @@ class IdentityController extends BaseController {
     protected setupRoutes(): void {
         this.router.get("/", this.getStatus.bind(this));
         this.router.post("/bvn", this.submitBvn.bind(this));
+        // Proof of address, uploaded before the selfie (kept for review, not verified)
+        this.router.post("/proof-of-address", MulterMiddleware.single("file"), MulterMiddleware.handleError, this.uploadProofOfAddress.bind(this));
         this.router.get("/transfer-details", this.getTransferDetails.bind(this));
         this.router.post("/transfer-details", this.submitTransferDetails.bind(this));
         this.router.get("/users/:userId", this.requireAdmin, this.getUserIdentity.bind(this));
@@ -46,9 +49,18 @@ class IdentityController extends BaseController {
         }
     }
 
+    private async uploadProofOfAddress(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const proof = await identityService.uploadProofOfAddress(res.locals.user, req.file);
+            this.sendSuccess(res, { proofOfAddress: proof });
+        } catch (error) {
+            return next(error);
+        }
+    }
+
     private async submitBvn(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const status = await identityService.submitBvn(res.locals.user, req.body?.bvn, req.body?.images, req.body?.nin);
+            const status = await identityService.submitBvn(res.locals.user, req.body?.bvn, req.body?.images, req.body?.nin, { dob: req.body?.dob, address: req.body?.address });
             this.sendSuccess(res, { message: "We're checking your details. This usually takes a minute or two.", ...status }, 201);
         } catch (error) {
             next(error);

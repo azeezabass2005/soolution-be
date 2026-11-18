@@ -3,8 +3,8 @@ import type { PlatformSettings as IPlatformSettings } from "../types/entities";
 import logger from "../utils/logger.utils";
 import { DEFAULT_TIER_DAILY_LIMIT_NGN, USER_TIER, UserTier } from "../common/tier.constants";
 import {
-    FeeBreakdown, FeePricing, FxPricing, PricingConfig, ZERO_FEE, ZERO_RATE,
-    applyRateRule, parsePricing, priceFees, withDefaults,
+    FeeBreakdown, FeePricing, FundingFeeBreakdown, FundingPricing, FxPricing, NO_LIMITS, PricingConfig, ZERO_FEE, ZERO_RATE,
+    applyRateRule, parsePricing, priceFees, priceFunding, withDefaults,
 } from "../common/pricing";
 
 export type ProviderKey = 'ogateway' | 'yellowcard' | 'fincra';
@@ -128,6 +128,8 @@ class PlatformSettingsService {
             providerFee: { ...ZERO_FEE, percent: settings.providerBaseFeePercent?.fincra ?? 0 },
             platformFee: { ...ZERO_FEE, percent: settings.additionalFeePercent ?? 0 },
             rate: { ...ZERO_RATE, percent: settings.rateMarkupPercent ?? 0 },
+            feeCurrency: "GHS",
+            limits: { ...NO_LIMITS },
         });
         return { ...withDefaults(null), send: { "NGN-GHS": fx() }, receive: { "GHS-NGN": fx() } };
     }
@@ -149,6 +151,17 @@ class PlatformSettingsService {
     }
 
     /** The user's rate for a pair (NGN per 1 foreign unit) from the provider's, with the pair's buffer */
+    /** A pair's rules (fees, rate, fee currency, limits), or undefined when the pair isn't priced */
+    public async pairPricing(operation: "send" | "receive", pair: string): Promise<FxPricing | undefined> {
+        return (await this.getPricing())[operation][pair];
+    }
+
+    /** A deposit's fees: what the user pays in total, Fincra's part and SolutionPay's (see priceFunding) */
+    public async priceFunding(grossAmount: number, providerTaken?: number): Promise<FundingFeeBreakdown & { pricing: FundingPricing }> {
+        const pricing = (await this.getPricing()).funding.NGN;
+        return { ...priceFunding(pricing, grossAmount, providerTaken), pricing };
+    }
+
     public async applyPairRate(operation: "send" | "receive", pair: string, providerRate: number): Promise<number> {
         const pricing = await this.getPricing();
         return applyRateRule(pricing[operation][pair]?.rate, providerRate, operation);

@@ -13,6 +13,10 @@ import {MulterMiddleware} from "../../../middlewares/multer.middleware";
 import receiptService from "../../../services/receipt.service";
 
 import transactionLimitService from "../../../services/transaction-limit.service";
+
+/** Lagos is UTC+1 all year */
+const WAT_OFFSET_MS = 60 * 60 * 1000;
+
 class TransactionController extends BaseController {
 
     private transactionService: TransactionService;
@@ -216,7 +220,8 @@ class TransactionController extends BaseController {
 
     /**
      * Parse YYYY-MM-DD startDate/endDate query params into a { from, to } range
-     * (whole UTC days). Returns undefined if no valid dates are provided.
+     * of whole days in Lagos time (WAT, UTC+1), so "today" is the user's today.
+     * Returns undefined if no valid dates are provided.
      */
     private buildDateRangeFilter(startDate: unknown, endDate: unknown): { from?: Date; to?: Date } | undefined {
         const dateFilter: { from?: Date; to?: Date } = {};
@@ -228,7 +233,7 @@ class TransactionController extends BaseController {
                 const month = parseInt(parts[1], 10) - 1;
                 const day = parseInt(parts[2], 10);
                 if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
-                    dateFilter.from = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+                    dateFilter.from = new Date(Date.UTC(year, month, day, 0, 0, 0, 0) - WAT_OFFSET_MS);
                 }
             }
         }
@@ -240,7 +245,7 @@ class TransactionController extends BaseController {
                 const month = parseInt(parts[1], 10) - 1;
                 const day = parseInt(parts[2], 10);
                 if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
-                    dateFilter.to = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+                    dateFilter.to = new Date(Date.UTC(year, month, day, 23, 59, 59, 999) - WAT_OFFSET_MS);
                 }
             }
         }

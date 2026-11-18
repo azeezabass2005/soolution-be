@@ -50,6 +50,13 @@
       "when": 1794998119934,
       "tag": "0006_payment_link_options",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795020980590,
+      "tag": "0007_identity_address",
+      "breakpoints": true
     }
   ]
 }

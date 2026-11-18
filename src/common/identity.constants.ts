@@ -46,3 +46,22 @@ export type TransferDetail = "bvn" | "nin" | "dob" | "address" | "phone";
 
 /** Smile ID ID lookups (each is paid) a user can run per rolling 24 hours when completing their details */
 export const DETAILS_MAX_LOOKUPS = 5;
+
+/** A home address as typed at verification. `lga` is for Nigeria only. */
+export interface IdentityAddressParts {
+    street: string;
+    city: string;
+    state: string;
+    lga?: string;
+    /** ISO country code, e.g. "NG" */
+    country: string;
+}
+
+/** A proof-of-address file the user uploaded; kept for review, not verified */
+export interface IdentityProofOfAddress {
+    key: string;
+    name: string;
+    mimeType: string;
+    size: number;
+    uploadedAt: string;
+}

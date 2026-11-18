@@ -2,6 +2,7 @@ import z, {ZodError} from "zod";
 import {Request, Response, NextFunction} from "express";
 import errorResponseMessage from "../common/messages/error-response-message";
 import zodErrorHandler from "./zod.error";
+import { passwordProblem } from "../common/password-policy";
 
 const ZRegister = z.object({
     firstName: z
@@ -24,10 +25,14 @@ const ZRegister = z.object({
             const emailRegex = /^[a-zA-Z0-9._+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/;
             return emailRegex.test(email);
         }, "Invalid email format"),
-    password: z.string().min(8, "Password must be at least 8 characters."),
+    password: z.string({ required_error: "Choose a password" }),
     // WhatsApp Number - Temporarily disabled for registration
     // TODO: Can be restored by uncommenting the line below if needed in the future
     // whatsappNumber: z.string().min(11, "Whatsapp Number must be at least 11 digits"),
+}).superRefine((data, ctx) => {
+    // Strong enough, and not built from the person's name or email
+    const problem = passwordProblem(data.password, data);
+    if (problem) ctx.addIssue({ code: "custom", path: ["password"], message: problem });
 })
 
 export const SIGNUP_PURPOSES = ['business', 'personal', 'travel', 'investment', 'savings', 'others'] as const;

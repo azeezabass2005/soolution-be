@@ -5,6 +5,16 @@ import {ROLE_MAP} from "../../../common/constant";
 import RoleMiddleware from "../../../middlewares/role.middleware";
 import {userUpdateValidate} from "../../../validators";
 import VerificationService from "../../../services/verification.service";
+import { approvedBusinessName } from "../../../services/business-name.service";
+import { USER_TIER } from "../../../common/tier.constants";
+import rateLimit from "express-rate-limit";
+import HashService from "../../../utils/hash.utils";
+import UserService from "../../../services/user.service";
+import NotificationService from "../../../utils/notification.utils";
+import { passwordProblem } from "../../../common/password-policy";
+import { clearAuthCookies } from "../../../utils/auth-cookies";
+import { ErrorSeverity } from "../../../common/messages/error-response-message";
+import logger from "../../../utils/logger.utils";
 
 /**
  * Controller handling authentication-related operations
@@ -31,10 +41,57 @@ class UserController extends BaseController {
     protected setupRoutes(): void {
         // Get Current User route
         this.router.get("/current", this.getCurrentUser.bind(this));
+        // Change password (needs the current one); signs out every device
+        const changeLimiter = rateLimit({
+            windowMs: 15 * 60 * 1000,
+            max: 10,
+            standardHeaders: true,
+            legacyHeaders: false,
+            message: { message: "Too many attempts. Please wait a few minutes and try again." },
+        });
+        this.router.post("/change-password", changeLimiter, this.changePassword.bind(this));
         // Get All Users route
         this.router.get("/", RoleMiddleware.isAdmin, this.getAllUsers.bind(this));
         // Update user route
         this.router.patch("/:id", RoleMiddleware.isAdmin, userUpdateValidate,  this.updateUser.bind(this));
+    }
+
+    private async changePassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const { currentPassword, newPassword } = req.body || {};
+            const fail = (path: string, message: string) => errorResponseMessage.createError(400, message, ErrorSeverity.LOW, { issues: [{ path, message }] });
+            if (typeof currentPassword !== "string" || !currentPassword) return next(fail("currentPassword", "Enter your current password"));
+
+            const userService = new UserService();
+            const user = await userService.findById(res.locals.user.id, { withSecrets: true });
+            if (!user?.password) return next(errorResponseMessage.unauthorized());
+            if (!(await HashService.verifyPassword(currentPassword, user.password))) {
+                return next(fail("currentPassword", "That isn't your current password"));
+            }
+            const problem = passwordProblem(newPassword, user);
+            if (problem) return next(fail("newPassword", problem));
+            if (await HashService.verifyPassword(newPassword, user.password)) {
+                return next(fail("newPassword", "Choose a password you haven't been using"));
+            }
+
+            const hashed = await HashService.hashPassword(newPassword);
+            await userService.update(user.id, { password: hashed.password });
+            // Every session ends, this one too: the user signs in again with the new password
+            await userService.endAllSessions(user.id);
+            clearAuthCookies(res);
+            logger.info("Password changed", { userId: user.id });
+
+            new NotificationService().emailService.sendNotificationEmail(user.email, {
+                name: user.firstName || "there",
+                eyebrow: "Security",
+                title: "Your password was changed",
+                message: "Your Solution Pay password was just changed, and you've been signed out on every device. If this wasn't you, contact support@solutionpay.co straight away.",
+            }).catch((error: any) => logger.warn("Password change notice failed", { error: error?.message }));
+
+            return this.sendSuccess(res, { message: "Password changed. Sign in again with your new password." });
+        } catch (error) {
+            return next(error);
+        }
     }
 
     /**
@@ -64,7 +121,9 @@ class UserController extends BaseController {
             const sanitizedUser = {
                 ...otherUserData,
                 role: this.getRoleString(user.role),
-                verificationData: verificationData ?? null
+                verificationData: verificationData ?? null,
+                /** Shown instead of the person's name once a business account is approved */
+                businessName: (user.tier >= USER_TIER.BUSINESS ? await approvedBusinessName(user.id) : undefined) ?? null,
             }
             
             return this.sendSuccess(res, {

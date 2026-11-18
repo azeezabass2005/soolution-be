@@ -1,5 +1,6 @@
 import {NextFunction, Request, Response} from "express";
 import BaseController from "../base-controller";
+import { passwordProblem } from "../../../common/password-policy";
 import HashService from "../../../utils/hash.utils";
 import TokenBuilder, {TokenUtils} from "../../../utils/token.utils";
 import errorResponseMessage, {ErrorResponseCode, ErrorSeverity} from "../../../common/messages/error-response-message";
@@ -549,12 +550,9 @@ class AuthController extends BaseController {
             const invalidLink = () => errorResponseMessage.createError(400, "This reset link is invalid or has expired. Request a new one.", ErrorSeverity.LOW, { code: "RESET_LINK_INVALID" });
 
             if (typeof token !== "string" || !token) return next(invalidLink());
-            if (typeof newPassword !== "string" || newPassword.length < 8) {
-                return next(errorResponseMessage.createError(400, "Password must be at least 8 characters.", ErrorSeverity.LOW, { issues: [{ path: "newPassword", message: "Use at least 8 characters" }] }));
-            }
-            if (newPassword.length > 128) {
-                return next(errorResponseMessage.createError(400, "Password is too long.", ErrorSeverity.LOW));
-            }
+            const weak = (problem: string) => errorResponseMessage.createError(400, problem, ErrorSeverity.LOW, { issues: [{ path: "newPassword", message: problem }] });
+            const generalProblem = passwordProblem(newPassword);
+            if (generalProblem) return next(weak(generalProblem));
 
             let decoded: any;
             try {
@@ -571,6 +569,9 @@ class AuthController extends BaseController {
             if (!user || passwordFingerprint(user.password) !== decoded.data.pfp) {
                 return next(invalidLink());
             }
+
+            const personalProblem = passwordProblem(newPassword, user);
+            if (personalProblem) return next(weak(personalProblem));
 
             const hashedPassword = await HashService.hashPassword(newPassword);
             await this.userService.update(user.id, { password: hashedPassword.password });

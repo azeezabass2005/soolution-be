@@ -12,6 +12,14 @@ export const isWalletCurrency = (value: unknown): value is WalletCurrency =>
 
 /** Manual (ops-paid) sends that can be paid from the matching wallet */
 export const MANUAL_PAYOUT_CURRENCIES = ["RMB", "GHS", "KES", "XAF"] as const;
+/** Wallets a manual payout can be held from: the matching ones, and NGN (manual GHS sends paid in naira) */
+export const MANUAL_HOLD_CURRENCIES = [...MANUAL_PAYOUT_CURRENCIES, "NGN"] as const;
+
+/** Manual GHS sends, paid from the NGN wallet at the buffered rate with no fee */
+export const MANUAL_GHS_SEND = {
+    /** Smallest manual send, in naira */
+    MIN_NGN: 500_000,
+} as const;
 
 /** How long an exchange quote can be accepted */
 export const FX_QUOTE_TTL_MS = 60 * 1000;

@@ -30,7 +30,7 @@ import spotflowService from "./spotflow.service";
 export const GHS_ACCOUNT_LIFETIME_MS = 30 * 60 * 1000;
 /** Extra time before an unpaid one is closed, for transfers still on their way */
 const GHS_ACCOUNT_GRACE_MS = 6 * 60 * 60 * 1000;
-import ghsRateService, { type GhsPrice } from "./ghs-rate.service";
+import ghsRateService, { GhsLimitError, type GhsPrice } from "./ghs-rate.service";
 import transactionLimitService from "./transaction-limit.service";
 import platformSettingsService from "./platform-settings.service";
 import {
@@ -52,7 +52,7 @@ import {
 import WalletService from "./wallet.service";
 import WalletTransactionService from "./wallet-transaction.service";
 import walletSendService from "./wallet-send.service";
-import { MANUAL_PAYOUT_CURRENCIES } from "../common/wallet.constants";
+import { MANUAL_GHS_SEND, MANUAL_PAYOUT_CURRENCIES } from "../common/wallet.constants";
 import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
 import { pickYellowCardNetwork } from "../utils/momo-network.utils";
@@ -149,6 +149,18 @@ type ManualTransactionInput = {
 };
 
 class TransactionService {
+    /** The admin's per-transaction GHS limits, as a 400 the user can act on */
+    private async checkGhsLimits(direction: 'send' | 'receive', ghsAmount: number): Promise<void> {
+        try {
+            await ghsRateService.assertWithinLimits(direction, ghsAmount);
+        } catch (err) {
+            if (err instanceof GhsLimitError) {
+                throw errorResponseMessage.createError(400, err.message, ErrorSeverity.LOW, { code: "TX_LIMIT" });
+            }
+            throw err;
+        }
+    }
+
 
     bankAccountDetailsService: BankAccountDetailsService;
     notificationService: NotificationService;
@@ -1848,6 +1860,7 @@ class TransactionService {
         let providerRate: number;
         let userRate: number;
         let price: GhsPrice;
+        await this.checkGhsLimits('send', amount);
         try {
             // The admin's pricing for NGN→GHS: Fincra's rate plus the buffer, and the fees
             price = await ghsRateService.price('send', amount);
@@ -2038,6 +2051,138 @@ class TransactionService {
     };
 
     /** Fincra's account number and codes for a Ghana recipient */
+    /**
+     * A manual GHS send: for larger amounts (from ₦500,000), with no fee. The
+     * naira comes from the NGN wallet at the buffered rate and is held until ops
+     * pays the recipient (1–2 hours, 8am–8pm WAT on business days), then marks
+     * it complete. Rejecting it returns the naira to the wallet.
+     */
+    public createManualGhsSend = async (
+        params: {
+            amount: number;
+            destination: { accountType: 'momo' | 'bank'; accountName: string; accountNumber: string; network?: string; bank?: string };
+            pin?: string;
+            idempotencyKey?: string;
+        },
+        userId: string,
+    ) => {
+        const amount = Math.round(Number(params.amount) * 100) / 100;
+        if (!(amount > 0)) throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
+        const destination = params.destination;
+        if (!destination || !['momo', 'bank'].includes(destination.accountType)) {
+            throw errorResponseMessage.payloadIncorrect("Choose mobile money or a bank account for the recipient");
+        }
+        const accountName = String(destination.accountName || '').trim();
+        const accountNumber = String(destination.accountNumber || '').replace(/\s+/g, '');
+        if (!accountName) throw errorResponseMessage.createError(400, "Enter the recipient's name", ErrorSeverity.LOW);
+        const isMomo = destination.accountType === 'momo';
+        if (isMomo) {
+            let digits = accountNumber.replace(/^\+/, '');
+            if (digits.startsWith('233')) digits = digits.slice(3);
+            if (digits.startsWith('0')) digits = digits.slice(1);
+            if (!/^\d{9}$/.test(digits)) throw errorResponseMessage.createError(400, "Enter a valid Ghana mobile money number", ErrorSeverity.LOW);
+            if (!String(destination.network || '').trim()) throw errorResponseMessage.createError(400, "Choose a mobile money network", ErrorSeverity.LOW);
+        } else {
+            if (!String(destination.bank || '').trim()) throw errorResponseMessage.createError(400, "Choose the recipient's bank", ErrorSeverity.LOW);
+            if (!/^[0-9A-Za-z-]{6,20}$/.test(accountNumber)) throw errorResponseMessage.createError(400, "Enter a valid account number", ErrorSeverity.LOW);
+        }
+        if (!params.pin) throw errorResponseMessage.payloadIncorrect("Transaction PIN is required");
+        await this.pinService.verifyPin(userId, params.pin);
+
+        let price: GhsPrice;
+        try {
+            price = await ghsRateService.price('send', amount);
+        } catch (err: any) {
+            logger.error("GHS rate lookup failed for a manual send", { error: err?.message });
+            throw errorResponseMessage.createError(400, "We couldn't get the NGN→GHS exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
+        }
+        // No fee: the naira is the GHS at the user's (buffered) rate
+        const ngnAmount = price.subtotalNgn;
+        if (!(ngnAmount >= MANUAL_GHS_SEND.MIN_NGN)) {
+            throw errorResponseMessage.createError(
+                400,
+                `Manual payments start at ₦${MANUAL_GHS_SEND.MIN_NGN.toLocaleString('en-US')}. For smaller amounts, use instant.`,
+                ErrorSeverity.LOW,
+                { code: "MANUAL_MINIMUM", minNgn: MANUAL_GHS_SEND.MIN_NGN },
+            );
+        }
+        const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(userId, [
+            { amount: ngnAmount, currency: 'NGN' },
+            { amount, currency: 'GHS' },
+        ]);
+        await walletSendService.assertCanPay(userId, 'NGN', ngnAmount);
+
+        if (params.idempotencyKey) {
+            const duplicate = await this.findDuplicate(params.idempotencyKey, userId);
+            if (duplicate) return duplicate;
+        }
+
+        const detailType = (isMomo ? DETAIL_TYPE.MOBILE_MONEY : DETAIL_TYPE.BANK_TRANSFER) as DetailType;
+        const transaction = await transactionRepository.create({
+            ngnValue: txNgnValue ?? undefined,
+            user: userId,
+            reference: this.generateBankTransferTransactionReference('GHS'),
+            amount,
+            fromCurrency: 'NGN',
+            currency: 'GHS',
+            detailType,
+            status: TRANSACTION_STATUS.PENDING_INPUT as TransactionStatus,
+            initiatedAt: new Date(),
+            lockedRate: price.userRate,
+            lockedRateFromCurrency: 'NGN',
+            lockedRateToCurrency: 'GHS',
+            lockedRateAt: new Date(),
+        });
+        if (params.idempotencyKey) await this.idempotencyService.updateKeyWithTransaction(params.idempotencyKey, transaction.id);
+
+        const details = await transactionDetailRepository.create({
+            transactionId: transaction.id,
+            type: detailType,
+            institutionType: isMomo ? 'momo' : 'bank',
+            fromAmount: ngnAmount,
+            feeAmount: 0,
+            feePercent: 0,
+            fundingCurrency: 'NGN',
+            fundingAmount: ngnAmount,
+            fundingFee: 0,
+            accountName,
+            ...(isMomo
+                ? { momoName: accountName, momoNumber: accountNumber, momoNetwork: destination.network }
+                : { bankName: String(destination.bank).trim(), accountNumber }),
+        } as any);
+
+        // The naira leaves the wallet now and waits for ops
+        try {
+            await withTransaction(async (tx) => {
+                await walletSendService.holdForManualPayout({
+                    userId,
+                    currency: 'NGN',
+                    amount: ngnAmount,
+                    transactionId: transaction.id,
+                    reference: transaction.reference,
+                    description: `Manual payment to ${accountName} (GHS ${amount.toLocaleString('en-US')})`,
+                }, tx);
+                await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.AWAITING_CONFIRMATION as TransactionStatus }, tx);
+            });
+        } catch (error) {
+            await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.CANCELLED as TransactionStatus, cancelReason: "Wallet payment could not be taken" });
+            throw error;
+        }
+
+        const recipient = isMomo
+            ? `${accountName} · ${destination.network} mobile money ${accountNumber}`
+            : `${accountName} · ${destination.bank} ${accountNumber}`;
+        Promise.resolve().then(() => this.notificationService.notifyAdmins(config.ADMIN_EMAILS, {
+            title: 'New manual GHS payment',
+            message: `${transaction.reference}: pay GHS ${amount.toLocaleString('en-US')} to ${recipient}. ₦${ngnAmount.toLocaleString('en-US')} is held from the customer's wallet.`,
+            actionUrl: `${config.FRONTEND_URL}/dashboard/admin/transactions`,
+            buttonText: 'Open transactions',
+        } as any, config.ADMIN_PHONE_NUMBERS)).catch(() => undefined);
+
+        const created = await transactionRepository.findById(transaction.id);
+        return { ...(created ?? transaction), details: { ...details } };
+    };
+
     private ghsPayoutTarget = async (destination: { accountType: 'momo' | 'bank'; accountNumber: string; network?: string; bank?: string }) => {
         const number = String(destination.accountNumber || '').replace(/\s+/g, '');
         if (destination.accountType !== 'bank') {
@@ -2102,6 +2247,7 @@ class TransactionService {
         let providerRate: number;
         let userRate: number;
         let price: GhsPrice;
+        await this.checkGhsLimits('receive', amount);
         try {
             // The admin's pricing for GHS→NGN: Fincra's rate less the buffer, and the fees
             price = await ghsRateService.price('receive', amount);
@@ -2287,6 +2433,7 @@ class TransactionService {
         if (amount < 1) throw errorResponseMessage.createError(400, "The smallest amount is GHS 1.", ErrorSeverity.LOW);
 
         let price: GhsPrice;
+        await this.checkGhsLimits('receive', amount);
         try {
             price = await ghsRateService.price('receive', amount);
         } catch (err: any) {

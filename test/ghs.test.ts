@@ -135,17 +135,43 @@ describe("GHS through Fincra", () => {
             await platformSettingsService.updateSettings({ pricing: { send: { "NGN-GHS": {
                 rate: { percent: 2, fixed: 1 },                              // ₦100 → ₦103 per GHS
                 providerFee: { percent: 0, fixed: 0, min: 0, cap: 0 },
-                platformFee: { percent: 1, fixed: 50, min: 0, cap: 200 },    // 1% + ₦50, at most ₦200
+                platformFee: { percent: 1, fixed: 0.5, min: 0, cap: 2 },     // 1% + GHS 0.50, at most GHS 2
             } } } }, "00000000-0000-4000-8000-000000000001");
             const user = await createUser();
             await fundWallet(user.id, 50_000);
             fincra.createPayout.mockResolvedValue({ reference: "FP_GH_P", status: "processing" });
 
             await send(user.id);
+            // 100 GHS × ₦103 = ₦10,300; fee 1% of GHS 100 + GHS 0.50 = GHS 1.50, at the user's rate ₦154.50
+            expect(await walletBalance(user.id)).toBe(50_000 - 10_454.5);
+            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(154.5);
+            expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
+        it("keeps an older config's fee amounts in NGN", async () => {
+            const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
+            await platformSettingsService.updateSettings({ pricing: { send: { "NGN-GHS": {
+                rate: { percent: 2, fixed: 1 },
+                providerFee: { percent: 0, fixed: 0, min: 0, cap: 0 },
+                platformFee: { percent: 1, fixed: 50, min: 0, cap: 200 },    // 1% + ₦50, at most ₦200
+                feeCurrency: "NGN",
+            } } } }, "00000000-0000-4000-8000-000000000001");
+            const user = await createUser();
+            await fundWallet(user.id, 50_000);
+            fincra.createPayout.mockResolvedValue({ reference: "FP_GH_N", status: "processing" });
+            await send(user.id);
             // 100 GHS × ₦103 = ₦10,300; fee min(103 + 50, 200) = ₦153
             expect(await walletBalance(user.id)).toBe(50_000 - 10_453);
-            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(153);
-            expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
+        it("refuses an amount outside the admin's per-transaction limits, before charging", async () => {
+            const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
+            await platformSettingsService.updateSettings({ pricing: { send: { "NGN-GHS": { limits: { min: 0, max: 50 } } } } }, "00000000-0000-4000-8000-000000000001");
+            const user = await createUser();
+            await fundWallet(user.id, 50_000);
+            await expect(send(user.id)).rejects.toMatchObject({ response_code: 400, message: "The most you can do in one transaction is GHS 50." });
+            expect(fincra.createPayout).not.toHaveBeenCalled();
+            expect(await walletBalance(user.id)).toBe(50_000);
         });
 
         it("refuses before charging when Fincra's cost is above what the user would pay", async () => {
@@ -207,6 +233,52 @@ describe("GHS through Fincra", () => {
             await expect(send(user.id, { destination: { accountType: "momo", accountName: "Kofi", accountNumber: "12", network: "MTN" } })).rejects.toMatchObject({ response_code: 400 });
             expect(fincra.createPayout).not.toHaveBeenCalled();
             expect(await walletBalance(user.id)).toBe(50_000);
+        });
+    });
+
+    describe("manual GHS sends (from ₦500,000, no fee, paid by ops)", () => {
+        const manual = (userId: string, amount: number) => transactionService.createManualGhsSend({
+            amount,
+            destination: { accountType: "bank", accountName: "Kofi Mensah", accountNumber: "1234567890", bank: "GCB Bank" },
+            pin: TEST_PIN,
+        }, userId);
+
+        it("holds the naira at the user's rate with no fee, and returns it if ops rejects", async () => {
+            const { default: walletSendService } = await import("../src/services/wallet-send.service");
+            const user = await createUser();
+            await fundWallet(user.id, 600_000);
+            // 5,000 GHS at ₦100 = ₦500,000, the minimum
+            const transaction: any = await manual(user.id, 5_000);
+            expect(transaction).toMatchObject({ status: "awaiting_confirmation", amount: 5_000, currency: "GHS", detailType: "bank_transfer" });
+            expect(transaction.details).toMatchObject({ fundingCurrency: "NGN", fundingAmount: 500_000, fundingFee: 0, feeAmount: 0 });
+            expect(await walletBalance(user.id)).toBe(100_000);
+            expect(await accountBalance("MANUAL_PAYOUT_PENDING_NGN")).toBe(500_000);
+            expect(fincra.createPayout).not.toHaveBeenCalled();
+
+            await transactionService.rejectManualTransaction(transaction.id, "Recipient bank details were wrong");
+            expect(await walletBalance(user.id)).toBe(600_000);
+            expect(await accountBalance("MANUAL_PAYOUT_PENDING_NGN")).toBe(0);
+
+            // A second one completed by ops: the naira moves to the NGN position
+            const paid: any = await manual(user.id, 5_500);
+            await walletSendService.completeManualPayout(paid.id);
+            expect(await walletBalance(user.id)).toBe(50_000);
+            expect(await accountBalance("MANUAL_PAYOUT_PENDING_NGN")).toBe(0);
+            expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
+        });
+
+        it("refuses amounts under ₦500,000, before charging", async () => {
+            const user = await createUser();
+            await fundWallet(user.id, 600_000);
+            await expect(manual(user.id, 4_999)).rejects.toMatchObject({ response_code: 400, message: "Manual payments start at ₦500,000. For smaller amounts, use instant." });
+            expect(await walletBalance(user.id)).toBe(600_000);
+        });
+
+        it("refuses when the wallet can't cover it", async () => {
+            const user = await createUser();
+            await fundWallet(user.id, 400_000);
+            await expect(manual(user.id, 5_000)).rejects.toBeTruthy();
+            expect(await walletBalance(user.id)).toBe(400_000);
         });
     });
 

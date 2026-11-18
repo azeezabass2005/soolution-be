@@ -30,6 +30,8 @@ const IDENTITY_COLUMNS = {
     dob: "identityDob",
     idPhone: "identityIdPhone",
     address: "identityAddress",
+    addressParts: "identityAddressParts",
+    proofOfAddress: "identityProofOfAddress",
     detailsUpdatedAt: "identityDetailsUpdatedAt",
     verifiedName: "identityVerifiedName",
     verifiedAt: "identityVerifiedAt",

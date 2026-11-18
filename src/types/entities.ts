@@ -1,4 +1,5 @@
 import type { PricingConfig } from "../common/pricing";
+import type { IdentityAddressParts, IdentityProofOfAddress } from "../common/identity.constants";
 import type {
     accounts,
     auditLogs,
@@ -61,6 +62,10 @@ export interface UserIdentity {
     /** Phone on the BVN record */
     idPhone?: string;
     address?: string;
+    /** The address as typed: street, city, state, LGA (Nigeria) and country */
+    addressParts?: IdentityAddressParts;
+    /** The proof-of-address file the user uploaded */
+    proofOfAddress?: IdentityProofOfAddress;
     detailsUpdatedAt?: Date;
     verifiedName?: string;
     verifiedAt?: Date;

@@ -1,5 +1,6 @@
 import express, { Express, Request, Response } from 'express';
 import type { Server } from 'http';
+import { environmentMismatch } from "./utils/environment-check.utils";
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
@@ -247,6 +248,9 @@ class App {
      * @public
      */
     public async start(): Promise<void> {
+        // Staging and production must never send people to each other's site
+        const mismatch = environmentMismatch(config.COOKIE_DOMAIN, config.FRONTEND_URL);
+        if (mismatch) logger.error(`CONFIG MISMATCH: ${mismatch}. Fix FRONTEND_URL for this environment.`);
         await this.setupDatabase();
         this.connectWhatsapp().catch((error) => logger.error('WhatsApp connection failed', { error: error instanceof Error ? error.message : String(error) }));
         this.verifyEmailService().then(() => {});

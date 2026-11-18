@@ -3,7 +3,7 @@ import BaseController from '../../base-controller';
 import RoleMiddleware from '../../../../middlewares/role.middleware';
 import platformSettingsService from '../../../../services/platform-settings.service';
 import errorResponseMessage, { ErrorSeverity } from '../../../../common/messages/error-response-message';
-import { PricingError } from '../../../../common/pricing';
+import { PricingError, legacyNgnFeePairs } from '../../../../common/pricing';
 
 const invalid = (message: string) => errorResponseMessage.createError(400, message, ErrorSeverity.LOW);
 
@@ -27,7 +27,9 @@ class AdminPlatformSettingsController extends BaseController {
         try {
             const settings = await platformSettingsService.getSettings();
             // The effective pricing, defaults filled in
-            return this.sendSuccess(res, { settings: { ...settings, pricing: await platformSettingsService.getPricing() } });
+            const pricing = await platformSettingsService.getPricing();
+            // Pairs whose fixed fee amounts are still in NGN: the admin reviews them in the pair's currency
+            return this.sendSuccess(res, { settings: { ...settings, pricing, legacyNgnFeePairs: legacyNgnFeePairs(pricing) } });
         } catch (error) {
             return next(error);
         }
@@ -85,7 +87,8 @@ class AdminPlatformSettingsController extends BaseController {
                 { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn, pricing },
                 user.id,
             );
-            return this.sendSuccess(res, { settings: { ...updated, pricing: await platformSettingsService.getPricing() } });
+            const saved = await platformSettingsService.getPricing();
+            return this.sendSuccess(res, { settings: { ...updated, pricing: saved, legacyNgnFeePairs: legacyNgnFeePairs(saved) } });
         } catch (error) {
             if (error instanceof PricingError) return next(invalid(error.message));
             return next(error);

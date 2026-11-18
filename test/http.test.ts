@@ -76,6 +76,18 @@ describe("HTTP API", () => {
         userId = registered.body.data.userId;
         expect(userId).toMatch(/^[0-9a-f-]{36}$/);
 
+        // Weak passwords, or ones built from the person's name, are refused
+        for (const [password, message] of [
+            ["short1A", "Use at least 8 characters."],
+            ["alllowercase", "Mix at least three of: lowercase letters, capital letters, numbers and symbols."],
+            ["Password123!", "That password is too easy to guess. Choose something less common."],
+            ["Hopper#2024x", "Don't use your name or email in your password."],
+        ]) {
+            const weak = await call("POST", "/public/auth/register", { email: "weak@example.test", password, firstName: "Grace", lastName: "Hopper" });
+            expect(weak.status).toBe(400);
+            expect(JSON.stringify(weak.body)).toContain(message);
+        }
+
         const duplicate = await call("POST", "/public/auth/register", {
             email: "GRACE@example.test", password: "correct-horse-battery", firstName: "Grace", lastName: "Hopper",
         });
@@ -230,5 +242,26 @@ describe("HTTP API", () => {
         const out = await call("POST", "/public/auth/logout-all", {}, accessToken);
         expect(out.status).toBe(200);
         expect((await call("GET", "/protected/users/current", undefined, accessToken)).status).toBe(401);
+    });
+
+    it("changes the password with the current one, then signs out everywhere", async () => {
+        const login = await call("POST", "/public/auth/login", { email: "grace@example.test", password: "correct-horse-battery" });
+        const verified = await call("POST", "/public/auth/login/verify", { challengeId: login.body.data.challengeId, code: sentCodes.get("grace@example.test")! });
+        const token = verified.body.data.accessToken;
+
+        const wrong = await call("POST", "/protected/users/change-password", { currentPassword: "not-my-password", newPassword: "N3w-Secure!Pass" }, token);
+        expect(wrong.status).toBe(400);
+        expect(wrong.body.details.issues[0]).toMatchObject({ path: "currentPassword" });
+        const weak = await call("POST", "/protected/users/change-password", { currentPassword: "correct-horse-battery", newPassword: "weakpass" }, token);
+        expect(weak.status).toBe(400);
+        expect(weak.body.details.issues[0]).toMatchObject({ path: "newPassword" });
+
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        const changed = await call("POST", "/protected/users/change-password", { currentPassword: "correct-horse-battery", newPassword: "N3w-Secure!Pass" }, token);
+        expect(changed.status).toBe(200);
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        expect((await call("GET", "/protected/users/current", undefined, token)).status).toBe(401);
+        expect((await call("POST", "/public/auth/login", { email: "grace@example.test", password: "correct-horse-battery" })).status).toBe(401);
+        expect((await call("POST", "/public/auth/login", { email: "grace@example.test", password: "N3w-Secure!Pass" })).status).toBe(200);
     });
 });

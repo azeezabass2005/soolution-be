@@ -8,10 +8,19 @@
  *   - rate:        the buffer added to the provider's exchange rate
  *
  * A fee rule is `amount × percent% + fixed`, then raised to `min` and held
- * to `cap` (0 = no minimum / no cap). Fees are in NGN.
+ * to `cap` (0 = no minimum / no cap).
  *
- * Funding is different: Fincra takes its fee out of the deposit itself, so
- * its providerFee is only for display and the user is charged platformFee.
+ * Currency of the fixed / min / cap amounts:
+ *   - funding and withdrawal: NGN
+ *   - a send or receive pair: its `feeCurrency`. "GHS" for NGN-GHS means the
+ *     fee is worked out on the GHS amount, in GHS, then charged in NGN at the
+ *     user's (buffered) rate. Older saved configs have no feeCurrency and
+ *     stay in NGN until an admin reviews and saves them.
+ *
+ * Funding is different: Fincra takes its fee out of the deposit itself.
+ * `customerFee` is what the user pays in total (e.g. 1% capped at ₦500);
+ * Fincra's part (providerFee, e.g. 1% capped at ₦300) is taken by Fincra,
+ * and SolutionPay keeps whatever is left of the total (never below zero).
  */
 
 export interface FeeRule {
@@ -34,13 +43,28 @@ export interface FeePricing {
     platformFee: FeeRule;
 }
 
+export interface TxLimits {
+    /** Smallest amount per transaction, in the pair's foreign currency (0 = none) */
+    min: number;
+    /** Largest amount per transaction, in the pair's foreign currency (0 = none) */
+    max: number;
+}
+
 export interface FxPricing extends FeePricing {
     rate: RateRule;
+    /** Currency of the fee rules' fixed / min / cap amounts (see above) */
+    feeCurrency: string;
+    limits: TxLimits;
+}
+
+export interface FundingPricing extends FeePricing {
+    /** What the user pays in total for a deposit; SolutionPay keeps total − Fincra's part */
+    customerFee: FeeRule;
 }
 
 export interface PricingConfig {
     /** Deposits into the user's NGN account number */
-    funding: { NGN: FeePricing };
+    funding: { NGN: FundingPricing };
     /** NGN withdrawals to Nigerian banks */
     withdrawal: { NGN: FeePricing };
     /** User pays NGN, the recipient gets the foreign currency. Key: "NGN-GHS" */
@@ -53,13 +77,23 @@ export type PricedOperation = keyof PricingConfig;
 
 export const ZERO_FEE: FeeRule = { percent: 0, fixed: 0, min: 0, cap: 0 };
 export const ZERO_RATE: RateRule = { percent: 0, fixed: 0 };
+export const NO_LIMITS: TxLimits = { min: 0, max: 0 };
+
+/** The foreign currency of a pair: "NGN-GHS" and "GHS-NGN" both give "GHS" */
+export const foreignOf = (pair: string) => pair.split("-").find((c) => c !== "NGN") ?? "NGN";
 
 /** Defaults: Fincra's published pricing passed on, nothing extra for SolutionPay */
 export const DEFAULT_PRICING: PricingConfig = {
-    funding: { NGN: { providerFee: { percent: 1, fixed: 0, min: 0, cap: 300 }, platformFee: { ...ZERO_FEE } } },
+    funding: {
+        NGN: {
+            providerFee: { percent: 1, fixed: 0, min: 0, cap: 300 },
+            platformFee: { ...ZERO_FEE },
+            customerFee: { percent: 1, fixed: 0, min: 0, cap: 500 },
+        },
+    },
     withdrawal: { NGN: { providerFee: { ...ZERO_FEE }, platformFee: { ...ZERO_FEE } } },
-    send: { "NGN-GHS": { providerFee: { percent: 1.5, fixed: 0, min: 0, cap: 0 }, platformFee: { ...ZERO_FEE }, rate: { ...ZERO_RATE } } },
-    receive: { "GHS-NGN": { providerFee: { percent: 1.5, fixed: 0, min: 0, cap: 0 }, platformFee: { ...ZERO_FEE }, rate: { ...ZERO_RATE } } },
+    send: { "NGN-GHS": { providerFee: { percent: 1.5, fixed: 0, min: 0, cap: 0 }, platformFee: { ...ZERO_FEE }, rate: { ...ZERO_RATE }, feeCurrency: "GHS", limits: { ...NO_LIMITS } } },
+    receive: { "GHS-NGN": { providerFee: { percent: 1.5, fixed: 0, min: 0, cap: 0 }, platformFee: { ...ZERO_FEE }, rate: { ...ZERO_RATE }, feeCurrency: "GHS", limits: { ...NO_LIMITS } } },
 };
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -90,6 +124,40 @@ export function priceFees(pricing: FeePricing | undefined, amount: number, opts:
     return { providerFee, platformFee, total, effectivePercent: amount > 0 ? Math.round((total / amount) * 100 * 10_000) / 10_000 : 0 };
 }
 
+export interface FundingFeeBreakdown {
+    /** What the user pays in total (customerFee on the amount they sent) */
+    customerTotal: number;
+    /** Fincra's part: what it actually took when known, else its rule */
+    providerFee: number;
+    /** SolutionPay's part: customerTotal − providerFee, never below zero */
+    platformFee: number;
+}
+
+/**
+ * A deposit's fees. `grossAmount` is what the payer sent; `providerTaken` is
+ * what Fincra actually kept, when the webhook says (otherwise its rule).
+ */
+export function priceFunding(pricing: FundingPricing | undefined, grossAmount: number, providerTaken?: number): FundingFeeBreakdown {
+    const providerFee = providerTaken !== undefined && isFinite(providerTaken) && providerTaken >= 0
+        ? round2(providerTaken)
+        : applyFeeRule(pricing?.providerFee, grossAmount);
+    const customerTotal = pricing?.customerFee ? applyFeeRule(pricing.customerFee, grossAmount) : providerFee;
+    // Older configs without customerFee: SolutionPay's own fee on top, as before
+    const platformFee = pricing?.customerFee
+        ? round2(Math.max(0, customerTotal - providerFee))
+        : applyFeeRule(pricing?.platformFee, grossAmount);
+    return { customerTotal: round2(Math.max(customerTotal, providerFee + platformFee)), providerFee, platformFee };
+}
+
+/** Whether `amount` (in the pair's foreign currency) is inside the pair's per-transaction limits */
+export function limitProblem(limits: TxLimits | undefined, amount: number, currency: string): string | null {
+    if (!limits) return null;
+    const fmt = (n: number) => `${currency} ${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+    if (limits.min > 0 && amount < limits.min) return `The smallest amount per transaction is ${fmt(limits.min)}.`;
+    if (limits.max > 0 && amount > limits.max) return `The most you can do in one transaction is ${fmt(limits.max)}.`;
+    return null;
+}
+
 /**
  * The user's rate (NGN per 1 unit of the foreign currency) from the
  * provider's. Sends cost the user more NGN, receives give them less.
@@ -105,6 +173,7 @@ export function applyRateRule(rule: RateRule | undefined, providerRate: number, 
 
 const MAX_PERCENT = 50;
 const MAX_NGN = 100_000_000;
+const MAX_LIMIT = 1_000_000_000;
 
 export class PricingError extends Error {}
 
@@ -128,6 +197,14 @@ function feeRule(value: any, path: string): FeeRule {
     return rule;
 }
 
+function limitsRule(value: any, path: string): TxLimits {
+    if (value === undefined || value === null) return { ...NO_LIMITS };
+    if (typeof value !== "object") throw new PricingError(`${path} must be an object`);
+    const limits = { min: num(value.min ?? 0, `${path}.min`, MAX_LIMIT), max: num(value.max ?? 0, `${path}.max`, MAX_LIMIT) };
+    if (limits.max > 0 && limits.min > limits.max) throw new PricingError(`${path}: the minimum can't be above the maximum`);
+    return limits;
+}
+
 function rateRule(value: any, path: string): RateRule {
     if (!value || typeof value !== "object") throw new PricingError(`${path} is missing`);
     return { percent: num(value.percent ?? 0, `${path}.percent`, MAX_PERCENT), fixed: num(value.fixed ?? 0, `${path}.fixed`, MAX_NGN) };
@@ -142,21 +219,32 @@ export function parsePricing(input: any, current: PricingConfig): PricingConfig 
     for (const op of ["funding", "withdrawal"] as const) {
         if (input[op]?.NGN === undefined) continue;
         const src = input[op].NGN;
+        const base = current[op].NGN as Partial<FundingPricing>;
         next[op].NGN = {
-            providerFee: feeRule(src.providerFee ?? current[op].NGN.providerFee, `${op}.NGN.providerFee`),
-            platformFee: feeRule(src.platformFee ?? current[op].NGN.platformFee, `${op}.NGN.platformFee`),
-        };
+            providerFee: feeRule(src.providerFee ?? base.providerFee, `${op}.NGN.providerFee`),
+            platformFee: feeRule(src.platformFee ?? base.platformFee, `${op}.NGN.platformFee`),
+        } as FundingPricing;
+        if (op === "funding") {
+            const customer = src.customerFee ?? base.customerFee;
+            if (customer) (next.funding.NGN as FundingPricing).customerFee = feeRule(customer, "funding.NGN.customerFee");
+        }
     }
     for (const op of ["send", "receive"] as const) {
         if (input[op] === undefined) continue;
         if (typeof input[op] !== "object") throw new PricingError(`${op} must be an object`);
         for (const [pair, src] of Object.entries<any>(input[op])) {
             if (!PAIR.test(pair)) throw new PricingError(`${op}: "${pair}" isn't a currency pair like NGN-GHS`);
-            const base = current[op][pair] ?? { providerFee: ZERO_FEE, platformFee: ZERO_FEE, rate: ZERO_RATE };
+            const base: Partial<FxPricing> = current[op][pair] ?? { providerFee: ZERO_FEE, platformFee: ZERO_FEE, rate: ZERO_RATE, feeCurrency: foreignOf(pair), limits: NO_LIMITS };
+            const feeCurrency = String(src?.feeCurrency ?? base.feeCurrency ?? "NGN").toUpperCase();
+            if (feeCurrency !== "NGN" && feeCurrency !== foreignOf(pair)) {
+                throw new PricingError(`${op}.${pair}.feeCurrency must be NGN or ${foreignOf(pair)}`);
+            }
             next[op][pair] = {
                 providerFee: feeRule(src?.providerFee ?? base.providerFee, `${op}.${pair}.providerFee`),
                 platformFee: feeRule(src?.platformFee ?? base.platformFee, `${op}.${pair}.platformFee`),
                 rate: rateRule(src?.rate ?? base.rate, `${op}.${pair}.rate`),
+                feeCurrency,
+                limits: limitsRule(src?.limits ?? base.limits, `${op}.${pair}.limits`),
             };
         }
     }
@@ -164,9 +252,40 @@ export function parsePricing(input: any, current: PricingConfig): PricingConfig 
 }
 
 /** Stored config over the defaults, so a missing operation or field is never undefined */
+/** Whether a fee rule has any fixed amount (fixed, min or cap), i.e. depends on its currency */
+const hasAmounts = (rule?: Partial<FeeRule>) => !!rule && [rule.fixed, rule.min, rule.cap].some((v) => Number(v) > 0);
+
+/**
+ * Configs saved before fees could be in the foreign currency have no
+ * feeCurrency: their amounts are NGN. Pairs that are only percentages give
+ * the same fee either way, so they move to the foreign currency directly.
+ */
+export function withStoredFeeCurrencies(stored: any): any {
+    if (!stored || typeof stored !== "object") return stored;
+    const copy = JSON.parse(JSON.stringify(stored));
+    for (const op of ["send", "receive"]) {
+        for (const [pair, rules] of Object.entries<any>(copy[op] ?? {})) {
+            if (!rules || typeof rules !== "object" || rules.feeCurrency) continue;
+            rules.feeCurrency = hasAmounts(rules.providerFee) || hasAmounts(rules.platformFee) ? "NGN" : foreignOf(pair);
+        }
+    }
+    return copy;
+}
+
+/** Pairs whose fee amounts are still in NGN although they could be in the foreign currency */
+export function legacyNgnFeePairs(config: PricingConfig): { op: "send" | "receive"; pair: string }[] {
+    const out: { op: "send" | "receive"; pair: string }[] = [];
+    for (const op of ["send", "receive"] as const) {
+        for (const [pair, rules] of Object.entries(config[op])) {
+            if (rules.feeCurrency === "NGN" && foreignOf(pair) !== "NGN") out.push({ op, pair });
+        }
+    }
+    return out;
+}
+
 export function withDefaults(stored: Partial<PricingConfig> | null | undefined, base: PricingConfig = DEFAULT_PRICING): PricingConfig {
     try {
-        return stored ? parsePricing(stored, base) : JSON.parse(JSON.stringify(base));
+        return stored ? parsePricing(withStoredFeeCurrencies(stored), base) : JSON.parse(JSON.stringify(base));
     } catch {
         return JSON.parse(JSON.stringify(base));
     }

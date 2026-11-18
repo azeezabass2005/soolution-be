@@ -122,21 +122,22 @@ describe("WalletService", () => {
     describe("funding (Fincra collection.successful)", () => {
         it("credits what Fincra settled, once, however often the webhook arrives", async () => {
             const user = await userWithAccount("va-1");
-            await fincraWebhookService.handle(deposit("fc-ref-1", "va-1", 4975, 25)); // ₦5,000 sent, ₦25 fee
-            await fincraWebhookService.handle(deposit("fc-ref-1", "va-1", 4975, 25));
+            // ₦5,000 sent; Fincra kept its 1% (₦50), the whole default 1% fee, so nothing more is taken
+            await fincraWebhookService.handle(deposit("fc-ref-1", "va-1", 4950, 50));
+            await fincraWebhookService.handle(deposit("fc-ref-1", "va-1", 4950, 50));
 
-            expect(await walletBalance(user.id)).toBe(4975);
-            expect(await accountBalance(NGN_CASH)).toBe(4975);
-            expect(await accountBalance(userWalletAccountCode(user.id, "NGN"))).toBe(4975);
+            expect(await walletBalance(user.id)).toBe(4950);
+            expect(await accountBalance(NGN_CASH)).toBe(4950);
+            expect(await accountBalance(userWalletAccountCode(user.id, "NGN"))).toBe(4950);
             const history = await walletService.getTransactionHistory(user.id, { page: 1, limit: 10, type: "funding" });
             expect(history.data).toHaveLength(1);
         });
 
         it("credits once when duplicate webhooks arrive at the same time", async () => {
             const user = await userWithAccount("va-2");
-            const results = await Promise.all([1, 2, 3].map(() => walletService.processFunding(deposit("fc-race", "va-2", 1000).data)));
+            const results = await Promise.all([1, 2, 3].map(() => walletService.processFunding(deposit("fc-race", "va-2", 990, 10).data)));
             expect(results.filter(Boolean)).toHaveLength(1);
-            expect(await walletBalance(user.id)).toBe(1000);
+            expect(await walletBalance(user.id)).toBe(990);
             expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
         });
 
@@ -293,16 +294,28 @@ describe("WalletService", () => {
     describe("admin pricing", () => {
         const admin = "00000000-0000-4000-8000-000000000001";
 
-        it("takes SolutionPay's funding fee out of the deposit, once", async () => {
-            await platformSettingsService.updateSettings({ pricing: { funding: { NGN: { platformFee: { percent: 0, fixed: 200, min: 0, cap: 0 } } } } }, admin);
+        it("charges 1% capped at ₦500 in total: Fincra's part (capped at ₦300) plus SolutionPay's, once", async () => {
+            await platformSettingsService.updateSettings({ pricing: { funding: { NGN: {
+                providerFee: { percent: 1, fixed: 0, min: 0, cap: 300 },
+                customerFee: { percent: 1, fixed: 0, min: 0, cap: 500 },
+            } } } }, admin);
             const user = await userWithAccount("va-fee");
-            await fincraWebhookService.handle(deposit("fc-fee", "va-fee", 9_900, 100)); // Fincra kept ₦100
-            await fincraWebhookService.handle(deposit("fc-fee", "va-fee", 9_900, 100));
-            expect(await walletBalance(user.id)).toBe(9_700);
+            // ₦100,000 sent: 1% is ₦1,000, capped at ₦500 in total. Fincra kept ₦300, SolutionPay takes ₦200.
+            await fincraWebhookService.handle(deposit("fc-fee", "va-fee", 99_700, 300));
+            await fincraWebhookService.handle(deposit("fc-fee", "va-fee", 99_700, 300));
+            expect(await walletBalance(user.id)).toBe(99_500);
             expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(200);
-            expect(await accountBalance(NGN_CASH)).toBe(9_900);
+            expect(await accountBalance(NGN_CASH)).toBe(99_700);
             const [row] = (await walletService.getTransactionHistory(user.id, { page: 1, limit: 5, type: "funding" })).data;
-            expect(row).toMatchObject({ amount: 9_700, fee: 200 });
+            expect(row).toMatchObject({ amount: 99_500, fee: 200 });
+
+            // ₦20,000 sent: 1% is ₦200, all Fincra's (under its ₦300 cap): nothing more is taken
+            await fincraWebhookService.handle(deposit("fc-fee-2", "va-fee", 19_800, 200));
+            expect(await walletBalance(user.id)).toBe(99_500 + 19_800);
+            // ₦40,000 sent: 1% is ₦400; Fincra stops at ₦300, SolutionPay takes the other ₦100
+            await fincraWebhookService.handle(deposit("fc-fee-3", "va-fee", 39_700, 300));
+            expect(await walletBalance(user.id)).toBe(99_500 + 19_800 + 39_600);
+            expect(await accountBalance(SYSTEM_ACCOUNT_CODES.FEES_NGN)).toBe(300);
             expect((await reconciliationService.runFullReconciliation()).status).toBe("clean");
         });
 

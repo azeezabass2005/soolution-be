@@ -28,6 +28,9 @@ import yellowCardService from "./yellowcard.service";
 import { TRANSFER_DETAILS_REQUIRED_CODE } from "../common/identity.constants";
 import logger from "../utils/logger.utils";
 import config from "../config/env.config";
+import ghsRateService from "./ghs-rate.service";
+import { approvedBusinessName } from "./business-name.service";
+import { limitProblem } from "../common/pricing";
 
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const IN_FLIGHT = [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] as TransactionStatus[];
@@ -119,6 +122,10 @@ class PaymentLinkService {
         // Fincra's GHS checkout takes whole cedis
         if (data.currency === "GHS" && data.amount !== undefined && !Number.isInteger(data.amount)) {
             throw badRequest("GHS links are in whole cedis. Enter an amount without pesewas.", { issues: [{ path: "amount", message: "Use a whole number" }] });
+        }
+        if (data.currency === "GHS" && data.amount !== undefined) {
+            const problem = limitProblem(await ghsRateService.limits("receive"), data.amount, "GHS");
+            if (problem) throw badRequest(problem, { issues: [{ path: "amount", message: problem }] });
         }
 
         const active = await paymentLinkRepository.countActive(userId);
@@ -225,7 +232,7 @@ class PaymentLinkService {
         const payable = this.canTakePayments(link, owner) && methods.length > 0;
         return {
             slug: link.slug,
-            payee: ownerName(owner),
+            payee: (owner.tier >= USER_TIER.BUSINESS ? await approvedBusinessName(owner.id) : undefined) || ownerName(owner),
             currency: link.currency,
             amount: link.amount ?? null,
             title: link.title || link.description || null,

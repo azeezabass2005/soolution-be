@@ -79,8 +79,9 @@ class WalletController extends BaseController {
                 }
             }
 
-            // SolutionPay's deposit fee rule, so the app can say what a transfer in costs
-            const fundingFee = (await platformSettingsService.getPricing()).funding.NGN.platformFee;
+            // What a deposit costs the user in total (Fincra's part plus ours), so the app can say it
+            const funding = (await platformSettingsService.getPricing()).funding.NGN;
+            const fundingFee = funding.customerFee ?? funding.platformFee;
             return this.sendSuccess(res, { wallet: { ...wallet, dvaSetup, fundingFee } });
         } catch (error) {
             return next(error);
@@ -106,10 +107,15 @@ class WalletController extends BaseController {
             if (!isFinite(amount) || amount <= 0) {
                 return next(errorResponseMessage.createError(400, "amount must be a positive number", ErrorSeverity.LOW));
             }
+            if (operation === "funding") {
+                // What a deposit of `amount` costs in total (Fincra's part plus ours) and what lands
+                const { pricing, ...fees } = await platformSettingsService.priceFunding(amount);
+                const credited = Math.round((amount - fees.customerTotal) * 100) / 100;
+                return this.sendSuccess(res, { operation, amount, ...fees, total: fees.customerTotal, fee: fees.customerTotal, credited, rule: pricing.customerFee ?? null });
+            }
             const { pricing: _rules, ...fees } = await platformSettingsService.priceFees(operation, amount);
-            // Funding: the fee comes out of the deposit; withdrawal: it's added on top
-            const total = operation === "funding" ? Math.round((amount - fees.total) * 100) / 100 : Math.round((amount + fees.total) * 100) / 100;
-            return this.sendSuccess(res, { operation, amount, ...fees, fee: fees.total, [operation === "funding" ? "credited" : "charged"]: total });
+            // Withdrawal: the fee is added on top
+            return this.sendSuccess(res, { operation, amount, ...fees, fee: fees.total, charged: Math.round((amount + fees.total) * 100) / 100 });
         } catch (error) {
             return next(error);
         }

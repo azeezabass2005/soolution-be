@@ -38,6 +38,13 @@ class OGatewayTransactionController extends BaseController {
             this.createPayout.bind(this),
         );
 
+        // Send NGN → GHS manually (larger amounts, no fee, paid by ops)
+        this.router.post(
+            "/manual",
+            TransactionRateLimitMiddleware.checkTransactionRateLimit,
+            this.createManualPayout.bind(this),
+        );
+
         // Receive GHS → NGN (instant collection).
         this.router.post(
             "/collect",
@@ -83,6 +90,20 @@ class OGatewayTransactionController extends BaseController {
                 },
                 201,
             );
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async createManualPayout(req: Request, res: Response, next: NextFunction) {
+        try {
+            const user = res.locals.user;
+            const idempotencyKey = req.body?.idempotencyKey || (req.headers["idempotency-key"] as string);
+            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createManualGhsSend(
+                { ...req.body, idempotencyKey },
+                user.id,
+            ));
+            return this.sendSuccess(res, { transaction, message: "We've got it. Your payment will be sent within 1–2 hours (8am–8pm WAT, business days)." }, 201);
         } catch (error) {
             return next(error);
         }
