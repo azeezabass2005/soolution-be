@@ -10,10 +10,21 @@ const DAY = 24 * HOUR;
 export const SESSION = {
     /** Access token (JWT + cookie) */
     ACCESS_TTL_MS: 15 * MINUTE,
-    /** Refresh token without "keep me signed in": the session ends after 12h of inactivity or when the browser closes */
-    REFRESH_TTL_MS: 12 * HOUR,
-    /** Refresh token with "keep me signed in": 7 days of inactivity */
-    REMEMBERED_REFRESH_TTL_MS: 7 * DAY,
+    /**
+     * Signed out after this long without using the app. The browser enforces
+     * it to the minute (it sees clicks and typing, which the server doesn't);
+     * the refresh tokens below are the server's backstop.
+     */
+    IDLE_TIMEOUT_MS: 30 * MINUTE,
+    /**
+     * Refresh token lifetime, renewed on every refresh. The idle limit plus one
+     * access token: a user active at the end of an access token's life still
+     * has the full 30 minutes, and an abandoned session dies within 45.
+     * "Keep me signed in" only decides whether the cookies survive closing the
+     * browser; it never extends the idle limit.
+     */
+    REFRESH_TTL_MS: 45 * MINUTE,
+    REMEMBERED_REFRESH_TTL_MS: 45 * MINUTE,
     /** Nobody stays signed in longer than this without entering their password again */
     MAX_SESSION_MS: 30 * DAY,
     /**

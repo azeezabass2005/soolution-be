@@ -111,6 +111,9 @@ class AuthController extends BaseController {
         // Refresh token route
         this.router.post("/refresh-token", this.refreshToken.bind(this));
 
+        // Sign out on this device only (e.g. after 30 minutes of inactivity)
+        this.router.post("/logout", this.logout.bind(this));
+
         // Logout route
         // You can choose to migrate this to the protected route section for the auth.
         this.router.post("/logout-all",
@@ -750,6 +753,30 @@ class AuthController extends BaseController {
         });
 
         return { accessToken, refreshToken };
+    }
+
+    /**
+     * Signs out this browser: its refresh token stops working and the cookies
+     * are cleared. Needs no access token (it may have expired while idle).
+     * Other devices stay signed in.
+     */
+    private async logout (req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            for (const value of cookieValues(req.headers?.cookie, 'refreshToken')) {
+                try {
+                    const decoded: any = await this.tokenBuilder.setToken(value).build().verifyToken();
+                    if (decoded?.type === TokenType.REFRESH) {
+                        await this.refreshTokenService.consumeToken((decoded.data as IRefreshTokenPayload).tokenId);
+                    }
+                } catch {
+                    // Expired or another environment's: nothing to revoke
+                }
+            }
+            clearAuthCookies(res);
+            this.sendSuccess(res, { message: "Signed out" });
+        } catch (error) {
+            return next(error);
+        }
     }
 
     /**

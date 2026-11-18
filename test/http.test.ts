@@ -167,6 +167,26 @@ describe("HTTP API", () => {
         expect((await refreshed.json()).data.accessToken).toBeTruthy();
     });
 
+    it("signs out just this browser, and its refresh token stops working", async () => {
+        const login = await call("POST", "/public/auth/login", { email: "grace@example.test", password: "correct-horse-battery" });
+        const verified = await fetch(`${base}/api/v1/public/auth/login/verify`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ challengeId: login.body.data.challengeId, code: sentCodes.get("grace@example.test") }),
+        });
+        const refresh = verified.headers.getSetCookie().find((c) => c.startsWith("refreshToken=") && !/Domain=\.example\.test/i.test(c))!.split(";")[0];
+        // Without "keep me signed in" the cookie ends with the browser session
+        const maxAge = Number(/Max-Age=(\d+)/i.exec(verified.headers.getSetCookie().find((c) => c.startsWith("refreshToken=") && !/Domain=\.example\.test/i.test(c))!)?.[1] ?? 0);
+        expect(maxAge).toBe(0);
+
+        const out = await fetch(`${base}/api/v1/public/auth/logout`, { method: "POST", headers: { cookie: refresh } });
+        expect(out.status).toBe(200);
+        expect(out.headers.getSetCookie().some((c) => c.startsWith("refreshToken=;"))).toBe(true);
+
+        const again = await fetch(`${base}/api/v1/public/auth/refresh-token`, { method: "POST", headers: { "content-type": "application/json", cookie: refresh }, body: "{}" });
+        expect(again.status).toBe(401);
+    });
+
     it("returns the current user without secrets, with id and _id", async () => {
         const me = await call("GET", "/protected/users/current", undefined, accessToken);
         expect(me.status).toBe(200);
