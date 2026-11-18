@@ -17,10 +17,22 @@ import WalletService from "../../../services/wallet.service";
 import { SESSION, SESSION_CODE } from "../../../config/session.config";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
+import loginOtpService, { LOGIN_OTP_RESEND_MS, LOGIN_OTP_TTL_MS, LoginOtpError, maskEmail } from "../../../services/login-otp.service";
 
 /** Changes whenever the password does, so a reset link only works once */
 const passwordFingerprint = (passwordHash?: string) =>
     crypto.createHmac("sha256", config.JWT_SECRET).update(String(passwordHash || "")).digest("hex").slice(0, 24);
+
+/** "Chrome on Windows", for the sign-in code email */
+function describeDevice(userAgent?: string): string {
+    const ua = String(userAgent || "");
+    if (!ua) return "";
+    const browser = /Edg\//.test(ua) ? "Edge" : /OPR\/|Opera/.test(ua) ? "Opera" : /Firefox\//.test(ua) ? "Firefox"
+        : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "";
+    const os = /iPhone|iPad/.test(ua) ? "iOS" : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows"
+        : /Mac OS X|Macintosh/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : "";
+    return [browser, os].filter(Boolean).join(" on ");
+}
 
 /**
  * Controller handling authentication-related operations
@@ -56,8 +68,17 @@ class AuthController extends BaseController {
         // Complete Registration route
         this.router.patch("/complete-registration", postRegisterValidate, this.completeRegistration.bind(this))
 
-        // Login route
-        this.router.post("/login", loginValidate, this.login.bind(this));
+        // Sign-in: the password, then a code sent by email
+        const authLimiter = (max: number) => rateLimit({
+            windowMs: 15 * 60 * 1000,
+            max,
+            standardHeaders: true,
+            legacyHeaders: false,
+            message: { message: "Too many attempts. Please wait a few minutes and try again." },
+        });
+        this.router.post("/login", authLimiter(30), loginValidate, this.login.bind(this));
+        this.router.post("/login/verify", authLimiter(40), this.verifyLoginCode.bind(this));
+        this.router.post("/login/resend", authLimiter(15), this.resendLoginCode.bind(this));
 
         // Verify email route
         this.router.post("/verify-email", this.verifyEmail.bind(this));
@@ -294,6 +315,72 @@ class AuthController extends BaseController {
                 return next(errorResponseMessage.unauthorized("Invalid credentials"));
             }
 
+            // The password is right; the session waits for the code sent to their email
+            const { challenge, code } = await loginOtpService.start(user.id, {
+                rememberMe,
+                ipAddress: req.ip,
+                userAgent: req.headers['user-agent'],
+            });
+            try {
+                await this.sendLoginCode(user, code, req);
+            } catch (error) {
+                await loginOtpService.close(challenge.id);
+                this.logger.error('Failed to send sign-in code', {
+                    userId: user.id,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                return next(errorResponseMessage.createError(503, "We couldn't send your sign-in code. Please try again in a moment.", ErrorSeverity.HIGH, { code: "LOGIN_CODE_NOT_SENT" }));
+            }
+
+            this.sendSuccess(res, this.challengeResponse(challenge.id, user.email, "We've sent a 6-digit code to your email."));
+        } catch (error) {
+            if (error instanceof LoginOtpError) return next(this.otpError(error));
+            return next(error);
+        }
+    }
+
+    /** What the sign-in screen needs to show the code step */
+    private challengeResponse(challengeId: string, email: string, message: string) {
+        return {
+            otpRequired: true,
+            challengeId,
+            email: maskEmail(email),
+            expiresInSeconds: Math.round(LOGIN_OTP_TTL_MS / 1000),
+            resendInSeconds: Math.round(LOGIN_OTP_RESEND_MS / 1000),
+            message,
+        };
+    }
+
+    private otpError(error: LoginOtpError) {
+        return errorResponseMessage.createError(error.status, error.message, ErrorSeverity.LOW, { code: error.code, ...error.extra });
+    }
+
+    private async sendLoginCode(user: IUser, code: string, req: Request) {
+        await this.notificationService.emailService.sendLoginCodeEmail(user.email, {
+            name: user.firstName || 'there',
+            code,
+            expiryTime: `${Math.round(LOGIN_OTP_TTL_MS / 60000)} minutes`,
+            device: describeDevice(req.headers['user-agent']),
+        });
+    }
+
+    /**
+     * Second sign-in step: the emailed code. Issues the session (or, for an
+     * unfinished sign-up, the token to finish it).
+     */
+    private async verifyLoginCode (req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const { challengeId, code } = req.body || {};
+            const challenge = await loginOtpService.verify(challengeId, code);
+
+            const user = await this.userService.findById(challenge.userId);
+            if (!user) {
+                return next(errorResponseMessage.unauthorized("This sign-in has expired. Please sign in again."));
+            }
+            if (user.status !== 'active') {
+                return next(errorResponseMessage.unauthorized(`Login failed because your account has been ${user.status}. Reach out to support@solutionpay.co for further info`));
+            }
+
             if(!user?.isCompleted && user?.role !== ROLE_MAP.ADMIN) {
                 return this.sendSuccess(res, {
                     message: "Registration not completed. Redirecting to completion step",
@@ -303,48 +390,28 @@ class AuthController extends BaseController {
                 });
             }
 
-            // Temporarily removed email verification check for login
-            // if (!user.isVerified) {
-            //     next(errorResponseMessage.unauthorized("Please verify your email first"));
-            //     return;
-            // }
-
-            const { accessToken, refreshToken } = await this.issueSession(req, res, user, rememberMe);
+            const { accessToken, refreshToken } = await this.issueSession(req, res, user, challenge.rememberMe);
 
             // Update last login timestamp
             await this.userService.update(user.id, {
                 lastLogin: new Date().toISOString()
             });
 
-            // Send login notification email to user
-            try {
-                await this.notificationService.emailService.sendNotificationEmail(
-                    user.email,
-                    {
-                        title: '🔐 Login Successful',
-                        message: `Hello ${user.firstName}, you have successfully logged into your Solution Pay account. If this wasn't you, please contact support immediately.`,
-                        appName: 'Solution Pay',
-                        actionUrl: `${config.FRONTEND_URL}/dashboard/user`,
-                        buttonText: 'Go to Dashboard'
-                    }
-                );
-                this.logger.info('Login notification email sent successfully', {
-                    userId: user.id,
-                    email: user.email,
-                    name: `${user.firstName} ${user.lastName}`,
-                    ip: req.ip,
-                    userAgent: req.headers['user-agent']
-                });
-            } catch (error) {
-                this.logger.error('Failed to send login notification email', {
-                    userId: user.id,
-                    email: user.email,
-                    error: error instanceof Error ? error.message : String(error),
-                    stack: error instanceof Error ? error.stack : undefined,
-                    ip: req.ip
-                });
-                // Don't fail login if email fails - authentication is already successful
-            }
+            // Tell the user about the sign-in (not awaited: the session is already issued)
+            this.notificationService.emailService.sendNotificationEmail(
+                user.email,
+                {
+                    title: '🔐 Login Successful',
+                    message: `Hello ${user.firstName}, you have successfully logged into your Solution Pay account. If this wasn't you, please contact support immediately.`,
+                    appName: 'Solution Pay',
+                    actionUrl: `${config.FRONTEND_URL}/dashboard/user`,
+                    buttonText: 'Go to Dashboard'
+                }
+            ).catch((error: any) => this.logger.error('Failed to send login notification email', {
+                userId: user.id,
+                error: error instanceof Error ? error.message : String(error),
+                ip: req.ip
+            }));
 
             this.sendSuccess(res, {
                 accessToken,
@@ -357,6 +424,33 @@ class AuthController extends BaseController {
                 }
             });
         } catch (error) {
+            if (error instanceof LoginOtpError) return next(this.otpError(error));
+            return next(error);
+        }
+    }
+
+    /** A new sign-in code for the same sign-in */
+    private async resendLoginCode (req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const { challengeId } = req.body || {};
+            const { challenge, code } = await loginOtpService.resend(challengeId);
+            const user = await this.userService.findById(challenge.userId);
+            if (!user || user.status !== 'active') {
+                await loginOtpService.close(challenge.id);
+                return next(errorResponseMessage.unauthorized("This sign-in has expired. Please sign in again."));
+            }
+            try {
+                await this.sendLoginCode(user, code, req);
+            } catch (error) {
+                this.logger.error('Failed to resend sign-in code', {
+                    userId: user.id,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                return next(errorResponseMessage.createError(503, "We couldn't send a new code. Please try again in a moment.", ErrorSeverity.HIGH, { code: "LOGIN_CODE_NOT_SENT" }));
+            }
+            this.sendSuccess(res, this.challengeResponse(challenge.id, user.email, "We've sent you a new code."));
+        } catch (error) {
+            if (error instanceof LoginOtpError) return next(this.otpError(error));
             return next(error);
         }
     }

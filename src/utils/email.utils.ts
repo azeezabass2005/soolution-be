@@ -102,6 +102,7 @@ class EmailService {
         this.templates.set('reset-pin', this.resetPinTemplate.bind(this));
         this.templates.set('verification', this.verificationTemplate.bind(this));
         this.templates.set('notification', this.notificationTemplate.bind(this));
+        this.templates.set('login-code', this.loginCodeTemplate.bind(this));
     }
 
     /**
@@ -192,6 +193,23 @@ class EmailService {
     }
 
     /**
+     * Sign-in code template
+     */
+    private loginCodeTemplate(data: EmailTemplateData): string {
+        const where = [data.device, data.ip ? `IP ${data.ip}` : ''].filter(Boolean).map((v) => escapeHtml(String(v))).join(' · ');
+        return `
+            ${eyebrow('Security')}
+            ${heading('Your sign-in', 'code.')}
+            ${greeting(data.name)}
+            ${paragraph('Enter this code to finish signing in to your Solution Pay account.')}
+            ${codeBlock(String(data.code), 'Sign-in code')}
+            ${paragraph(`It expires in <strong>${escapeHtml(data.expiryTime || '10 minutes')}</strong> and works once.${where ? ` Requested from ${where}.` : ''}`, { muted: true, small: true, margin: '16px 0 0 0' })}
+            ${callout('warning', "Didn't try to sign in?", 'Someone has your password. Do not share this code with anyone, including Solution Pay staff, and reset your password straight away.')}
+            ${signoff()}
+        `;
+    }
+
+    /**
      * General notification email template.
      * `message` may contain line breaks and "Label: value" lines (rendered as a details table)
      * and trusted inline markup from callers; `additionalInfo` renders as a note.
@@ -220,6 +238,7 @@ class EmailService {
             case 'reset-password': return 'Use this link to choose a new password.';
             case 'reset-pin': return 'Use this link to set a new transaction PIN.';
             case 'verification': return 'Confirm your email to finish signing up.';
+            case 'login-code': return `Your sign-in code is ${String(data.code || '')}. It expires in ${String(data.expiryTime || '10 minutes')}.`;
             case 'notification': return htmlToText(String(data.message || '')).replace(/\s+/g, ' ').slice(0, 140) || undefined;
             default: return undefined;
         }
@@ -408,6 +427,18 @@ class EmailService {
             template: 'verification',
             data,
             attachments,
+        });
+    }
+
+    /**
+     * Sends a sign-in code
+     */
+    public async sendLoginCodeEmail(to: string, data: EmailTemplateData): Promise<any> {
+        return this.send({
+            to,
+            subject: `${String(data.code)} is your Solution Pay sign-in code`,
+            template: 'login-code',
+            data,
         });
     }
 

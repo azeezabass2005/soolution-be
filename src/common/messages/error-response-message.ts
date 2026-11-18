@@ -45,7 +45,9 @@ export enum ErrorResponseCode {
 
     // System Errors (500-599)
     /** Internal server error */
-    INTERNAL_SERVER_ERROR = 500
+    INTERNAL_SERVER_ERROR = 500,
+    /** A service we depend on (e.g. email) is unavailable */
+    SERVICE_UNAVAILABLE = 503
 }
 /**
  * Represents the structure of a standardized error response

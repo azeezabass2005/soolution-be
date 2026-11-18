@@ -2,12 +2,16 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AddressInfo } from "net";
 import type { Server } from "http";
 
+/** The last sign-in code emailed, by address */
+const sentCodes = vi.hoisted(() => new Map<string, string>());
+
 vi.mock("../src/utils/notification.utils", () => ({
     default: class {
         emailService = {
             sendNotificationEmail: vi.fn(async () => undefined),
             sendWelcomeEmail: vi.fn(async () => undefined),
             sendPasswordResetEmail: vi.fn(async () => undefined),
+            sendLoginCodeEmail: vi.fn(async (to: string, data: { code: string }) => { sentCodes.set(to, data.code); }),
             verifyConnection: vi.fn(async () => true),
         };
         sendTransactionNotification = vi.fn();
@@ -87,13 +91,53 @@ describe("HTTP API", () => {
         expect(completed.status).toBe(200);
         expect(completed.body.data.user.id).toBe(userId);
 
+        // The password alone doesn't sign in: it sends a code to the email
         const login = await call("POST", "/public/auth/login", { email: "grace@example.test", password: "correct-horse-battery" });
         expect(login.status).toBe(200);
-        accessToken = login.body.data.accessToken;
+        expect(login.body.data).toMatchObject({ otpRequired: true, email: "gr•••@example.test" });
+        expect(login.body.data.accessToken).toBeUndefined();
+        const challengeId = login.body.data.challengeId;
+        const code = sentCodes.get("grace@example.test")!;
+        expect(code).toMatch(/^\d{6}$/);
+
+        const wrongCode = await call("POST", "/public/auth/login/verify", { challengeId, code: code === "000000" ? "111111" : "000000" });
+        expect(wrongCode.status).toBe(400);
+        expect(wrongCode.body.details).toMatchObject({ code: "CODE_WRONG", attemptsLeft: 4 });
+
+        const verified = await call("POST", "/public/auth/login/verify", { challengeId, code });
+        expect(verified.status).toBe(200);
+        accessToken = verified.body.data.accessToken;
         expect(accessToken).toBeTruthy();
+
+        // A code works once
+        const again = await call("POST", "/public/auth/login/verify", { challengeId, code });
+        expect(again.status).toBe(401);
 
         const wrong = await call("POST", "/public/auth/login", { email: "grace@example.test", password: "wrong-password!" });
         expect(wrong.status).toBe(401);
+    });
+
+    it("locks a code after 5 wrong tries, and only the newest sign-in's code works", async () => {
+        const first = await call("POST", "/public/auth/login", { email: "grace@example.test", password: "correct-horse-battery" });
+        const firstCode = sentCodes.get("grace@example.test")!;
+        const second = await call("POST", "/public/auth/login", { email: "grace@example.test", password: "correct-horse-battery" });
+        const code = sentCodes.get("grace@example.test")!;
+        expect((await call("POST", "/public/auth/login/verify", { challengeId: first.body.data.challengeId, code: firstCode })).status).toBe(401);
+
+        const challengeId = second.body.data.challengeId;
+        const wrong = code === "123456" ? "654321" : "123456";
+        for (let i = 0; i < 5; i++) await call("POST", "/public/auth/login/verify", { challengeId, code: wrong });
+        const locked = await call("POST", "/public/auth/login/verify", { challengeId, code });
+        expect(locked.status).toBe(429);
+        expect(locked.body.details.code).toBe("TOO_MANY_ATTEMPTS");
+
+        // A new code can't be asked for straight away
+        const tooSoon = await call("POST", "/public/auth/login/resend", { challengeId });
+        expect(tooSoon.status).toBe(429);
+        expect(tooSoon.body.details.code).toBe("RESEND_TOO_SOON");
+
+        expect((await call("POST", "/public/auth/login/verify", { challengeId: "not-a-uuid", code: "123456" })).status).toBe(401);
+        expect((await call("POST", "/public/auth/login/verify", { challengeId, code: "12ab" })).status).toBe(400);
     });
 
     it("returns the current user without secrets, with id and _id", async () => {

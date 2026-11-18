@@ -36,6 +36,13 @@
       "when": 1794861910495,
       "tag": "0004_admin_pricing",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794993994190,
+      "tag": "0005_login_otp",
+      "breakpoints": true
     }
   ]
 }

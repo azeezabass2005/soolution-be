@@ -107,3 +107,30 @@ export const refreshTokens = pgTable(
     },
     (t) => [index("refresh_tokens_user_idx").on(t.userId, t.isRevoked)]
 );
+
+/**
+ * Sign-in codes. After the password checks out, a 6-digit code is emailed and
+ * the session is only issued once it's entered. The id is what the browser
+ * holds between the two steps; only a hash of the code is stored.
+ */
+export const loginChallenges = pgTable(
+    "login_challenges",
+    {
+        id: id(),
+        userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+        codeHash: text("code_hash").notNull(),
+        expiresAt: timestamptz("expires_at").notNull(),
+        /** Wrong codes entered for the current code */
+        attempts: integer("attempts").notNull().default(0),
+        /** Codes emailed for this sign-in (the first one included) */
+        sendCount: integer("send_count").notNull().default(1),
+        lastSentAt: timestamptz("last_sent_at").notNull().defaultNow(),
+        /** Set once the code is accepted, or when a newer sign-in replaces this one */
+        consumedAt: timestamptz("consumed_at"),
+        rememberMe: boolean("remember_me").notNull().default(false),
+        ipAddress: text("ip_address"),
+        userAgent: text("user_agent"),
+        ...timestamps(),
+    },
+    (t) => [index("login_challenges_user_idx").on(t.userId, t.createdAt)]
+);
