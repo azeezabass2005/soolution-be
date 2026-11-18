@@ -17,6 +17,7 @@ import WalletService from "../../../services/wallet.service";
 import { SESSION, SESSION_CODE } from "../../../config/session.config";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
+import { authCookieBase, clearAuthCookies, clearLegacyAuthCookies, cookieValues } from "../../../utils/auth-cookies";
 import loginOtpService, { LOGIN_OTP_RESEND_MS, LOGIN_OTP_TTL_MS, LoginOtpError, maskEmail } from "../../../services/login-otp.service";
 
 /** Changes whenever the password does, so a reset link only works once */
@@ -614,46 +615,46 @@ class AuthController extends BaseController {
         try {
 
 
-            if (!req.headers?.cookie) {
+            // A browser can send refreshToken twice (an old shared-domain cookie
+            // next to this environment's): use the ones this server signed
+            const presented = cookieValues(req.headers?.cookie, 'refreshToken');
+            if (!presented.length) {
                 return next(errorResponseMessage.payloadIncorrect("Refresh token is required"));
             }
-
-            const cookies = req.headers.cookie.split(';').map(cookie => cookie.trim());
-
-            let refreshToken = undefined;
-            for (const cookie of cookies) {
-                const equalIndex = cookie.indexOf('=');
-                if (equalIndex === -1) continue;
-                const name = cookie.substring(0, equalIndex).trim();
-                const value = cookie.substring(equalIndex + 1).trim();
-                if (name === 'refreshToken') {
-                    refreshToken = value;
-                    break;
+            const candidates: Array<{ decoded: any; payload: IRefreshTokenPayload }> = [];
+            for (const value of presented) {
+                try {
+                    const decoded: any = await this.tokenBuilder.setToken(value).build().verifyToken();
+                    if (decoded?.type === TokenType.REFRESH) candidates.push({ decoded, payload: decoded.data as IRefreshTokenPayload });
+                } catch {
+                    // Another environment's token, or expired: not ours to use
                 }
             }
-
-            if (!refreshToken) {
-                return next(errorResponseMessage.payloadIncorrect("Refresh token is required"));
-            }
-
-            // Verify refresh token
-            const decoded = await this.tokenBuilder
-                .setToken(refreshToken)
-                .build()
-                .verifyToken();
-
-            if (decoded.type !== TokenType.REFRESH) {
+            if (!candidates.length) {
+                clearLegacyAuthCookies(res);
                 return next(errorResponseMessage.unauthorized("Invalid refresh token"));
             }
-
-            const refreshPayload = decoded.data as IRefreshTokenPayload;
 
             const sessionEnded = (message: string) =>
                 errorResponseMessage.createError(401, message, ErrorSeverity.LOW, { code: SESSION_CODE.SESSION_ENDED });
 
             // Spend the token (atomically, so two requests can't both use it)
-            const tokenDoc = await this.refreshTokenService.consumeToken(refreshPayload.tokenId);
-            if (!tokenDoc) {
+            let tokenDoc: Awaited<ReturnType<RefreshTokenService["consumeToken"]>>;
+            let decoded = candidates[0].decoded;
+            let refreshPayload = candidates[0].payload;
+            for (const candidate of candidates) {
+                tokenDoc = await this.refreshTokenService.consumeToken(candidate.payload.tokenId);
+                if (tokenDoc) {
+                    ({ decoded, payload: refreshPayload } = candidate);
+                    break;
+                }
+            }
+            // With two cookies, a spent one is the old leftover, not a stolen copy
+            if (!tokenDoc! && candidates.length > 1) {
+                clearLegacyAuthCookies(res);
+                return next(sessionEnded("Your session has ended. Please sign in again."));
+            }
+            if (!tokenDoc!) {
                 const stored = await this.refreshTokenService.findByTokenId(refreshPayload.tokenId);
                 if (stored?.isRevoked) {
                     const revokedAgo = Date.now() - new Date(stored.revokedAt || stored.updatedAt || 0).getTime();
@@ -734,12 +735,9 @@ class AuthController extends BaseController {
             );
         }
 
-        const base = {
-            secure: config.NODE_ENV === 'production',
-            sameSite: 'lax' as const,
-            path: "/",
-            domain: config.COOKIE_DOMAIN,
-        };
+        const base = authCookieBase();
+        // Old shared-domain cookies would shadow these; drop them
+        clearLegacyAuthCookies(res);
         // Omitting maxAge makes a session cookie
         const lifetime = (ms: number) => (rememberMe ? { maxAge: ms } : {});
 
@@ -770,33 +768,8 @@ class AuthController extends BaseController {
             // Revoke all refresh tokens, and refuse access tokens already handed out
             await this.userService.endAllSessions(user.id);
 
-            // Clear cookies
-            res.clearCookie('accessToken', {
-                domain: config.COOKIE_DOMAIN,
-                secure: config.NODE_ENV === 'production',
-                // secure: true,
-                sameSite: 'lax',
-                path: "/",
-                httpOnly: true,
-            });
-
-            res.clearCookie('refreshToken', {
-                domain: config.COOKIE_DOMAIN,
-                secure: config.NODE_ENV === 'production',
-                // secure: true,
-                sameSite: 'lax',
-                path: "/",
-                httpOnly: true,
-            });
-
-            res.clearCookie('role', {
-                domain: config.COOKIE_DOMAIN,
-                secure: config.NODE_ENV === 'production',
-                // secure: true,
-                sameSite: 'lax',
-                path: "/",
-                httpOnly: false
-            });
+            // Clear cookies (and any old shared-domain ones)
+            clearAuthCookies(res);
 
             this.sendSuccess(res, {
                 message: "Logged out from all sessions successfully"

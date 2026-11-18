@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import TokenBuilder from "../utils/token.utils";
 import { TokenType } from "../utils/interface";
 import UserService from "../services/user.service";
+import { cookieValues } from "../utils/auth-cookies";
 
 const userService = new UserService();
 
@@ -21,18 +22,14 @@ class AuthMiddleware {
 
             const { authorization } = req.headers;
 
-            // Extract token from either Authorization header or accessToken cookie
-            let tokenString: string | undefined;
+            // The Authorization header, or the accessToken cookie. A browser can
+            // send that cookie twice (an old shared-domain one next to this
+            // environment's), so each is tried and the first valid one is used.
+            const candidates = authorization
+                ? [authorization]
+                : cookieValues(req.headers.cookie, "accessToken").map((value) => `Bearer ${value}`);
 
-            if (authorization) {
-                // Token from Authorization header
-                tokenString = authorization;
-            } else if (req.headers.cookie) {
-                // Token from cookie
-                tokenString = this.extractTokenFromCookie(req.headers.cookie);
-            }
-
-            if (!tokenString) {
+            if (!candidates.length) {
                 res.status(401).json({
                     success: false,
                     message: "Unauthorized: Missing token"
@@ -40,27 +37,29 @@ class AuthMiddleware {
                 return;
             }
 
-            // Validate and parse token
-            const token = this.parseToken(tokenString);
-            const { data, type, iat, exp }: any = await token.verifyToken();
-
-            // Only access tokens open a session (not refresh, reset or registration tokens)
-            if (type && type !== TokenType.ACCESS) {
+            let verified: any;
+            let lastError: unknown;
+            for (const tokenString of candidates) {
+                try {
+                    const decoded: any = await this.parseToken(tokenString).verifyToken();
+                    // Only access tokens open a session (not refresh, reset or registration tokens)
+                    if (decoded?.type && decoded.type !== TokenType.ACCESS) continue;
+                    if (!decoded?.data?.email || !decoded?.data?.userId) continue;
+                    verified = decoded;
+                    break;
+                } catch (error) {
+                    lastError = error;
+                }
+            }
+            if (!verified) {
+                if (lastError) throw lastError;
                 res.status(401).json({
                     success: false,
-                    message: "Unauthorized: Invalid token type"
+                    message: "Unauthorized: Invalid token"
                 });
                 return;
             }
-
-            // Validate token contents
-            if (!data?.email || !data?.userId) {
-                res.status(401).json({
-                    success: false,
-                    message: "Unauthorized: Invalid token data"
-                });
-                return;
-            }
+            const { data, iat } = verified;
 
             // Attach user info to response locals
             res.locals.userId = data.userId;
@@ -96,23 +95,6 @@ class AuthMiddleware {
         // Implementation for logout all functionality
     }
 
-    /**
-     * Extracts access token from cookie string
-     * @param cookieString Cookie header string
-     * @returns Access token or undefined
-     */
-    private extractTokenFromCookie(cookieString: string): string | undefined {
-        const cookies = cookieString.split(';').map(cookie => cookie.trim());
-
-        for (const cookie of cookies) {
-            const [name, value] = cookie.split('=');
-            if (name === 'accessToken') {
-                return `Bearer ${value}`;
-            }
-        }
-
-        return undefined;
-    }
 
     /**
      * Parses the authorization token

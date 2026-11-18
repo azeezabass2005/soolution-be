@@ -33,6 +33,8 @@ interface EnvConfig {
     CORS_ORIGIN: string;
     /** Cookie Domain */
     COOKIE_DOMAIN: string;
+    /** Domains sign-in cookies used to be set on; they're cleared on sign-in and sign-out */
+    LEGACY_COOKIE_DOMAINS: string[];
     /** Rate limit window in minutes */
     RATE_LIMIT_WINDOW_MS: number;
     /** Maximum requests per window */
@@ -195,7 +197,8 @@ const loadEnvConfig = (): EnvConfig => {
         JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '1d',
         API_VERSION: process.env.API_VERSION || 'v1',
         CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
-        COOKIE_DOMAIN: process.env.COOKIE_DOMAIN || 'http://localhost:3000',
+        COOKIE_DOMAIN: (process.env.COOKIE_DOMAIN || '').trim(),
+        LEGACY_COOKIE_DOMAINS: (process.env.LEGACY_COOKIE_DOMAINS || '').split(',').map((d) => d.trim()).filter(Boolean),
         RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
         RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX || '100', 10),
         REDIS_URL: process.env.REDIS_URL,

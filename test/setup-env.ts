@@ -6,6 +6,7 @@ process.env.IDENTITY_ENCRYPTION_KEY ||= "0".repeat(64);
 process.env.LOG_LEVEL ||= "error";
 process.env.ADMIN_EMAILS ||= "admin@example.test";
 process.env.ADMIN_PHONE_NUMBERS ||= "";
+process.env.LEGACY_COOKIE_DOMAINS ||= ".example.test";
 
 import "../src/polyfills";
 

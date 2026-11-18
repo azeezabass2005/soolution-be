@@ -140,6 +140,33 @@ describe("HTTP API", () => {
         expect((await call("POST", "/public/auth/login/verify", { challengeId, code: "12ab" })).status).toBe(400);
     });
 
+    it("works when the browser sends an old shared-domain cookie alongside the current one", async () => {
+        const login = await call("POST", "/public/auth/login", { email: "grace@example.test", password: "correct-horse-battery" });
+        const response = await fetch(`${base}/api/v1/public/auth/login/verify`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ challengeId: login.body.data.challengeId, code: sentCodes.get("grace@example.test") }),
+        });
+        expect(response.status).toBe(200);
+        const setCookies = response.headers.getSetCookie();
+        const value = (name: string) => setCookies.find((c) => c.startsWith(`${name}=`) && !/Domain=\.example\.test/i.test(c))!.split(";")[0].split("=").slice(1).join("=");
+        // The old shared-domain cookies are cleared with the new session
+        expect(setCookies.some((c) => c.startsWith("accessToken=;") && /Domain=\.example\.test/i.test(c))).toBe(true);
+
+        // A token from another environment (different secret) sent first must not get in the way
+        const foreign = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiYWNjZXNzIn0.c2lnbmVkLWVsc2V3aGVyZQ";
+        const me = await fetch(`${base}/api/v1/protected/users/current`, { headers: { cookie: `accessToken=${foreign}; accessToken=${value("accessToken")}` } });
+        expect(me.status).toBe(200);
+
+        const refreshed = await fetch(`${base}/api/v1/public/auth/refresh-token`, {
+            method: "POST",
+            headers: { "content-type": "application/json", cookie: `refreshToken=${foreign}; refreshToken=${value("refreshToken")}` },
+            body: "{}",
+        });
+        expect(refreshed.status).toBe(200);
+        expect((await refreshed.json()).data.accessToken).toBeTruthy();
+    });
+
     it("returns the current user without secrets, with id and _id", async () => {
         const me = await call("GET", "/protected/users/current", undefined, accessToken);
         expect(me.status).toBe(200);
