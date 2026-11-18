@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { boolean, check, index, jsonb, pgTable, text, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { decimal, id, timestamps, timestamptz } from "../columns";
 import { users } from "./users";
-import type { AlipayPlatform, DetailType, InstitutionType, PaymentLinkUsage, TransactionStatus } from "../../types/enums";
+import type { AlipayPlatform, DetailType, InstitutionType, PaymentLinkCollectField, PaymentLinkUsage, TransactionStatus } from "../../types/enums";
 
 export const paymentLinks = pgTable(
     "payment_links",
@@ -18,6 +18,10 @@ export const paymentLinks = pgTable(
         description: text("description"),
         active: boolean("active").notNull().default(true),
         usage: text("usage").$type<PaymentLinkUsage>().notNull().default("reusable"),
+        /** Where the payer is sent after a successful payment (optional) */
+        redirectUrl: text("redirect_url"),
+        /** Details the payer must give: "name", "email", "phone" */
+        collectFields: jsonb("collect_fields").$type<PaymentLinkCollectField[]>().notNull().default([]),
         ...timestamps(),
     },
     (t) => [
@@ -57,6 +61,7 @@ export const transactions = pgTable(
         paymentLink: uuid("payment_link_id").references(() => paymentLinks.id, { onDelete: "set null" }),
         payerName: text("payer_name"),
         payerEmail: text("payer_email"),
+        payerPhone: text("payer_phone"),
         ...timestamps(),
     },
     (t) => [

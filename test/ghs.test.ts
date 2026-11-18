@@ -179,6 +179,28 @@ describe("GHS through Fincra", () => {
             }));
         });
 
+        it("finds a bank picked from the built-in Ghana list by name", async () => {
+            const user = await createUser();
+            await fundWallet(user.id, 50_000);
+            fincra.createPayout.mockResolvedValue({ reference: "FP_GH_4", status: "processing" });
+            await send(user.id, { destination: { accountType: "bank", accountName: "Ama Owusu", accountNumber: "1234567890123", bank: "Access Bank Ghana Limited" } });
+            expect(fincra.createPayout).toHaveBeenCalledWith(expect.objectContaining({
+                beneficiary: expect.objectContaining({ bankCode: "GH-ACCESS" }),
+            }));
+        });
+
+        it("offers the built-in Ghana bank list when the provider's is empty or down", async () => {
+            const { default: bankDirectory } = await import("../src/services/bank-directory.service");
+            fincra.listBanks.mockResolvedValueOnce([]);
+            const empty = await bankDirectory.list("GHS");
+            expect(empty.banks.length).toBeGreaterThan(20);
+            expect(empty.banks.map((b) => b.name)).toContain("GCB Bank");
+            (bankDirectory as any).cache.clear();
+            fincra.listBanks.mockRejectedValueOnce(new Error("down"));
+            expect((await bankDirectory.list("GHS")).banks.length).toBeGreaterThan(20);
+            (bankDirectory as any).cache.clear();
+        });
+
         it("checks the number and network before charging anything", async () => {
             const user = await createUser();
             await fundWallet(user.id, 50_000);
@@ -245,6 +267,44 @@ describe("GHS through Fincra", () => {
             fincra.getCheckout.mockResolvedValue({ status: "pending", amount: 100, currency: "GHS" });
             await fincraWebhookService.handle({ event: "charge.successful", data: { metadata: { reference: payment.reference } } });
             expect(await walletBalance(owner.id)).toBe(0);
+        });
+
+        it("asks for the details the owner wants, and sends the payer back to their site after paying", async () => {
+            const owner = await createUser();
+            const link = await paymentLinkService.create(owner.id, {
+                currency: "GHS", amount: 100, usage: "reusable",
+                redirectUrl: "https://shop.example.test/thanks?order=42", collect: ["name", "email", "phone", "email"],
+            });
+            expect(link).toMatchObject({ redirectUrl: "https://shop.example.test/thanks?order=42", collect: ["name", "email", "phone"] });
+            expect(await paymentLinkService.getPublic(link.slug)).toMatchObject({ collect: ["name", "email", "phone"], redirects: true });
+
+            const momo = { method: "momo", momoNetwork: "MTN Momo", momoNumber: "0241234567", momoName: "Kwame Asante" };
+            await expect(paymentLinkService.pay(link.slug, { ...momo, email: "kwame@example.test" }))
+                .rejects.toMatchObject({ response_code: 400, details: { issues: expect.arrayContaining([expect.objectContaining({ path: "payerName" }), expect.objectContaining({ path: "payerPhone" })]) } });
+
+            fincra.createCheckout.mockResolvedValue({ link: "https://checkout.fincra.com/pay/abc", reference: "fcr-p-9" });
+            const payment: any = await paymentLinkService.pay(link.slug, { ...momo, email: "kwame@example.test", payerName: "Kwame A. Asante", payerPhone: "+233 24 123 4567" });
+            const stored = await transactionRepository.findByReference(payment.reference);
+            expect(stored?.payer).toMatchObject({ name: "Kwame A. Asante", email: "kwame@example.test", phone: "+233 24 123 4567" });
+
+            // Not until it's paid
+            fincra.getCheckout.mockResolvedValue({ status: "pending", amount: 100, currency: "GHS" });
+            expect((await paymentLinkService.paymentStatus(link.slug, payment.reference)) as any).not.toHaveProperty("redirectUrl");
+            fincra.getCheckout.mockResolvedValue({ status: "success", amount: 100, currency: "GHS" });
+            await fincraWebhookService.handle({ event: "charge.successful", data: { metadata: { reference: payment.reference } } });
+            const done: any = await paymentLinkService.paymentStatus(link.slug, payment.reference);
+            expect(done.status).toBe("completed");
+            const back = new URL(done.redirectUrl);
+            expect(back.origin + back.pathname).toBe("https://shop.example.test/thanks");
+            expect(Object.fromEntries(back.searchParams)).toEqual({ order: "42", reference: payment.reference, status: "completed" });
+        });
+
+        it("only redirects to a real web address", async () => {
+            const owner = await createUser();
+            for (const redirectUrl of ["javascript:alert(1)", "shop.example.test", "http://shop.example.test", "ftp://x.test"]) {
+                await expect(paymentLinkService.create(owner.id, { currency: "GHS", usage: "reusable", redirectUrl })).rejects.toMatchObject({ response_code: 400 });
+            }
+            await expect(paymentLinkService.create(owner.id, { currency: "GHS", usage: "reusable", collect: ["passport"] })).rejects.toMatchObject({ response_code: 400 });
         });
 
         it("takes whole cedis only", async () => {

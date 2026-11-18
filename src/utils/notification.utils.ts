@@ -1,3 +1,4 @@
+import { scrubNotification } from './provider-names.utils';
 import WhatsAppService from '../utils/whatsapp.utils';
 import EmailService from '../utils/email.utils';
 /** What a notification needs to know about its recipient */
@@ -76,6 +77,9 @@ class NotificationService {
             email: false,
             whatsapp: false,
         };
+
+        // Customers never see which partners moved their money (email and WhatsApp alike)
+        config = scrubNotification(config);
 
         // Send email
         try {
@@ -159,7 +163,7 @@ class NotificationService {
         // Send emails with attachments
         for (const email of emails) {
             try {
-                await this.emailService.sendNotificationEmail(email, config, attachments);
+                await this.emailService.sendNotificationEmail(email, config, attachments, { internal: true });
                 console.log(`Admin email sent to ${email}`);
             } catch (error) {
                 console.error(`Failed to send admin email to ${email}:`, error);

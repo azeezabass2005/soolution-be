@@ -97,9 +97,9 @@ export type Partner = NullToOptional<typeof partners.$inferSelect>;
 // ───────────── Transactions ─────────────
 
 type TransactionRow = typeof transactions.$inferSelect;
-export type Transaction = NullToOptional<Omit<TransactionRow, "payerName" | "payerEmail">> & {
+export type Transaction = NullToOptional<Omit<TransactionRow, "payerName" | "payerEmail" | "payerPhone">> & {
     /** Who paid through the payment link, as they entered it */
-    payer?: { name?: string; email?: string };
+    payer?: { name?: string; email?: string; phone?: string };
 };
 export type TransactionDetail = NullToOptional<typeof transactionDetails.$inferSelect>;
 

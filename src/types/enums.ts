@@ -47,6 +47,8 @@ export type VerificationStatus = "pending" | "failed" | "passed";
 export type VerificationKind = "bvn" | "details";
 export type FxRateSource = "yellowcard" | "fincra" | "ogateway" | "admin";
 export type PaymentLinkUsage = "single" | "reusable";
+/** Details a payment link can ask the payer for */
+export type PaymentLinkCollectField = "name" | "email" | "phone";
 export type BeneficiaryKind = "bank" | "momo" | "alipay" | "wechat";
 export type LedgerAlertSeverity = "warning" | "critical";
 export type ReconciliationRunMode = "on_demand" | "cron";

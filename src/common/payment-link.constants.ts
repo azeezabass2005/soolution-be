@@ -12,6 +12,10 @@ export type PaymentLinkCurrency = (typeof PAYMENT_LINK_CURRENCIES)[number];
 export const PAYMENT_LINK_USAGE = { SINGLE: "single", REUSABLE: "reusable" } as const;
 export type PaymentLinkUsage = (typeof PAYMENT_LINK_USAGE)[keyof typeof PAYMENT_LINK_USAGE];
 
+/** Details the link's owner can ask the payer for */
+export const PAYMENT_LINK_COLLECT_FIELDS = ["name", "email", "phone"] as const;
+export const PAYMENT_LINK_REDIRECT_MAX = 500;
+
 /** Links always credit the owner's NGN wallet */
 export const PAYMENT_LINK_TO_CURRENCY = "NGN";
 

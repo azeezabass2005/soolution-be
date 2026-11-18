@@ -1,5 +1,5 @@
 import z from "zod";
-import { PAYMENT_LINK_CURRENCIES, PAYMENT_LINK_DESCRIPTION_MAX, PAYMENT_LINK_TITLE_MAX, PAYMENT_LINK_USAGE } from "../common/payment-link.constants";
+import { PAYMENT_LINK_COLLECT_FIELDS, PAYMENT_LINK_CURRENCIES, PAYMENT_LINK_DESCRIPTION_MAX, PAYMENT_LINK_REDIRECT_MAX, PAYMENT_LINK_TITLE_MAX, PAYMENT_LINK_USAGE } from "../common/payment-link.constants";
 
 const optionalText = (max = 100) => z.string().trim().max(max).optional().transform((v) => v || undefined);
 const optionalAmount = z.preprocess(
@@ -18,6 +18,27 @@ export const ZCreatePaymentLink = z.object({
     usage: z.enum([PAYMENT_LINK_USAGE.SINGLE, PAYMENT_LINK_USAGE.REUSABLE], {
         errorMap: () => ({ message: "Choose single-use or reusable" }),
     }).default(PAYMENT_LINK_USAGE.REUSABLE),
+    /** Where to send the payer after paying: a full https:// address (http:// only for localhost) */
+    redirectUrl: z.preprocess(
+        (v) => (typeof v === "string" ? v.trim() || undefined : v ?? undefined),
+        z.string()
+            .max(PAYMENT_LINK_REDIRECT_MAX, "That address is too long")
+            .refine((v) => {
+                try {
+                    const url = new URL(v);
+                    return url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname));
+                } catch {
+                    return false;
+                }
+            }, "Enter a full web address starting with https://")
+            .optional(),
+    ),
+    /** Details the payer must give, besides what paying needs */
+    collect: z.preprocess(
+        (v) => (Array.isArray(v) ? Array.from(new Set(v)) : v ?? []),
+        z.array(z.enum(PAYMENT_LINK_COLLECT_FIELDS, { errorMap: () => ({ message: "Choose name, email or phone" }) }))
+            .max(PAYMENT_LINK_COLLECT_FIELDS.length),
+    ),
 });
 
 export const ZUpdatePaymentLink = z.object({
@@ -37,6 +58,10 @@ export const ZPayPaymentLink = z
         accountNumber: optionalText(40),
         accountName: optionalText(),
         email: z.string().trim().email("Enter a valid email").max(120).optional().or(z.literal("").transform(() => undefined)),
+        /** Asked for when the link's owner wants them */
+        payerName: optionalText(),
+        payerPhone: z.string().trim().max(30).optional().transform((v) => v || undefined)
+            .refine((v) => v === undefined || /^\+?[0-9 ()-]{6,25}$/.test(v), "Enter a valid phone number"),
     })
     .superRefine((data, ctx) => {
         const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });

@@ -58,6 +58,7 @@ export const JOURNAL_SOURCE = {
     OG_COLLECT: 'og_collect',
     FINCRA_SEND: 'fincra_send',
     FINCRA_COLLECT: 'fincra_collect',
+    SPOTFLOW_COLLECT: 'spotflow_collect',
     FEE: 'fee',
     REVERSAL: 'reversal',
     MANUAL_ATTRIBUTION: 'manual_attribution',
@@ -111,8 +112,14 @@ export const FINCRA_CURRENCIES = ['NGN', 'GHS'] as const;
 export const fincraCashCode = (currency: string): string => `CASH_FINCRA_${currency}`;
 export const fincraPayoutInflightCode = (currency: string): string => `FINCRA_PAYOUT_INFLIGHT_${currency}`;
 
+// Spotflow: GHS paid into one-time bank accounts lands in its GHS main account
+// (booked at NGN value, like the other GHS rails).
+export const SPOTFLOW_COLLECT_CURRENCIES = ['GHS'] as const;
+export const spotflowCashCode = (currency: string): string => `CASH_SPOTFLOW_${currency}`;
+
 export const WEBHOOK_PROVIDER = {
     FINCRA: 'fincra',
+    SPOTFLOW: 'spotflow',
     PAYSTACK: 'paystack',
     YELLOWCARD: 'yellowcard',
     OGATEWAY: 'ogateway',
@@ -201,6 +208,8 @@ export const DETAIL_TYPE = {
     YELLOWCARD: 'yellowcard',
     OGATEWAY: 'ogateway',
     FINCRA: 'fincra',
+    /** GHS paid into a one-time Spotflow bank account */
+    SPOTFLOW: 'spotflow',
 }
 
 export const YELLOWCARD_STATUS = {

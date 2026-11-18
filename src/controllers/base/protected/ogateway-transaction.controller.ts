@@ -1,3 +1,4 @@
+import spotflowService from "../../../services/spotflow.service";
 import BaseController from "../base-controller";
 import TransactionService from "../../../services/transaction.service";
 import ghsRateService from "../../../services/ghs-rate.service";
@@ -43,6 +44,14 @@ class OGatewayTransactionController extends BaseController {
             TransactionRateLimitMiddleware.checkTransactionRateLimit,
             validateCreateOGatewayCollection,
             this.createCollection.bind(this),
+        );
+
+        // Receive GHS by bank transfer into a one-time account (Spotflow)
+        this.router.get("/account", this.accountAvailability.bind(this));
+        this.router.post(
+            "/account",
+            TransactionRateLimitMiddleware.checkTransactionRateLimit,
+            this.createAccount.bind(this),
         );
 
         // Poll and sync a GHS payout/collection from OGateway. Used by the UI
@@ -96,6 +105,24 @@ class OGatewayTransactionController extends BaseController {
                 },
                 201,
             );
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    /** Whether one-time GHS accounts can be offered right now */
+    private async accountAvailability(_req: Request, res: Response) {
+        return this.sendSuccess(res, { available: spotflowService.ghsAccountsAvailable });
+    }
+
+    private async createAccount(req: Request, res: Response, next: NextFunction) {
+        try {
+            const user = res.locals.user;
+            const idempotencyKey = req.body?.idempotencyKey || (req.headers["idempotency-key"] as string);
+            const transaction = await transactionLimitService.withUserLock(user.id, () =>
+                this.transactionService.createGhsAccountCollection({ amount: Number(req.body?.amount), idempotencyKey }, user.id),
+            );
+            return this.sendSuccess(res, { transaction, message: "Account ready. Ask the payer to transfer the exact amount." }, 201);
         } catch (error) {
             return next(error);
         }

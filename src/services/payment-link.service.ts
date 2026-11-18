@@ -5,7 +5,7 @@ import transactionDetailRepository from "../repositories/transaction-detail.repo
 import userRepository from "../repositories/user.repository";
 import { isUniqueViolation } from "../db/errors";
 import type { PaymentLink as IPaymentLink, User as IUser, Transaction } from "../types/entities";
-import type { TransactionStatus } from "../types/enums";
+import type { PaymentLinkCollectField, TransactionStatus } from "../types/enums";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import { DETAIL_TYPE, TRANSACTION_STATUS } from "../common/constant";
 import { USER_TIER } from "../common/tier.constants";
@@ -91,6 +91,18 @@ const toOgatewayNetwork = (provider: string) => {
     return (provider || "").toUpperCase();
 };
 
+/** The owner's address with the payment's reference and status added, so their site can match it up */
+const withPaymentResult = (address: string, reference: string) => {
+    try {
+        const url = new URL(address);
+        url.searchParams.set("reference", reference);
+        url.searchParams.set("status", "completed");
+        return url.toString();
+    } catch {
+        return address;
+    }
+};
+
 const ownerName = (user: Pick<IUser, "firstName" | "lastName">) => `${user.firstName || ""} ${user.lastName || ""}`.trim();
 
 class PaymentLinkService {
@@ -101,7 +113,7 @@ class PaymentLinkService {
     async create(userId: string, body: unknown) {
         // Same rule as receiving directly: verify your BVN first
         await transactionLimitService.assertCanTransact(userId);
-        const data = parse<{ currency: string; amount?: number; title?: string; description?: string; usage: "single" | "reusable" }>(ZCreatePaymentLink, body);
+        const data = parse<{ currency: string; amount?: number; title?: string; description?: string; usage: "single" | "reusable"; redirectUrl?: string; collect: PaymentLinkCollectField[] }>(ZCreatePaymentLink, body);
         // YellowCard collects every currency except GHS and needs the owner's KYC details
         if (data.currency !== "GHS") await identityService.assertTransferDetails(userId);
         // Fincra's GHS checkout takes whole cedis
@@ -125,6 +137,8 @@ class PaymentLinkService {
                     // Older clients send the note as "description"; it becomes the title
                     title: data.title || data.description,
                     usage: data.usage,
+                    redirectUrl: data.redirectUrl,
+                    collectFields: data.collect,
                 });
                 return this.toOwnerView(link, { paid: 0, totalPaid: 0 });
             } catch (error: any) {
@@ -176,6 +190,8 @@ class PaymentLinkService {
             title: link.title || link.description || null,
             active: link.active,
             usage: link.usage || PAYMENT_LINK_USAGE.REUSABLE,
+            redirectUrl: link.redirectUrl ?? null,
+            collect: link.collectFields ?? [],
             /** "used": a single-use link that has been paid */
             status: link.usage === PAYMENT_LINK_USAGE.SINGLE && stats.paid > 0 ? "used" : link.active ? "active" : "off",
             createdAt: link.createdAt,
@@ -215,6 +231,10 @@ class PaymentLinkService {
             title: link.title || link.description || null,
             methods,
             usage: link.usage || PAYMENT_LINK_USAGE.REUSABLE,
+            /** Details the payer must give */
+            collect: link.collectFields ?? [],
+            /** Whether the payer is sent back to the owner's site after paying */
+            redirects: !!link.redirectUrl,
             available: !used && payable,
             /** Why it can't be paid, so the page can say so */
             unavailableReason: used ? "used" : !link.active ? "off" : payable ? null : "unavailable",
@@ -247,6 +267,13 @@ class PaymentLinkService {
             throw errorResponseMessage.createError(409, link.active ? UNAVAILABLE : "This payment link has been turned off.", ErrorSeverity.LOW, { code: "PAYMENT_LINK_UNAVAILABLE" });
         }
         const input = parse<PayPaymentLinkInput>(ZPayPaymentLink, body);
+        // The details the owner asked for
+        const wanted = link.collectFields ?? [];
+        const missing: Array<{ path: string; message: string }> = [];
+        if (wanted.includes("name") && !input.payerName) missing.push({ path: "payerName", message: "Enter your full name" });
+        if (wanted.includes("email") && !input.email) missing.push({ path: "email", message: "Enter your email address" });
+        if (wanted.includes("phone") && !input.payerPhone) missing.push({ path: "payerPhone", message: "Enter your phone number" });
+        if (missing.length) throw badRequest(missing[0].message, { issues: missing });
         if (await this.isUsedUp(link)) {
             throw errorResponseMessage.createError(409, "This payment link has already been paid.", ErrorSeverity.LOW, { code: "PAYMENT_LINK_USED" });
         }
@@ -291,7 +318,11 @@ class PaymentLinkService {
     private async startCollection(link: IPaymentLink, owner: IUser, input: PayPaymentLinkInput, amount: number) {
         const country = CURRENCY_COUNTRY[link.currency];
         const paymentLinkId = link.id;
-        const payer = { name: input.method === "momo" ? input.momoName : input.accountName, email: input.email };
+        const payer = {
+            name: input.payerName || (input.method === "momo" ? input.momoName : input.accountName),
+            email: input.email,
+            phone: input.payerPhone,
+        };
 
         if (link.currency === "GHS") {
             // Fincra's checkout page takes the payment; the payer comes back here after
@@ -355,7 +386,7 @@ class PaymentLinkService {
         const fresh = (await transactionRepository.findById(transaction.id)) || transaction;
         const payment = this.toPublicPayment(fresh, link);
         if (payment.status !== "completed") return payment;
-        return { ...payment, receipt: await this.payerReceipt(fresh) };
+        return { ...payment, receipt: await this.payerReceipt(fresh), ...(link.redirectUrl ? { redirectUrl: withPaymentResult(link.redirectUrl, fresh.reference) } : {}) };
     }
 
     /**

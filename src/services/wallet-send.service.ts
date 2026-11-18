@@ -1,3 +1,4 @@
+import { withoutProviderName } from "../utils/provider-names.utils";
 import crypto from "crypto";
 import type { Executor } from "../db/client";
 import { withTransaction } from "../db/transaction";
@@ -271,7 +272,8 @@ class WalletSendService {
                         reference: this.walletTransactionService.generateReference("REV"),
                         balanceBefore: round2(wallet.balance - amount),
                         balanceAfter: wallet.balance,
-                        description: `Reversal: ${reason} (${walletTx.reference})`,
+                        // Customers see this: never a partner's own wording
+                        description: `Refund: ${withoutProviderName(reason, "the payment didn't go through")} (${walletTx.reference})`,
                         reversedTransactionId: walletTx.id,
                         transactionId: walletTx.transactionId,
                     },

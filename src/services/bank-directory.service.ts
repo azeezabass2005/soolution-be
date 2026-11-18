@@ -4,6 +4,7 @@ import WalletService from "./wallet.service";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import { CURRENCY_COUNTRY } from "../common/payment-link.constants";
 import logger from "../utils/logger.utils";
+import { GHANA_BANKS } from "../common/ghana-banks.constants";
 
 /**
  * One list of banks per currency, from whichever provider pays out there,
@@ -55,8 +56,15 @@ class BankDirectoryService {
                 canResolve: true,
             };
         } else if (currency === "GHS") {
-            const banks = await fincraService.listBanks("GH", "GHS", "bank_account");
-            value = { currency, banks: banks.map((b) => ({ code: b.code, name: b.name })), canResolve: false };
+            let banks: BankOption[] = [];
+            try {
+                banks = (await fincraService.listBanks("GH", "GHS", "bank_account")).map((b) => ({ code: b.code, name: b.name }));
+            } catch (error: any) {
+                logger.warn("Ghana bank list unavailable; using the built-in list", { error: error?.message });
+            }
+            // The provider's list can be empty (or down): people still pick from a list
+            if (!banks.length) banks = GHANA_BANKS.map((name) => ({ code: name, name }));
+            value = { currency, banks, canResolve: false };
         } else if (YC_BANK_CURRENCIES.includes(currency)) {
             const data: any = await yellowCardService.getNetworks(CURRENCY_COUNTRY[currency]);
             const networks: any[] = data?.networks || data || [];

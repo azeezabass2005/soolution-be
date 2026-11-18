@@ -1,5 +1,6 @@
 import nodemailer, { Transporter, SendMailOptions } from 'nodemailer';
 import config from '../config/env.config';
+import { scrubNotification } from './provider-names.utils';
 import {
     attachmentsBlock, button, callout, codeBlock, emailLayout, escapeHtml, eyebrow, greeting, heading,
     htmlToText, paragraph, removeEmoji, renderMessage, signoff, SIGNOFF_MARKER, splitTitle, startsWithGreeting, stripEmoji, toneFromTitle,
@@ -452,13 +453,16 @@ class EmailService {
     public async sendNotificationEmail(
         to: string, 
         data: EmailTemplateData,
-        attachments?: EmailAttachment[]
+        attachments?: EmailAttachment[],
+        options: { internal?: boolean } = {}
     ): Promise<any> {
+        // Customers never see which partners moved their money; only admin alerts keep the names
+        const safe = options.internal ? data : scrubNotification(data);
         return this.send({
             to,
-            subject: data.title?.toString() || 'New Notification',
+            subject: safe.title?.toString() || 'New Notification',
             template: 'notification',
-            data,
+            data: safe,
             attachments,
         });
     }

@@ -11,18 +11,20 @@ import { toPublicUser, toUser } from "./user.repository";
 type TransactionRow = typeof transactions.$inferSelect;
 type TransactionInsert = typeof transactions.$inferInsert;
 
-export type NewTransaction = Omit<TransactionInsert, "payerName" | "payerEmail" | "user"> & {
+export type NewTransaction = Omit<TransactionInsert, "payerName" | "payerEmail" | "payerPhone" | "user"> & {
     user: string;
-    payer?: { name?: string; email?: string };
+    payer?: { name?: string; email?: string; phone?: string };
 };
 
 export type TransactionUpdate = Partial<
-    Omit<TransactionInsert, "id" | "user" | "reference" | "createdAt" | "updatedAt" | "payerName" | "payerEmail">
+    Omit<TransactionInsert, "id" | "user" | "reference" | "createdAt" | "updatedAt" | "payerName" | "payerEmail" | "payerPhone">
 >;
 
 export function toTransaction(row: TransactionRow): Transaction {
-    const { payerName, payerEmail, ...rest } = stripNulls(row);
-    return payerName || payerEmail ? { ...rest, payer: stripNulls({ name: payerName ?? null, email: payerEmail ?? null }) } : rest;
+    const { payerName, payerEmail, payerPhone, ...rest } = stripNulls(row);
+    return payerName || payerEmail || payerPhone
+        ? { ...rest, payer: stripNulls({ name: payerName ?? null, email: payerEmail ?? null, phone: payerPhone ?? null }) }
+        : rest;
 }
 
 /**
@@ -78,6 +80,7 @@ class TransactionRepository {
             lockedRateToCurrency: upper(rest.lockedRateToCurrency ?? undefined),
             payerName: payer?.name?.trim() || undefined,
             payerEmail: payer?.email?.trim().toLowerCase() || undefined,
+            payerPhone: payer?.phone?.trim() || undefined,
         });
         const [row] = await exec(tx).insert(transactions).values(values).returning();
         return toTransaction(row);

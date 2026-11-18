@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { transactionDetails } from "../db/schema";
 import type { Executor } from "../db/client";
 import type { TransactionDetail } from "../types/entities";
@@ -32,6 +32,16 @@ class TransactionDetailRepository {
     /** By our provider reference (Fincra payout customerReference / checkout reference) */
     async findByProviderReference(reference: string): Promise<TransactionDetail | undefined> {
         const [row] = await exec().select().from(transactionDetails).where(eq(transactionDetails.providerReference, reference)).limit(1);
+        return row ? stripNulls(row) : undefined;
+    }
+
+    /** By the provider's own id (e.g. the Spotflow account a payer paid into) and rail */
+    async findByProviderId(providerId: string, type: string): Promise<TransactionDetail | undefined> {
+        const [row] = await exec()
+            .select()
+            .from(transactionDetails)
+            .where(and(eq(transactionDetails.providerId, providerId), eq(transactionDetails.type, type as any)))
+            .limit(1);
         return row ? stripNulls(row) : undefined;
     }
 

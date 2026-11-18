@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from "axios";
+import crypto from "crypto";
 import config from "../config/env.config";
 import logger from "../utils/logger.utils";
 
@@ -57,6 +58,46 @@ class SpotflowService {
 
     get configured() {
         return !!config.SPOTFLOW_SECRET_KEY;
+    }
+
+    /** Customers can be given GHS accounts: switched on, keyed, and webhooks verifiable */
+    get ghsAccountsAvailable() {
+        return config.SPOTFLOW_GHS_ACCOUNTS_ENABLED && this.configured && !!this.mode && !!config.SPOTFLOW_WEBHOOK_SECRET_KEY;
+    }
+
+    /**
+     * Spotflow signs webhooks the Standard Webhooks way: HMAC-SHA256 of
+     * "{webhook-id}.{webhook-timestamp}.{raw body}" keyed with the webhook
+     * secret (base64, after an optional "whsec_" prefix), sent as
+     * "v1,<base64>" in x-spotflow-signature (several may be space-separated).
+     * Older than 5 minutes is refused, so a captured delivery can't be replayed.
+     */
+    verifyWebhook(rawBody: string, headers: Record<string, string | string[] | undefined>, now = Date.now()): boolean {
+        const secret = config.SPOTFLOW_WEBHOOK_SECRET_KEY;
+        const header = (name: string) => {
+            const v = headers[name];
+            return Array.isArray(v) ? v[0] : v;
+        };
+        const id = header("webhook-id");
+        const timestamp = header("webhook-timestamp");
+        const signatures = header("x-spotflow-signature") || header("webhook-signature");
+        if (!secret || !id || !timestamp || !signatures) return false;
+        const seconds = Number(timestamp);
+        if (!Number.isFinite(seconds) || Math.abs(now / 1000 - seconds) > 5 * 60) return false;
+        let key: Buffer;
+        try {
+            key = Buffer.from(secret.replace(/^whsec_/, ""), "base64");
+        } catch {
+            return false;
+        }
+        if (!key.length) return false;
+        const expected = crypto.createHmac("sha256", key).update(`${id}.${timestamp}.${rawBody}`).digest();
+        return signatures.split(" ").some((entry) => {
+            const [version, value] = entry.split(",", 2);
+            if (version !== "v1" || !value) return false;
+            const given = Buffer.from(value, "base64");
+            return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+        });
     }
 
     private async request<T = any>(method: "get" | "post", path: string, { body, params }: { body?: any; params?: any } = {}): Promise<T> {

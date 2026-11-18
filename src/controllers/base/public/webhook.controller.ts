@@ -8,6 +8,7 @@ import fincraService from "../../../services/fincra.service";
 import fincraWebhookService from "../../../services/fincra-webhook.service";
 import logger from "../../../utils/logger.utils";
 import webhookEventService from "../../../services/webhook-event.service";
+import spotflowService from "../../../services/spotflow.service";
 import { WEBHOOK_PROVIDER } from "../../../common/constant";
 
 class WebhookController extends BaseController {
@@ -28,6 +29,7 @@ class WebhookController extends BaseController {
         // Fincra: NGN deposits, virtual accounts, payouts and GHS payment links.
         // (Paystack and OGateway are no longer used.)
         this.router.post("/fincra", this.fincraCallback.bind(this));
+        this.router.post("/spotflow", this.spotflowCallback.bind(this));
     }
 
     private async smileIdCallback(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -185,6 +187,48 @@ class WebhookController extends BaseController {
             res.status(200).json({ received: true });
         } catch (error: any) {
             logger.error("Fincra webhook processing error", { event, error: error?.message || error });
+            if (eventId) await webhookEventService.markFailed(eventId, error);
+            if (!res.headersSent) res.status(500).json({ received: false, error: "Processing failed; please retry" });
+        }
+    }
+
+    /**
+     * Spotflow: money paid into a one-time GHS account. Verified with the
+     * webhook secret (Standard Webhooks), processed before answering, 500 on a
+     * failure so Spotflow delivers it again. Crediting is idempotent.
+     */
+    private async spotflowCallback(req: Request, res: Response): Promise<void> {
+        const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+        const event: string | undefined = req.body?.event;
+        const data = req.body?.data;
+        const signature = (req.headers["x-spotflow-signature"] as string | undefined) || undefined;
+        const signatureValid = spotflowService.verifyWebhook(rawBody, req.headers as any);
+        const stored = await webhookEventService.record({
+            provider: WEBHOOK_PROVIDER.SPOTFLOW,
+            req,
+            payload: req.body,
+            signature,
+            signatureValid,
+            event,
+            externalId: (req.headers["webhook-id"] as string | undefined) || data?.id?.toString(),
+        });
+        const eventId = stored?.id;
+        if (!signatureValid) {
+            logger.error("Spotflow webhook: missing or invalid signature");
+            if (eventId) await webhookEventService.markFailed(eventId, "invalid signature");
+            res.status(401).json({ error: "Invalid signature" });
+            return;
+        }
+        try {
+            let result: { outcome: string; note?: string } = { outcome: "ignored", note: `event ${event}` };
+            if (event === "account_credit_successful") result = await this.transactionService.handleSpotflowCredit(data);
+            if (eventId) {
+                if (result.outcome === "ignored") await webhookEventService.markIgnored(eventId, result.note || "ignored");
+                else await webhookEventService.markProcessed(eventId);
+            }
+            res.status(200).json({ received: true });
+        } catch (error: any) {
+            logger.error("Spotflow webhook processing error", { event, error: error?.message || error });
             if (eventId) await webhookEventService.markFailed(eventId, error);
             if (!res.headersSent) res.status(500).json({ received: false, error: "Processing failed; please retry" });
         }

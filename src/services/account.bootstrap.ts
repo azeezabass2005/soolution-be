@@ -10,6 +10,8 @@ import {
     OG_CURRENCIES,
     FINCRA_CURRENCIES,
     fincraCashCode,
+    spotflowCashCode,
+    SPOTFLOW_COLLECT_CURRENCIES,
     fincraPayoutInflightCode,
     ogCashAccountCode,
     ogPaymentInflightCode,
@@ -131,6 +133,17 @@ function buildSystemAccountList(): SystemAccountSpec[] {
             currency,
             name: `Fincra payouts in flight (${currency})`,
             description: `${currency} payouts sent to Fincra and awaiting its webhook (booked in NGN).`,
+        });
+    }
+
+    // Spotflow: GHS paid into one-time bank accounts
+    for (const currency of SPOTFLOW_COLLECT_CURRENCIES) {
+        accounts.push({
+            code: spotflowCashCode(currency),
+            type: ACCOUNT_TYPE.ASSET,
+            currency,
+            name: `Cash at Spotflow (${currency})`,
+            description: `${currency} paid into one-time bank accounts, booked at its NGN value.`,
         });
     }
 

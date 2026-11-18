@@ -105,11 +105,22 @@ async function sweepStaleGhs(): Promise<{ scanned: number; synced: number }> {
     return { scanned: stale.length, synced };
 }
 
+/** One-time GHS accounts that were never paid: closed well after they expire */
+async function closeUnpaidGhsAccounts(): Promise<number> {
+    try {
+        return await txService.expireGhsAccountCollections();
+    } catch (error) {
+        logger.warn('Sweeper: closing unpaid GHS accounts failed', { error: error instanceof Error ? error.message : String(error) });
+        return 0;
+    }
+}
+
 export async function runStaleTransactionSweep(): Promise<void> {
-    const [yc, withdrawals, ghs] = await Promise.all([
+    const [yc, withdrawals, ghs, ghsAccountsClosed] = await Promise.all([
         sweepStaleYC(),
         sweepStaleWithdrawals(),
         sweepStaleGhs(),
+        closeUnpaidGhsAccounts(),
     ]);
-    logger.info('Sweep complete', { yc, withdrawals, ghs });
+    logger.info('Sweep complete', { yc, withdrawals, ghs, ghsAccountsClosed });
 }

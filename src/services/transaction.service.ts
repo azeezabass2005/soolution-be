@@ -1,3 +1,4 @@
+import { canonicalBankKey } from '../common/ghana-banks.constants';
 import transactionRepository, { type TransactionListFilter } from "../repositories/transaction.repository";
 import transactionDetailRepository from "../repositories/transaction-detail.repository";
 import userRepository from "../repositories/user.repository";
@@ -23,6 +24,12 @@ import AuditLogService from "./audit-log.service";
 import { validateTransactionAmount, getTransactionLimits } from "../config/transaction-limits.config";
 import yellowCardService, { YellowCardChannelType, YellowCardCountryConfig } from "./yellowcard.service";
 import fincraService, { FINCRA_CHECKOUT_METHODS, FincraError } from "./fincra.service";
+import spotflowService from "./spotflow.service";
+
+/** How long a one-time GHS account takes payments (Spotflow's default) */
+export const GHS_ACCOUNT_LIFETIME_MS = 30 * 60 * 1000;
+/** Extra time before an unpaid one is closed, for transfers still on their way */
+const GHS_ACCOUNT_GRACE_MS = 6 * 60 * 60 * 1000;
 import ghsRateService, { type GhsPrice } from "./ghs-rate.service";
 import transactionLimitService from "./transaction-limit.service";
 import platformSettingsService from "./platform-settings.service";
@@ -39,6 +46,7 @@ import {
     WEBHOOK_PROVIDER,
     userWalletAccountCode,
     fincraCashCode,
+    spotflowCashCode,
     fincraPayoutInflightCode,
 } from "../common/constant";
 import WalletService from "./wallet.service";
@@ -1349,7 +1357,7 @@ class TransactionService {
             /** Set when the payer filled in a payment link */
             paymentLinkId?: string;
             /** The payer's name and email from the payment link form */
-            payer?: { name?: string; email?: string };
+            payer?: { name?: string; email?: string; phone?: string };
         },
         userId: string,
     ) => {
@@ -2051,7 +2059,9 @@ class TransactionService {
         const wanted = String(destination.bank || '').trim().toUpperCase();
         if (!wanted) throw errorResponseMessage.createError(400, "Choose the recipient's bank", ErrorSeverity.LOW);
         const banks = await fincraService.listBanks('GH', 'GHS', 'bank_account');
-        const bank = banks.find((b) => b.code.toUpperCase() === wanted || (b.swiftCode || '').toUpperCase() === wanted || b.name.toUpperCase() === wanted);
+        // By code or SWIFT, else by name (the built-in list sends names, which may be worded differently)
+        const bank = banks.find((b) => b.code.toUpperCase() === wanted || (b.swiftCode || '').toUpperCase() === wanted || b.name.toUpperCase() === wanted)
+            || banks.find((b) => canonicalBankKey(b.name) === canonicalBankKey(wanted));
         if (!bank) throw errorResponseMessage.createError(400, "We don't recognise that bank. Choose it from the list.", ErrorSeverity.LOW);
         return {
             accountNumber: number,
@@ -2074,7 +2084,7 @@ class TransactionService {
             sender?: { accountName?: string; accountNumber?: string; network?: string; email?: string };
             idempotencyKey?: string;
             paymentLinkId?: string;
-            payer?: { name?: string; email?: string };
+            payer?: { name?: string; email?: string; phone?: string };
             /** Where Fincra sends the payer afterwards */
             redirectUrl?: string;
         },
@@ -2205,7 +2215,14 @@ class TransactionService {
      * locked rate, less the fee. The GHS sits in the platform's Fincra GHS
      * balance (CASH_FINCRA_GHS, booked at NGN value).
      */
-    private creditWalletFromGhsCollection = async (transaction: Transaction, detail: TransactionDetail, walletId: string, tx: Executor) => {
+    private creditWalletFromGhsCollection = async (
+        transaction: Transaction,
+        detail: TransactionDetail,
+        walletId: string,
+        tx: Executor,
+        // Where the GHS is held: Fincra's checkout by default, or a Spotflow account
+        rail: { cash: string; source: string; provider: string } = { cash: fincraCashCode('GHS'), source: JOURNAL_SOURCE.FINCRA_COLLECT, provider: WEBHOOK_PROVIDER.FINCRA },
+    ) => {
         const userId = transaction.user;
         const ngnAmount = detail.fromAmount || 0;
         const feeAmount = detail.feeAmount || 0;
@@ -2218,16 +2235,16 @@ class TransactionService {
         if (!credited) throw errorResponseMessage.createError(500, "Wallet not found for collection credit", ErrorSeverity.CRITICAL);
 
         const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
-            { accountCode: fincraCashCode('GHS'), direction: JOURNAL_DIRECTION.DEBIT, amount: grossNgn },
+            { accountCode: rail.cash, direction: JOURNAL_DIRECTION.DEBIT, amount: grossNgn },
             { accountCode: userWalletAccountCode(userId, credited.currency), direction: JOURNAL_DIRECTION.CREDIT, amount: ngnAmount },
         ];
         if (feeAmount > 0) legs.push({ accountCode: SYSTEM_ACCOUNT_CODES.FEES_NGN, direction: JOURNAL_DIRECTION.CREDIT, amount: feeAmount });
         await ledgerService.post({
             legs,
-            source: JOURNAL_SOURCE.FINCRA_COLLECT,
+            source: rail.source as any,
             reference: transaction.reference,
             description: `GHS received — ${transaction.amount} GHS → ₦${ngnAmount.toFixed(2)} (fee ₦${feeAmount.toFixed(2)})`,
-            externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: transaction.reference },
+            externalRef: { provider: rail.provider as any, id: transaction.reference },
             metadata: { fromAmount: transaction.amount, fromCurrency: 'GHS', feeAmount, grossNgn },
             tx,
         });
@@ -2249,6 +2266,207 @@ class TransactionService {
         }, tx);
 
         await this.walletService.adjustLedgerBalance(walletId, ngnAmount, tx);
+    };
+
+    /**
+     * Receive GHS → NGN by bank transfer: a one-time Spotflow GHS account for
+     * exactly this amount (valid about 30 minutes). The payer transfers to it
+     * from any Ghanaian bank; Spotflow's webhook confirms the credit, and the
+     * user's NGN wallet gets the GHS at the locked rate, less the fee (the
+     * same pricing as every GHS receive).
+     */
+    public createGhsAccountCollection = async (
+        params: { amount: number; paymentLinkId?: string; payer?: { name?: string; email?: string; phone?: string }; idempotencyKey?: string },
+        userId: string,
+    ) => {
+        if (!spotflowService.ghsAccountsAvailable) {
+            throw errorResponseMessage.createError(503, "Paying by bank transfer in Ghana isn't available right now. Use a payment link instead.", ErrorSeverity.LOW, { code: "GHS_ACCOUNTS_UNAVAILABLE" });
+        }
+        const amount = Math.round(Number(params.amount) * 100) / 100;
+        if (!(amount > 0)) throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
+        if (amount < 1) throw errorResponseMessage.createError(400, "The smallest amount is GHS 1.", ErrorSeverity.LOW);
+
+        let price: GhsPrice;
+        try {
+            price = await ghsRateService.price('receive', amount);
+        } catch (err: any) {
+            logger.error("GHS rate lookup failed for a GHS account", { error: err?.message });
+            throw errorResponseMessage.createError(400, "We couldn't get the GHS→NGN exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
+        }
+        const grossNgn = price.subtotalNgn;
+        const ngnAmount = price.totalNgn;
+        if (!(grossNgn > 0) || !(ngnAmount > 0)) {
+            throw errorResponseMessage.createError(400, "This amount is too small after the fee. Please increase it.", ErrorSeverity.MEDIUM);
+        }
+        const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(userId, [
+            { amount, currency: 'GHS' },
+            { amount: grossNgn, currency: 'NGN' },
+        ]);
+        if (params.idempotencyKey) {
+            const duplicate = await this.findDuplicate(params.idempotencyKey, userId);
+            if (duplicate) return duplicate;
+        }
+
+        const owner = await userRepository.findById(userId);
+        const ownerName = `${owner?.firstName || ''} ${owner?.lastName || ''}`.trim() || 'SolutionPay customer';
+        const reference = this.generateGhsReference();
+        const providerFeePercent = Math.round((price.providerFee / grossNgn) * 100 * 10_000) / 10_000;
+        const markupPercent = (await platformSettingsService.getPricing()).receive['GHS-NGN']?.rate.percent ?? 0;
+
+        const transaction = await transactionRepository.create({
+            ngnValue: txNgnValue ?? undefined,
+            user: userId,
+            reference,
+            amount,
+            fromCurrency: 'GHS',
+            currency: 'NGN',
+            detailType: DETAIL_TYPE.SPOTFLOW as DetailType,
+            status: TRANSACTION_STATUS.PENDING,
+            initiatedAt: new Date(),
+            lockedRate: price.userRate,
+            lockedRateFromCurrency: 'GHS',
+            lockedRateToCurrency: 'NGN',
+            lockedRateAt: new Date(),
+            ...(params.paymentLinkId ? { paymentLink: params.paymentLinkId, payer: params.payer } : {}),
+        });
+        if (params.idempotencyKey) await this.idempotencyService.updateKeyWithTransaction(params.idempotencyKey, transaction.id);
+
+        const detail = await transactionDetailRepository.create({
+            transactionId: transaction.id,
+            type: DETAIL_TYPE.SPOTFLOW as DetailType,
+            providerReference: reference,
+            providerStatus: 'pending',
+            fromAmount: ngnAmount,
+            feeAmount: price.feeAmount,
+            feePercent: price.feePercent,
+            providerFeePercent,
+            markupPercent,
+            institutionType: 'bank',
+            country: 'GH',
+        });
+
+        try {
+            const account: any = await spotflowService.createDynamicAccount('GHS', ownerName, amount);
+            const accountId = String(account?.id || '');
+            const accountNumber = String(account?.accountNumber || account?.account_number || '');
+            if (!accountId || !accountNumber) throw new Error("Spotflow didn't return an account");
+            // Spotflow says when it closes; otherwise its 30-minute default
+            const given = new Date(String(account?.expiresAt || account?.expires_at || ''));
+            const expiresAt = Number.isFinite(given.getTime()) && given.getTime() > Date.now() ? given : new Date(Date.now() + GHS_ACCOUNT_LIFETIME_MS);
+            const payTo = {
+                accountId,
+                accountNumber,
+                accountName: String(account?.accountName || account?.account_name || ownerName),
+                bankName: String(account?.bankName || account?.bank_name || ''),
+                expiresAt: expiresAt.toISOString(),
+            };
+            await transactionDetailRepository.update(detail.id, {
+                providerId: accountId,
+                providerStatus: 'awaiting_transfer',
+                providerPayload: { account, payTo },
+                accountNumber: payTo.accountNumber,
+                accountName: payTo.accountName,
+                bankName: payTo.bankName,
+            });
+            await this.claimStatus(transaction, TRANSACTION_STATUS.PROCESSING as TransactionStatus);
+            logger.info("GHS account created", { transactionId: transaction.id, reference });
+            return { ...transaction, status: TRANSACTION_STATUS.PROCESSING, payTo, ngnAmount, feeAmount: price.feeAmount, rate: price.userRate };
+        } catch (error: any) {
+            await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
+            await transactionDetailRepository.update(detail.id, { providerStatus: 'failed' });
+            logger.error("GHS account could not be created", { transactionId: transaction.id, error: error?.message });
+            throw errorResponseMessage.createError(400, "We couldn't create a Ghana account number right now. Please try again in a few minutes.", ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
+        }
+    };
+
+    /**
+     * Money arrived in a one-time GHS account (Spotflow's
+     * account_credit_successful). Signed by Spotflow, matched to our
+     * transaction by the account it was paid into, and credited only for the
+     * exact amount asked. The claim and the credit commit together, so
+     * retries act once; a failure throws so the webhook is retried.
+     */
+    public handleSpotflowCredit = async (data: any): Promise<{ outcome: 'credited' | 'ignored'; note?: string }> => {
+        const accountId = String(data?.account?.id || data?.accountId || data?.account_id || '');
+        const status = String(data?.status || '').toLowerCase();
+        const type = String(data?.type || 'credit').toLowerCase();
+        const currency = String(data?.currency || '').toUpperCase();
+        const paid = Number(data?.amount);
+        const spotflowReference = String(data?.spotflowReference || data?.spotflow_reference || data?.reference || '');
+
+        if (!accountId || type !== 'credit') return { outcome: 'ignored', note: 'not a credit to an account' };
+        const detail = await transactionDetailRepository.findByProviderId(accountId, DETAIL_TYPE.SPOTFLOW);
+        // A credit to some other account (the main account, a lab account): not ours to handle
+        if (!detail) return { outcome: 'ignored', note: 'no transaction for this account' };
+        const transaction = await transactionRepository.findById(detail.transactionId);
+        if (!transaction) return { outcome: 'ignored', note: 'transaction missing' };
+        if (transaction.status === TRANSACTION_STATUS.COMPLETED) return { outcome: 'ignored', note: 'already credited' };
+
+        const record = { lastCredit: data, receivedAt: new Date().toISOString() };
+        const payload = { ...((detail.providerPayload as any) || {}), ...record };
+        if (status !== 'successful' && status !== 'success') {
+            await transactionDetailRepository.update(detail.id, { providerStatus: status || 'unknown', providerPayload: payload });
+            return { outcome: 'ignored', note: `credit status ${status}` };
+        }
+        if (currency !== 'GHS' || !(Math.abs(paid - transaction.amount) < 0.01)) {
+            // Too little, too much or the wrong currency: the money is with Spotflow, a person decides
+            logger.error("CRITICAL: GHS account paid a different amount; not credited, reconcile manually", { reference: transaction.reference, expected: transaction.amount, paid, currency, spotflowReference });
+            await transactionDetailRepository.update(detail.id, { providerStatus: 'amount_mismatch', providerPayload: payload });
+            Promise.resolve().then(() => this.notificationService.notifyAdmins(config.ADMIN_EMAILS, {
+                title: 'GHS account paid the wrong amount',
+                message: `Transaction ${transaction.reference} expected GHS ${transaction.amount} but Spotflow reports ${currency} ${paid} (${spotflowReference}). Nothing was credited; please reconcile it by hand.`,
+            } as any, config.ADMIN_PHONE_NUMBERS)).catch(() => undefined);
+            return { outcome: 'ignored', note: 'amount mismatch' };
+        }
+        if (transaction.status === TRANSACTION_STATUS.FAILED || transaction.status === TRANSACTION_STATUS.CANCELLED) {
+            logger.error("CRITICAL: GHS account paid after the request was closed; not credited, reconcile manually", { reference: transaction.reference, spotflowReference });
+            await transactionDetailRepository.update(detail.id, { providerStatus: 'paid_after_close', providerPayload: payload });
+            Promise.resolve().then(() => this.notificationService.notifyAdmins(config.ADMIN_EMAILS, {
+                title: 'GHS account paid after it closed',
+                message: `Transaction ${transaction.reference} was paid (GHS ${paid}, ${spotflowReference}) after it was closed. Nothing was credited; please reconcile it by hand.`,
+            } as any, config.ADMIN_PHONE_NUMBERS)).catch(() => undefined);
+            return { outcome: 'ignored', note: 'paid after close' };
+        }
+
+        const wallet = await this.walletService.getOrCreateWallet(transaction.user);
+        const credited = await withTransaction(async (tx) => {
+            if (!(await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() }, tx))) return false;
+            await this.creditWalletFromGhsCollection(transaction, detail, wallet.id, tx, {
+                cash: spotflowCashCode('GHS'),
+                source: JOURNAL_SOURCE.SPOTFLOW_COLLECT,
+                provider: WEBHOOK_PROVIDER.SPOTFLOW,
+            });
+            await transactionDetailRepository.update(detail.id, { providerStatus: 'successful', providerPayload: payload }, tx);
+            return true;
+        });
+        if (!credited) return { outcome: 'ignored', note: 'already credited' };
+        logger.info("Wallet credited from GHS account", { userId: transaction.user, transactionId: transaction.id, ghsAmount: transaction.amount });
+        try {
+            const user = await userRepository.findById(transaction.user);
+            if (user) {
+                await this.notificationService.sendTransactionNotification(user, "payment_completed", {
+                    amount: `GHS ${transaction.amount}`,
+                    reference: transaction.reference,
+                    recipient: "your NGN wallet",
+                    actionUrl: `${config.FRONTEND_URL}/dashboard/user/transactions`,
+                });
+            }
+        } catch (error: any) {
+            logger.warn("GHS account credit notification failed", { error: error?.message });
+        }
+        return { outcome: 'credited' };
+    };
+
+    /** One-time accounts nobody paid: closed once well past their expiry */
+    public expireGhsAccountCollections = async () => {
+        const cutoff = new Date(Date.now() - GHS_ACCOUNT_LIFETIME_MS - GHS_ACCOUNT_GRACE_MS);
+        const stale = await transactionRepository.listStale(DETAIL_TYPE.SPOTFLOW as DetailType, [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] as TransactionStatus[], cutoff, 200);
+        let closed = 0;
+        for (const transaction of stale) {
+            if (await this.claimStatus(transaction, TRANSACTION_STATUS.FAILED as TransactionStatus, { failedAt: new Date(), cancelReason: "No transfer arrived before the account expired" } as any)) closed++;
+        }
+        if (closed) logger.info("Closed unpaid GHS accounts", { closed });
+        return closed;
     };
 
     /**
@@ -2433,6 +2651,8 @@ class TransactionService {
             return { transaction: view, providerStatus: view?.details?.providerStatus || String(view?.status || "unknown"), message };
         };
         if (!detail?.providerReference) return current("This transaction has no payment reference yet.");
+        // One-time GHS accounts: Spotflow's webhook is the only source; nothing to ask Fincra
+        if (transaction.detailType === DETAIL_TYPE.SPOTFLOW) return current();
 
         if (detail.checkoutUrl) {
             await this.handleFincraCheckout(detail.providerReference);
