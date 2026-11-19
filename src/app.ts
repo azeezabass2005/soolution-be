@@ -20,8 +20,6 @@ import { registerJobs, unregisterJobs } from './jobs';
 const PRODUCTION_ORIGINS = [
     'https://solutionpay.co',
     'https://www.solutionpay.co',
-    'https://soolution.co',
-    'https://www.soolution.co',
 ];
 
 /**
