@@ -33,6 +33,7 @@ import { approvedBusinessName } from "./business-name.service";
 import { limitProblem } from "../common/pricing";
 import platformSettingsService from "./platform-settings.service";
 import { pausedError } from "../middlewares/operations.middleware";
+import fincraService from "./fincra.service";
 
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const IN_FLIGHT = [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] as TransactionStatus[];
@@ -441,7 +442,27 @@ class PaymentLinkService {
             ...(transaction.checkoutUrl || transaction.details?.checkoutUrl
                 ? { checkoutUrl: transaction.checkoutUrl || transaction.details?.checkoutUrl }
                 : {}),
+            /** A direct charge: the payer approves on their phone (or with a code) on our page */
+            ...(transaction.approval ? { approval: transaction.approval } : {}),
         };
+    }
+
+    /** The code a payer received, for a direct charge that asks for one */
+    async authorizePayment(slug: string, reference: string, otp: unknown) {
+        const { link } = await this.findPayable(slug);
+        const code = String(otp ?? "").trim();
+        if (!/^\d{4,8}$/.test(code)) throw badRequest("Enter the code sent to your phone", { issues: [{ path: "otp", message: "Enter the code" }] });
+        const transaction = typeof reference === "string" && reference.length <= 100 ? await transactionRepository.findByReference(reference, link.id) : undefined;
+        if (!transaction) throw errorResponseMessage.resourceNotFound("Payment");
+        const detail = await transactionDetailRepository.findByTransactionId(transaction.id);
+        if (!detail?.providerId || (detail.providerPayload as any)?.directCharge !== true) throw badRequest("This payment doesn't need a code");
+        try {
+            await fincraService.authorizeCharge(detail.providerId, code);
+        } catch (error: any) {
+            logger.warn("Direct charge OTP refused", { reference, error: error?.message });
+            throw badRequest("That code didn't work. Check it and try again.", { issues: [{ path: "otp", message: "Check the code" }] });
+        }
+        return this.paymentStatus(slug, reference);
     }
 }
 

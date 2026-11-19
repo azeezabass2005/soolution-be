@@ -62,8 +62,13 @@ class FincraWebhookService {
             case "charge.failed": {
                 // Our reference travels in the checkout's metadata
                 const reference = String(data?.metadata?.reference || data?.merchantReference || "");
-                if (!reference) return { outcome: "ignored", note: "charge without our reference" };
-                const known = await this.transactionService.handleFincraCheckout(reference);
+                // Direct charges carry our reference as `reference` (checkouts use their own there)
+                const candidates = [reference, String(data?.reference || "")].filter(Boolean);
+                if (!candidates.length) return { outcome: "ignored", note: "charge without our reference" };
+                let known = false;
+                for (const ref of candidates) {
+                    if (await this.transactionService.handleFincraCheckout(ref)) { known = true; break; }
+                }
                 return known ? { outcome: "processed" } : { outcome: "ignored", note: "unknown checkout reference" };
             }
 

@@ -33,6 +33,7 @@ class PayController extends BaseController {
         this.router.get("/:slug", viewLimiter, this.view.bind(this));
         this.router.post("/:slug", payLimiter, this.pay.bind(this));
         this.router.get("/:slug/payments/:reference", viewLimiter, this.status.bind(this));
+        this.router.post("/:slug/payments/:reference/authorize", payLimiter, this.authorize.bind(this));
         this.router.get("/:slug/banks", viewLimiter, this.banks.bind(this));
     }
 
@@ -68,6 +69,16 @@ class PayController extends BaseController {
     private async status(req: Request, res: Response, next: NextFunction) {
         try {
             const payment = await paymentLinkService.paymentStatus(req.params.slug, req.params.reference);
+            this.sendSuccess(res, { payment });
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    /** The code for a direct charge that asks for one */
+    private async authorize(req: Request, res: Response, next: NextFunction) {
+        try {
+            const payment = await paymentLinkService.authorizePayment(String(req.params.slug), String(req.params.reference), req.body?.otp);
             this.sendSuccess(res, { payment });
         } catch (error) {
             next(error);

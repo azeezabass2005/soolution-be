@@ -23,7 +23,7 @@ import IdempotencyService from "./idempotency.service";
 import AuditLogService from "./audit-log.service";
 import { validateTransactionAmount, getTransactionLimits } from "../config/transaction-limits.config";
 import yellowCardService, { YellowCardChannelType, YellowCardCountryConfig } from "./yellowcard.service";
-import fincraService, { FINCRA_CHECKOUT_METHODS, FincraError } from "./fincra.service";
+import fincraService, { FINCRA_CHECKOUT_METHODS, FincraError, ghanaIntl, ghsMomoOperator } from "./fincra.service";
 import spotflowService from "./spotflow.service";
 
 /** How long a one-time GHS account takes payments (Spotflow's default) */
@@ -2349,11 +2349,50 @@ class TransactionService {
             country: 'GH',
         });
 
+        // With the payer's mobile money details, charge their phone directly: no second form.
+        // If Fincra hasn't enabled it (or refuses this network), fall back to the checkout page.
+        const payerPhone = ghanaIntl(params.sender?.accountNumber);
+        const operator = ghsMomoOperator(params.sender?.network);
+        if (config.FINCRA_DIRECT_CHARGE && payerPhone && operator) {
+            try {
+                const charge = await fincraService.directCharge({
+                    currency: 'GHS',
+                    amount,
+                    reference,
+                    customer: { name: payerName, email: payerEmail, phoneNumber: payerPhone },
+                    phone: payerPhone,
+                    operator,
+                });
+                await transactionDetailRepository.updateByTransactionId(transaction.id, {
+                    providerId: String(charge.id ?? ''),
+                    providerStatus: 'awaiting_approval',
+                    providerPayload: { ...charge, directCharge: true },
+                });
+                await this.claimStatus(transaction, TRANSACTION_STATUS.PROCESSING as TransactionStatus);
+                const otpRequired = String(charge.auth_model || '').toUpperCase() === 'OTP';
+                logger.info("GHS direct charge started", { transactionId: transaction.id, reference, otpRequired });
+                return {
+                    ...transaction,
+                    status: TRANSACTION_STATUS.PROCESSING,
+                    details: { ...transactionDetails, providerStatus: 'awaiting_approval' },
+                    approval: {
+                        otpRequired,
+                        message: otpRequired
+                            ? "Enter the code sent to your phone to approve the payment."
+                            : "Approve the payment on your phone. Check for a prompt and enter your mobile money PIN.",
+                    },
+                };
+            } catch (error: any) {
+                logger.warn("GHS direct charge unavailable; using the checkout page", { transactionId: transaction.id, providerMessage: error?.message });
+            }
+        }
+
         try {
             const checkout = await fincraService.createCheckout({
                 currency: 'GHS',
                 amount,
-                customer: { name: payerName, email: payerEmail },
+                // The phone prefills Fincra's page where it can
+                customer: { name: payerName, email: payerEmail, ...(payerPhone ? { phoneNumber: payerPhone } : {}) },
                 paymentMethods: FINCRA_CHECKOUT_METHODS.GHS,
                 feeBearer: 'business',
                 reference,
@@ -2770,18 +2809,21 @@ class TransactionService {
      */
     public handleFincraCheckout = async (reference: string) => {
         const detail = await transactionDetailRepository.findByProviderReference(reference);
-        if (!detail || !detail.checkoutUrl) return false;
+        const direct = (detail?.providerPayload as any)?.directCharge === true;
+        if (!detail || (!detail.checkoutUrl && !direct)) return false;
         const transaction = await transactionRepository.findById(detail.transactionId);
         if (!transaction) return false;
         if (transaction.status === TRANSACTION_STATUS.COMPLETED) return true; // credited already
 
         let checkout: any;
         try {
-            checkout = await fincraService.getCheckout(reference);
+            checkout = direct ? await fincraService.getChargeByReference(reference) : await fincraService.getCheckout(reference);
         } catch (error: any) {
             if (error instanceof FincraError && error.status === 404) return true; // not started yet
             throw error;
         }
+        // Keep knowing how it was started
+        if (direct && checkout && typeof checkout === 'object') checkout = { ...checkout, directCharge: true };
         const status = String(checkout?.status || '').toLowerCase();
 
         if (status === 'success' || status === 'successful') {
@@ -2843,7 +2885,7 @@ class TransactionService {
         // One-time GHS accounts: Spotflow's webhook is the only source; nothing to ask Fincra
         if (transaction.detailType === DETAIL_TYPE.SPOTFLOW) return current();
 
-        if (detail.checkoutUrl) {
+        if (detail.checkoutUrl || (detail.providerPayload as any)?.directCharge === true) {
             await this.handleFincraCheckout(detail.providerReference);
             // A link the payer never paid stops being checked after two days
             const fresh = await transactionRepository.findById(transactionId);

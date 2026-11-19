@@ -331,6 +331,49 @@ class FincraService {
         return res.data as { link: string; reference?: string; payCode?: string };
     }
 
+    /**
+     * Charge a payer's mobile money directly: they get a prompt on their phone
+     * (or an OTP to give us), with no hosted page. Needs Fincra to enable
+     * Direct Charge on the account. https://docs.fincra.com/reference/initiate-a-charge
+     */
+    async directCharge(input: {
+        currency: string;
+        amount: number;
+        reference: string;
+        customer: { name: string; email: string; phoneNumber?: string };
+        phone: string;
+        operator: string;
+    }) {
+        const res = await this.request("post", "/checkout/charges", {
+            withBusiness: true,
+            body: {
+                type: "mobile_money",
+                currency: input.currency,
+                amount: input.amount,
+                reference: input.reference,
+                customer: input.customer,
+                phone: input.phone,
+                operator: input.operator,
+                settlementDestination: "wallet",
+            },
+        });
+        const data = res?.data;
+        if (!data?.id && !data?.reference) throw new FincraError(res?.message || "Fincra didn't start the charge", 502, res);
+        return data as { id: number | string; status?: string; auth_model?: string | null; message?: string; reference?: string };
+    }
+
+    /** Sends the OTP a payer received, for charges whose auth_model is OTP */
+    async authorizeCharge(chargeId: string | number, otp: string) {
+        const res = await this.request("post", `/checkout/charges/${encodeURIComponent(String(chargeId))}/authorize`, { withBusiness: true, body: { otp } });
+        return res?.data;
+    }
+
+    /** A direct charge by our reference */
+    async getChargeByReference(reference: string) {
+        const res = await this.request("get", `/checkout/charges/merchant-reference/${encodeURIComponent(reference)}`, { withBusiness: true });
+        return res?.data;
+    }
+
     /** Status of a checkout by our reference. 404 until Fincra has a record of it. */
     async getCheckout(reference: string) {
         const res = await this.request("get", `/checkout/payments/merchant-reference/${encodeURIComponent(reference)}`, { withBusiness: true });
@@ -599,3 +642,21 @@ class FincraService {
 }
 
 export default new FincraService();
+
+/** Fincra's mobile money operator for a Ghana network as we store it ("MTN", "VOD", "MTN Momo", "Telecel Cash"…) */
+export function ghsMomoOperator(network?: string | null): string | null {
+    const n = String(network || "").toLowerCase();
+    if (!n) return null;
+    if (n.includes("mtn")) return "MTN";
+    if (n.includes("vod") || n.includes("telecel")) return "VODAFONE";
+    if (n.includes("airtel") || n.includes("tigo") || n === "atm") return "AIRTELTIGO";
+    return null;
+}
+
+/** A Ghana number as +233XXXXXXXXX */
+export function ghanaIntl(number?: string | null): string | null {
+    let digits = String(number || "").replace(/\D/g, "");
+    if (digits.startsWith("233")) digits = digits.slice(3);
+    if (digits.startsWith("0")) digits = digits.slice(1);
+    return /^\d{9}$/.test(digits) ? `+233${digits}` : null;
+}

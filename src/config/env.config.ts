@@ -139,6 +139,8 @@ interface EnvConfig {
     SPOTFLOW_GHS_ACCOUNTS_ENABLED: boolean;
     /** Convert each confirmed GHS payment-link receipt at Fincra into NGN (on unless set to "false") */
     FINCRA_AUTO_CONVERT_GHS: boolean;
+    /** Charge the payer's mobile money directly (a prompt on their phone) before falling back to Fincra's checkout page */
+    FINCRA_DIRECT_CHARGE: boolean;
 
     /** Daya lab (admin-only, local exploration of NGN funding accounts and USD/EUR virtual accounts); mode follows the key */
     DAYA_LAB_ENABLED: boolean;
@@ -277,6 +279,7 @@ const loadEnvConfig = (): EnvConfig => {
         SPOTFLOW_WEBHOOK_SECRET_KEY: process.env.SPOTFLOW_WEBHOOK_SECRET_KEY || '',
         SPOTFLOW_GHS_ACCOUNTS_ENABLED: process.env.SPOTFLOW_GHS_ACCOUNTS_ENABLED === 'true',
         FINCRA_AUTO_CONVERT_GHS: process.env.FINCRA_AUTO_CONVERT_GHS !== 'false',
+        FINCRA_DIRECT_CHARGE: process.env.FINCRA_DIRECT_CHARGE !== 'false',
         // Daya lab — off unless explicitly enabled; sk_sandbox_ / sk_live_ picks the host
         DAYA_LAB_ENABLED: process.env.DAYA_LAB_ENABLED === 'true',
         DAYA_SECRET_KEY: process.env.DAYA_SECRET_KEY || '',

@@ -15,6 +15,9 @@ vi.mock("../src/services/fincra.service", async (importOriginal) => {
             getPayout: vi.fn(async () => null),
             createCheckout: vi.fn(),
             getCheckout: vi.fn(),
+            directCharge: vi.fn(),
+            authorizeCharge: vi.fn(),
+            getChargeByReference: vi.fn(),
             convert: vi.fn(),
             getConversion: vi.fn(),
         },
@@ -67,6 +70,8 @@ describe("GHS through Fincra", () => {
     beforeEach(async () => {
         vi.clearAllMocks();
         fincra.getPayout.mockResolvedValue(null);
+        // Direct charge isn't enabled unless a test says so: payments fall back to the checkout page
+        fincra.directCharge.mockRejectedValue(new Error("Direct charge is not enabled for this business"));
         fincra.quote.mockImplementation(async (q: any) => ({ reference: "q-1", sourceAmount: q.amount * 99, destinationAmount: q.amount, amountToCharge: q.amount * 99.5 }));
         await resetTestDatabase();
         await bootstrapLedger();
@@ -338,6 +343,47 @@ describe("GHS through Fincra", () => {
             expect(await walletBalance(user.id)).toBe(9_850);
         });
 
+        describe("charging the payer's phone directly", () => {
+            const payer = { method: "momo", momoNetwork: "MTN Momo", momoNumber: "0241234567", momoName: "Kwame Asante", email: "kwame@example.test" };
+            const link = async () => paymentLinkService.create((await createUser()).id, { currency: "GHS", amount: 100, usage: "reusable" });
+
+            it("prompts the payer's phone instead of sending them to a second form, and credits when Fincra confirms", async () => {
+                const l = await link();
+                fincra.directCharge.mockResolvedValue({ id: 991, status: "pending", auth_model: null, reference: "x" });
+                const payment: any = await paymentLinkService.pay(l.slug, payer);
+                expect(payment.checkoutUrl).toBeUndefined();
+                expect(payment.approval).toMatchObject({ otpRequired: false });
+                expect(payment.approval.message).toContain("Approve the payment on your phone");
+                expect(fincra.directCharge).toHaveBeenCalledWith(expect.objectContaining({ currency: "GHS", amount: 100, phone: "+233241234567", operator: "MTN", reference: payment.reference }));
+                expect(fincra.createCheckout).not.toHaveBeenCalled();
+
+                fincra.getChargeByReference.mockResolvedValue({ status: "success", amount: 100, fee: 1, currency: "GHS" });
+                await fincraWebhookService.handle({ event: "charge.successful", data: { status: "success", reference: payment.reference } });
+                expect(fincra.getChargeByReference).toHaveBeenCalledWith(payment.reference);
+                const status = await paymentLinkService.paymentStatus(l.slug, payment.reference);
+                expect(status.status).toBe("completed");
+            });
+
+            it("asks for the code when the network uses one, and passes it on", async () => {
+                const l = await link();
+                fincra.directCharge.mockResolvedValue({ id: 992, status: "pending", auth_model: "OTP" });
+                const payment: any = await paymentLinkService.pay(l.slug, payer);
+                expect(payment.approval).toMatchObject({ otpRequired: true });
+                fincra.getChargeByReference.mockResolvedValue({ status: "pending" });
+                await paymentLinkService.authorizePayment(l.slug, payment.reference, "123456");
+                expect(fincra.authorizeCharge).toHaveBeenCalledWith("992", "123456");
+                await expect(paymentLinkService.authorizePayment(l.slug, payment.reference, "12")).rejects.toMatchObject({ response_code: 400 });
+            });
+
+            it("falls back to the checkout page, phone prefilled, when Fincra won't charge directly", async () => {
+                const l = await link();
+                fincra.createCheckout.mockResolvedValue({ link: "https://checkout.fincra.com/pay/fb", reference: "fcr-fb" });
+                const payment: any = await paymentLinkService.pay(l.slug, payer);
+                expect(payment.checkoutUrl).toBe("https://checkout.fincra.com/pay/fb");
+                expect(fincra.createCheckout).toHaveBeenCalledWith(expect.objectContaining({ customer: expect.objectContaining({ phoneNumber: "+233241234567" }) }));
+            });
+        });
+
         it("holds a payer-entered amount to the per-payment range, and tells the pay page the range", async () => {
             const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
             const pricing = await platformSettingsService.getPricing();
@@ -358,7 +404,8 @@ describe("GHS through Fincra", () => {
                 currency: "GHS",
                 amount: 100,
                 reference: payment.reference,
-                customer: { name: "Kwame Asante", email: "kwame@example.test" },
+                // The payer's number prefills Fincra's page
+                customer: { name: "Kwame Asante", email: "kwame@example.test", phoneNumber: "+233241234567" },
                 redirectUrl: expect.stringContaining(`/pay/${link.slug}`),
             }));
 
