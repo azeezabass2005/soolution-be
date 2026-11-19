@@ -49,8 +49,11 @@ const TEXT_FALLBACK: Record<string, string> = {
     description: "Transaction",
 };
 
+/** A web address: the payer's browser has to go to the real one (a checkout page is on the provider's domain) */
+const isUrl = (value: string) => /^https?:\/\/\S+$/i.test(value.trim());
+
 const scrubString = (key: string, value: string, path: string, hits: string[]): string => {
-    if (ENUM_KEYS.has(key) || VERBATIM_KEYS.has(key) || !mentionsProvider(value)) return value;
+    if (ENUM_KEYS.has(key) || VERBATIM_KEYS.has(key) || isUrl(value) || !mentionsProvider(value)) return value;
     hits.push(path);
     return TEXT_FALLBACK[key] ?? value.replace(new RegExp(PROVIDER_NAME_PATTERN.source, "gi"), "partner");
 };
