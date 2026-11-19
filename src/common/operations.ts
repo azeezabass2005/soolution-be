@@ -172,3 +172,6 @@ export function manualWindow(manual: ManualConfig, at: Date = new Date()): Manua
     }
     return { open: false, opensAt: null, hours };
 }
+
+/** Where users are pointed when something is paused or on hold */
+export const SUPPORT_CONTACT = { whatsapp: "+234 816 003 0330", email: "support@solutionpay.co" };

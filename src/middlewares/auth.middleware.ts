@@ -3,6 +3,7 @@ import TokenBuilder from "../utils/token.utils";
 import { TokenType } from "../utils/interface";
 import UserService from "../services/user.service";
 import { cookieValues } from "../utils/auth-cookies";
+import { signInBlock } from "./operations.middleware";
 
 const userService = new UserService();
 
@@ -72,6 +73,13 @@ class AuthMiddleware {
             const validAfter = res.locals.user?.sessionsValidAfter;
             if (validAfter && iat * 1000 < new Date(validAfter).getTime() - 1000) {
                 res.status(401).json({ success: false, message: "Unauthorized: Session ended" });
+                return;
+            }
+
+            // Suspended since signing in, or sign-ins paused: the session stops working now
+            const blocked = await signInBlock(res.locals.user);
+            if (blocked) {
+                res.status(blocked.response_code).json({ success: false, message: blocked.message, details: (blocked as { details?: unknown }).details });
                 return;
             }
 

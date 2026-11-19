@@ -579,4 +579,79 @@ describe("GHS through Fincra", () => {
             expect(rates.find((r) => r.from === "GHS" && r.to === "NGN")).toBeUndefined();
         });
     });
+
+    describe("pausing and freezing", () => {
+        const ADMIN_ID = "00000000-0000-4000-8000-000000000001";
+        const setPause = async (pause: Record<string, unknown>) => {
+            const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
+            await platformSettingsService.updateSettings({ operations: { pause } }, ADMIN_ID);
+        };
+        /** Runs the money guard for a request and returns the error it passes on, if any */
+        const guard = async (method: string, path: string, user: Record<string, unknown>) => {
+            const { moneyGuard } = await import("../src/middlewares/operations.middleware");
+            let passed: any = "not called";
+            await moneyGuard({ method, path } as any, { locals: { user } } as any, (err?: unknown) => { passed = err; });
+            return passed;
+        };
+
+        it("knows which routes move money, and which way", async () => {
+            const { moneyRouteKind } = await import("../src/middlewares/operations.middleware");
+            expect(moneyRouteKind("POST", "/ogateway/manual")).toBe("out");
+            expect(moneyRouteKind("POST", "/wallet/withdraw")).toBe("out");
+            expect(moneyRouteKind("POST", "/ghs/top-up")).toBe("in");
+            expect(moneyRouteKind("POST", "/payment-links")).toBe("in");
+            expect(moneyRouteKind("GET", "/ogateway/manual")).toBeNull();
+            expect(moneyRouteKind("POST", "/wallet/exchange/quote")).toBeNull();
+        });
+
+        it("stops money moving while payments are paused, except for admins", async () => {
+            const { ROLE_MAP } = await import("../src/common/constant");
+            await setPause({ payments: true, message: "Back at 3pm." });
+            const blocked = await guard("POST", "/ogateway", { role: ROLE_MAP.USER, freeze: "none" });
+            expect(blocked).toMatchObject({ response_code: 503, details: { code: "PAYMENTS_PAUSED" } });
+            expect(blocked.message).toContain("Back at 3pm.");
+            expect(blocked.message).toContain("support@solutionpay.co");
+            expect(await guard("POST", "/ogateway", { role: ROLE_MAP.ADMIN })).toBeUndefined();
+            expect(await guard("GET", "/wallet", { role: ROLE_MAP.USER })).toBeUndefined();
+            await setPause({ payments: false });
+            expect(await guard("POST", "/ogateway", { role: ROLE_MAP.USER, freeze: "none" })).toBeUndefined();
+        });
+
+        it("applies a user's freeze: balance stops money leaving, account stops everything", async () => {
+            const { ROLE_MAP } = await import("../src/common/constant");
+            const balance = { role: ROLE_MAP.USER, freeze: "balance" };
+            expect(await guard("POST", "/wallet/withdraw", balance)).toMatchObject({ response_code: 403, details: { code: "BALANCE_FROZEN" } });
+            expect(await guard("POST", "/ghs/top-up", balance)).toBeUndefined();
+            const account = { role: ROLE_MAP.USER, freeze: "account" };
+            expect(await guard("POST", "/ghs/top-up", account)).toMatchObject({ response_code: 403, details: { code: "ACCOUNT_FROZEN" } });
+            expect(await guard("POST", "/ogateway/manual", account)).toMatchObject({ details: { code: "ACCOUNT_FROZEN" } });
+        });
+
+        it("refuses sign-in for suspended accounts, and for everyone but admins while sign-ins are paused", async () => {
+            const { signInBlock } = await import("../src/middlewares/operations.middleware");
+            const { ROLE_MAP } = await import("../src/common/constant");
+            expect(await signInBlock({ status: "suspended", role: ROLE_MAP.USER })).toMatchObject({ response_code: 401, details: { code: "ACCOUNT_SUSPENDED" } });
+            expect(await signInBlock({ status: "active", role: ROLE_MAP.USER })).toBeNull();
+            await setPause({ logins: true });
+            expect(await signInBlock({ status: "active", role: ROLE_MAP.USER })).toMatchObject({ response_code: 503, details: { code: "LOGINS_PAUSED" } });
+            expect(await signInBlock({ status: "active", role: ROLE_MAP.ADMIN })).toBeNull();
+        });
+
+        it("takes no payment-link payments while paused, or for a frozen account", async () => {
+            const { default: userRepository } = await import("../src/repositories/user.repository");
+            const owner = await createUser();
+            const link = await paymentLinkService.create(owner.id, { currency: "GHS", amount: 100, usage: "reusable" });
+            const payer = { method: "momo", momoNetwork: "MTN Momo", momoNumber: "0241234567", momoName: "Kwame Asante", email: "kwame@example.test" };
+
+            await setPause({ payments: true });
+            expect((await paymentLinkService.getPublic(link.slug))).toMatchObject({ available: false, unavailableReason: "paused" });
+            await expect(paymentLinkService.pay(link.slug, payer)).rejects.toMatchObject({ response_code: 503 });
+            await setPause({ payments: false });
+
+            await userRepository.update(owner.id, { freeze: "account" } as any);
+            expect((await paymentLinkService.getPublic(link.slug)).available).toBe(false);
+            await expect(paymentLinkService.pay(link.slug, payer)).rejects.toMatchObject({ response_code: 409 });
+            expect(fincra.createCheckout).not.toHaveBeenCalled();
+        });
+    });
 });

@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import authMiddleware from "../../middlewares/auth.middleware";
+import { moneyGuard } from "../../middlewares/operations.middleware";
 import exchangeRateController from "../../controllers/base/protected/exchange-rate-controller";
 import logsController from "../../controllers/base/protected/logs.controller";
 import userController from "../../controllers/base/protected/user.controller";
@@ -20,6 +21,7 @@ import adminPlatformSettingsController from "../../controllers/base/protected/ad
 import adminFincraController from "../../controllers/base/protected/admin/fincra.controller";
 import adminSpotflowController from "../../controllers/base/protected/admin/spotflow.controller";
 import adminDayaController from "../../controllers/base/protected/admin/daya.controller";
+import adminInsightsController from "../../controllers/base/protected/admin/insights.controller";
 import kycController from "../../controllers/base/protected/kyc.controller";
 import beneficiaryController from "../../controllers/base/protected/beneficiary.controller";
 import paymentLinkController from "../../controllers/base/protected/payment-link.controller";
@@ -36,6 +38,9 @@ protectedRouter.use(path, async (req: Request, res: Response, next: NextFunction
         next(error);
     }
 });
+
+// Pause switch and per-user freezes, in front of every route that moves money
+protectedRouter.use(path, moneyGuard);
 
 protectedRouter.use(`${path}/exchange-rates`, exchangeRateController);
 protectedRouter.use(`${path}/logs`, logsController);
@@ -63,6 +68,7 @@ protectedRouter.use(`${path}/admin/platform-settings`, adminPlatformSettingsCont
 protectedRouter.use(`${path}/admin/fincra`, adminFincraController);
 protectedRouter.use(`${path}/admin/spotflow`, adminSpotflowController);
 protectedRouter.use(`${path}/admin/daya`, adminDayaController);
+protectedRouter.use(`${path}/admin/insights`, adminInsightsController);
 protectedRouter.use(`${path}/kyc`, kycController);
 
 export default protectedRouter;

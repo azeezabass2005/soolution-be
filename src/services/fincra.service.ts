@@ -156,6 +156,21 @@ class FincraService {
         return business;
     }
 
+    /**
+     * The business's balance in each currency (List wallets).
+     * https://docs.fincra.com/reference/list-wallets
+     */
+    async getBalances(): Promise<Array<{ currency: string; available: number; ledger: number }>> {
+        const business = await this.getBusinessId();
+        const res = await this.request("get", "/wallets", { params: { businessID: business } });
+        const list: any[] = Array.isArray(res?.data) ? res.data : Array.isArray(res?.data?.results) ? res.data.results : Array.isArray(res) ? res : [];
+        return list.map((w) => ({
+            currency: String(w.currency || "").toUpperCase(),
+            available: Number(w.availableBalance ?? w.available_balance ?? w.balance) || 0,
+            ledger: Number(w.ledgerBalance ?? w.ledger_balance ?? w.availableBalance ?? w.balance) || 0,
+        })).filter((w) => w.currency);
+    }
+
     async getBusinessId(): Promise<string> {
         if (this.businessId) return this.businessId;
         const business = await this.getBusiness();

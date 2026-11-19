@@ -31,6 +31,8 @@ import config from "../config/env.config";
 import ghsRateService from "./ghs-rate.service";
 import { approvedBusinessName } from "./business-name.service";
 import { limitProblem } from "../common/pricing";
+import platformSettingsService from "./platform-settings.service";
+import { pausedError } from "../middlewares/operations.middleware";
 
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const IN_FLIGHT = [TRANSACTION_STATUS.PENDING, TRANSACTION_STATUS.PROCESSING] as TransactionStatus[];
@@ -220,7 +222,8 @@ class PaymentLinkService {
     }
 
     private canTakePayments(link: IPaymentLink, owner: IUser) {
-        return link.active && owner.status === "active" && (owner.tier ?? USER_TIER.UNVERIFIED) >= USER_TIER.INDIVIDUAL;
+        // A frozen account takes nothing in (its links are off while it's on hold)
+        return link.active && owner.status === "active" && (owner.freeze ?? "none") !== "account" && (owner.tier ?? USER_TIER.UNVERIFIED) >= USER_TIER.INDIVIDUAL;
     }
 
     /** What the payer sees. Only the owner's name; nothing else about their account. */
@@ -229,7 +232,8 @@ class PaymentLinkService {
         const used = await this.isUsedUp(link);
         const methods = await this.payMethods(link.currency);
         // No way to pay in this currency right now (e.g. YellowCard has collections off)
-        const payable = this.canTakePayments(link, owner) && methods.length > 0;
+        const paused = (await platformSettingsService.getOperations()).pause.payments;
+        const payable = !paused && this.canTakePayments(link, owner) && methods.length > 0;
         return {
             slug: link.slug,
             payee: (owner.tier >= USER_TIER.BUSINESS ? await approvedBusinessName(owner.id) : undefined) || ownerName(owner),
@@ -244,7 +248,7 @@ class PaymentLinkService {
             redirects: !!link.redirectUrl,
             available: !used && payable,
             /** Why it can't be paid, so the page can say so */
-            unavailableReason: used ? "used" : !link.active ? "off" : payable ? null : "unavailable",
+            unavailableReason: used ? "used" : !link.active ? "off" : paused ? "paused" : payable ? null : "unavailable",
             /** The per-payment minimum and maximum (0 = none), so a payer typing the amount knows the range */
             limits: link.currency === "GHS" ? await ghsRateService.limits("receive") : { min: 0, max: 0 },
         };
@@ -272,6 +276,8 @@ class PaymentLinkService {
     /** The payer submits their details; starts the collection under the owner's account */
     async pay(slug: string, body: unknown) {
         const { link, owner } = await this.findPayable(slug);
+        const { pause } = await platformSettingsService.getOperations();
+        if (pause.payments) throw pausedError(pause.message);
         if (!this.canTakePayments(link, owner)) {
             throw errorResponseMessage.createError(409, link.active ? UNAVAILABLE : "This payment link has been turned off.", ErrorSeverity.LOW, { code: "PAYMENT_LINK_UNAVAILABLE" });
         }

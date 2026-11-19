@@ -20,6 +20,7 @@ import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 import { authCookieBase, clearAuthCookies, clearLegacyAuthCookies, cookieValues } from "../../../utils/auth-cookies";
 import loginOtpService, { LOGIN_OTP_RESEND_MS, LOGIN_OTP_TTL_MS, LoginOtpError, maskEmail } from "../../../services/login-otp.service";
+import { signInBlock } from "../../../middlewares/operations.middleware";
 
 /** Changes whenever the password does, so a reset link only works once */
 const passwordFingerprint = (passwordHash?: string) =>
@@ -298,9 +299,8 @@ class AuthController extends BaseController {
                 return next(errorResponseMessage.unauthorized("Invalid credentials"));
             }
 
-            if (user.status !== 'active') {
-                return next(errorResponseMessage.unauthorized(`Login failed because your account has been ${user.status}. Reach out to support@solutionpay.co for further info`));
-            }
+            const blocked = await signInBlock(user);
+            if (blocked) return next(blocked);
 
             const isValidPassword = await HashService.verifyPassword(
                 password,
@@ -391,9 +391,8 @@ class AuthController extends BaseController {
             if (!user) {
                 return next(errorResponseMessage.unauthorized("This sign-in has expired. Please sign in again."));
             }
-            if (user.status !== 'active') {
-                return next(errorResponseMessage.unauthorized(`Login failed because your account has been ${user.status}. Reach out to support@solutionpay.co for further info`));
-            }
+            const blockedAtCode = await signInBlock(user);
+            if (blockedAtCode) return next(blockedAtCode);
 
             if(!user?.isCompleted && user?.role !== ROLE_MAP.ADMIN) {
                 return this.sendSuccess(res, {
@@ -733,6 +732,8 @@ class AuthController extends BaseController {
             if (user.sessionsValidAfter && (decoded as any).iat * 1000 < new Date(user.sessionsValidAfter).getTime() - 1000) {
                 return next(sessionEnded("Your session has ended. Please sign in again."));
             }
+            const blockedAtRefresh = await signInBlock(user);
+            if (blockedAtRefresh) return next(blockedAtRefresh);
 
             // Hard cap: after MAX_SESSION_MS the password is needed again, however active the user is.
             // Tokens from before this existed start their 30 days now.

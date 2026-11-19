@@ -124,9 +124,18 @@ class TransactionLimitService {
     }
 
     private async getTier(userId: string): Promise<UserTier> {
+        return (await this.getTierAndOverride(userId)).tier;
+    }
+
+    /** The user's tier, and the personal daily limit an admin set for them (null = the tier's) */
+    private async getTierAndOverride(userId: string): Promise<{ tier: UserTier; overrideNgn: number | null }> {
         const user = await userRepository.findById(userId);
         if (!user) throw errorResponseMessage.resourceNotFound("User");
-        return isUserTier(user.tier) ? user.tier : USER_TIER.UNVERIFIED;
+        const override = user.dailyLimitOverrideNgn;
+        return {
+            tier: isUserTier(user.tier) ? user.tier : USER_TIER.UNVERIFIED,
+            overrideNgn: typeof override === "number" && override >= 0 ? override : null,
+        };
     }
 
     /** NGN already used today */
@@ -145,12 +154,14 @@ class TransactionLimitService {
     }
 
     async getStatus(userId: string): Promise<TierLimitStatus> {
-        const tier = await this.getTier(userId);
-        const [limitNgn, usedNgn, allLimits] = await Promise.all([
+        const { tier, overrideNgn } = await this.getTierAndOverride(userId);
+        const [tierLimitNgn, usedNgn, allLimits] = await Promise.all([
             platformSettingsService.getTierDailyLimitNgn(tier),
             this.getUsedTodayNgn(userId),
             platformSettingsService.getTierDailyLimits(),
         ]);
+        // An admin can raise (or lower) one user's limit without changing their tier
+        const limitNgn = overrideNgn ?? tierLimitNgn;
         const next = (tier + 1) as UserTier;
         return {
             tier,

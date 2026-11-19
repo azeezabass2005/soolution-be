@@ -15,6 +15,7 @@ import { passwordProblem } from "../../../common/password-policy";
 import { clearAuthCookies } from "../../../utils/auth-cookies";
 import { ErrorSeverity } from "../../../common/messages/error-response-message";
 import logger from "../../../utils/logger.utils";
+import adminUsersService from "../../../services/admin-users.service";
 
 /**
  * Controller handling authentication-related operations
@@ -54,6 +55,10 @@ class UserController extends BaseController {
         this.router.get("/", RoleMiddleware.isAdmin, this.getAllUsers.bind(this));
         // Update user route
         this.router.patch("/:id", RoleMiddleware.isAdmin, userUpdateValidate,  this.updateUser.bind(this));
+        // One user's money, wallets, activity and possible repeat sign-ups
+        this.router.get("/:id/overview", RoleMiddleware.isAdmin, this.getOverview.bind(this));
+        // Suspend, freeze, or set a personal daily limit
+        this.router.patch("/:id/controls", RoleMiddleware.isAdmin, this.updateControls.bind(this));
     }
 
     private async changePassword(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -142,6 +147,9 @@ class UserController extends BaseController {
     private async getAllUsers(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const users = await this.userService.listAll();
+            // Money totals, latest KYC and possible repeat sign-ups, for the admin's columns
+            const [stats, kyc] = await Promise.all([adminUsersService.moneyStats(), adminUsersService.kycStatuses()]);
+            const duplicates = adminUsersService.duplicateIndex(users);
             const cleanUsers: any = []
             users.forEach(user => {
                 if(user.email === "admin@solutionpay.co") return
@@ -169,7 +177,13 @@ class UserController extends BaseController {
                     hearAboutUs: user.hearAboutUs,
                     hearAboutUsOther: user.hearAboutUsOther,
                     createdAt: user.createdAt,
-                    role: this.getRoleString(user.role)
+                    role: this.getRoleString(user.role),
+                    freeze: user.freeze ?? "none",
+                    identityStatus: user.identity?.status ?? "unverified",
+                    hasProofOfAddress: !!user.identity?.proofOfAddress,
+                    kyc: kyc.get(user.id) ?? null,
+                    stats: stats.get(user.id) ?? null,
+                    duplicateCount: duplicates.get(user.id)?.length ?? 0,
                 });
             });
 
@@ -179,6 +193,26 @@ class UserController extends BaseController {
             })
         } catch (error) {
             return next(error)
+        }
+    }
+
+    private async getOverview(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            return this.sendSuccess(res, await adminUsersService.overview(String(req.params.id)));
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async updateControls(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            if (String(req.params.id) === String(res.locals.user?.id) && req.body?.status === "suspended") {
+                return next(errorResponseMessage.createError(400, "You can't suspend your own account.", ErrorSeverity.LOW));
+            }
+            await adminUsersService.updateControls(String(req.params.id), req.body, res.locals.user?.id);
+            return this.sendSuccess(res, await adminUsersService.overview(String(req.params.id)));
+        } catch (error) {
+            return next(error);
         }
     }
 
