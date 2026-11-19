@@ -83,7 +83,8 @@ class AuthController extends BaseController {
         this.router.post("/login/resend", authLimiter(15), this.resendLoginCode.bind(this));
 
         // Verify email route
-        this.router.post("/verify-email", this.verifyEmail.bind(this));
+        this.router.post("/verify-email", authLimiter(30), this.verifyEmail.bind(this));
+        this.router.post("/verify-email/resend", authLimiter(10), this.resendVerification.bind(this));
 
         // Request password reset route
         // Each request sends an email; keep it from being used to flood an inbox
@@ -165,36 +166,22 @@ class AuthController extends BaseController {
                 });
             }
 
-            // Send welcome email to newly registered user
+            // The welcome email follows the verification link (see verifyEmail)
+
+            // Step 2 opens from the link in this email, not from here
             try {
-                await this.notificationService.emailService.sendWelcomeEmail(
-                    user.email,
-                    {
-                        name: `${user.firstName} ${user.lastName}`,
-                        appName: 'Solution Pay',
-                        actionUrl: `${config.FRONTEND_URL}/dashboard/user`,
-                        buttonText: 'Get Started'
-                    }
-                );
-                this.logger.info('Welcome email sent successfully', {
-                    userId: user.id,
-                    email: user.email,
-                    name: `${user.firstName} ${user.lastName}`
-                });
+                await this.sendVerificationLink(user);
             } catch (error) {
-                this.logger.error('Failed to send welcome email during registration', {
+                this.logger.error('Failed to send the verification email at sign-up', {
                     userId: user.id,
-                    email: user.email,
                     error: error instanceof Error ? error.message : String(error),
-                    stack: error instanceof Error ? error.stack : undefined
                 });
-                // Don't fail registration if email fails - user account is already created
             }
 
             this.sendSuccess(res, {
-                message: "Registration successful. Please verify your email.",
-                userId: user.id,
-                registrationToken: this.createRegistrationToken(user)
+                message: "Check your email for a link to verify your address.",
+                verificationRequired: true,
+                email: maskEmail(user.email),
             }, 201);
         } catch (error) {
             return next(error);
@@ -245,6 +232,10 @@ class AuthController extends BaseController {
                     "Your registration is already complete. Please sign in.",
                     ErrorSeverity.LOW
                 ));
+            }
+
+            if (!userExists.isVerified) {
+                return next(errorResponseMessage.createError(403, "Verify your email first. Open the link we sent you.", ErrorSeverity.LOW, { code: "EMAIL_NOT_VERIFIED" }));
             }
 
             // Only the validated sign-up fields; never role, tier or verification flags from the request
@@ -318,6 +309,24 @@ class AuthController extends BaseController {
 
             if (!isValidPassword) {
                 return next(errorResponseMessage.unauthorized("Invalid credentials"));
+            }
+
+            // The password is right, but the address was never verified: send a fresh link instead of a code
+            if (!user.isVerified && user.role !== ROLE_MAP.ADMIN) {
+                try {
+                    await this.sendVerificationLink(user);
+                } catch (error) {
+                    this.logger.error('Failed to resend the verification email at sign-in', {
+                        userId: user.id,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                }
+                return next(errorResponseMessage.createError(
+                    403,
+                    `Verify your email to continue. We've sent a new link to ${maskEmail(user.email)}.`,
+                    ErrorSeverity.LOW,
+                    { code: "EMAIL_NOT_VERIFIED", email: maskEmail(user.email) },
+                ));
             }
 
             // The password is right; the session waits for the code sent to their email
@@ -466,37 +475,80 @@ class AuthController extends BaseController {
      */
     private async verifyEmail (req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const { token } = req.body;
-
-            if (!token) {
+            const { token } = req.body || {};
+            if (!token || typeof token !== 'string') {
                 return next(errorResponseMessage.payloadIncorrect("Verification token is required"));
             }
 
-            // Verify token
-            const decoded = await this.tokenBuilder
-                .setToken(token)
-                .build()
-                .verifyToken();
-
-            if (decoded.type !== TokenType.VERIFY) {
-                return next(errorResponseMessage.unauthorized("Invalid verification token"));
+            let userId: string | undefined;
+            try {
+                const decoded = await this.tokenBuilder.setToken(token).build().verifyToken();
+                if (decoded.type === TokenType.VERIFY) userId = decoded.data?.userId;
+            } catch {
+                userId = undefined;
+            }
+            if (!userId) {
+                return next(errorResponseMessage.createError(400, "This link has expired or isn't valid. Sign in and we'll send you a new one.", ErrorSeverity.LOW, { code: "VERIFY_LINK_INVALID" }));
             }
 
-            // Update user verification status
-            const user = await this.userService.update(decoded.data.userId, {
-                isVerified: true
-            });
+            const existing = await this.userService.findById(userId);
+            if (!existing) return next(errorResponseMessage.resourceNotFound("User"));
+            const firstTime = !existing.isVerified;
+            const user = firstTime ? await this.userService.update(userId, { isVerified: true }) : existing;
+            if (!user) return next(errorResponseMessage.resourceNotFound("User"));
 
-            if (!user) {
-                return next(errorResponseMessage.resourceNotFound("User"));
+            if (firstTime) {
+                this.notificationService.emailService.sendWelcomeEmail(user.email, {
+                    name: `${user.firstName} ${user.lastName}`,
+                    appName: 'Solution Pay',
+                    actionUrl: `${config.FRONTEND_URL}/dashboard/user`,
+                    buttonText: 'Get Started'
+                }).catch((error: any) => this.logger.error('Failed to send welcome email', {
+                    userId: user.id,
+                    error: error instanceof Error ? error.message : String(error),
+                }));
             }
 
+            // Sign-up continues in the browser that opened the link
             this.sendSuccess(res, {
-                message: "Email verified successfully"
+                message: "Email verified.",
+                email: maskEmail(user.email),
+                ...(user.isCompleted ? { completed: true } : { userId: user.id, registrationToken: this.createRegistrationToken(user) }),
             });
         } catch (error) {
             return next(error);
         }
+    }
+
+    /** A new verification link; says the same whether or not the address has an account */
+    private async resendVerification (req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const email = String(req.body?.email || '').trim();
+            const user = email ? await this.userService.findByEmail(email) : null;
+            if (user && !user.isVerified) {
+                try {
+                    await this.sendVerificationLink(user);
+                } catch (error) {
+                    this.logger.error('Failed to resend the verification email', {
+                        userId: user.id,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                }
+            }
+            this.sendSuccess(res, { message: "If that address needs verifying, a new link is on its way." });
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    /** Emails the link that verifies the address and opens the next sign-up step (valid 24 hours) */
+    private async sendVerificationLink(user: IUser) {
+        const token = this.tokenBuilder.build().createToken(user, { type: TokenType.VERIFY, expiresIn: '24h' });
+        await this.notificationService.emailService.sendVerificationEmail(user.email, {
+            name: user.firstName || 'there',
+            verificationUrl: `${config.FRONTEND_URL}/auth/verify-email?token=${encodeURIComponent(token)}`,
+            expiryTime: '24 hours',
+        });
     }
 
     /**

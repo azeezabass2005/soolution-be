@@ -245,6 +245,8 @@ class PaymentLinkService {
             available: !used && payable,
             /** Why it can't be paid, so the page can say so */
             unavailableReason: used ? "used" : !link.active ? "off" : payable ? null : "unavailable",
+            /** The per-payment minimum and maximum (0 = none), so a payer typing the amount knows the range */
+            limits: link.currency === "GHS" ? await ghsRateService.limits("receive") : { min: 0, max: 0 },
         };
     }
 
@@ -287,6 +289,11 @@ class PaymentLinkService {
 
         const amount = link.amount ?? input.amount;
         if (!amount) throw badRequest("Enter the amount you're paying", { issues: [{ path: "amount", message: "Enter an amount" }] });
+        // The per-payment range applies to whoever typed the amount; a payer can be told it
+        if (link.currency === "GHS" && !link.amount) {
+            const problem = limitProblem(await ghsRateService.limits("receive"), amount, "GHS");
+            if (problem) throw badRequest(problem.replace("you can do in one transaction", "this link accepts in one payment"), { issues: [{ path: "amount", message: problem }] });
+        }
         if (input.method === "bank" && PAYMENT_LINK_MOMO_ONLY.includes(link.currency)) {
             throw badRequest(`${link.currency} payments are by mobile money only`, { issues: [{ path: "method", message: "Pay by mobile money" }] });
         }

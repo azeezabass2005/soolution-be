@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { boolean, index, integer, pgTable, smallint, text, uniqueIndex, uuid, jsonb } from "drizzle-orm/pg-core";
-import { id, timestamps, timestamptz } from "../columns";
+import { decimal, id, timestamps, timestamptz } from "../columns";
 import type { UserTier } from "../../common/tier.constants";
 import type { IdentityAddressParts, IdentityProofOfAddress, IdentityStatus } from "../../common/identity.constants";
 import { ROLE_MAP } from "../../common/constant";
@@ -12,6 +12,14 @@ export const USER_HEAR_ABOUT_US = [
     "instagram", "x-twitter", "facebook", "tiktok", "google", "others",
 ] as const;
 export const USER_ACCOUNT_STATUSES = ["active", "inactive", "suspended", "pending", "deactivated"] as const;
+
+/**
+ * Money restrictions an admin can put on a user:
+ *   balance: nothing can leave (no sends, withdrawals or exchanges)
+ *   account: nothing moves; money that still arrives is credited but stays locked
+ */
+export const USER_FREEZE_STATES = ["none", "balance", "account"] as const;
+export type UserFreeze = (typeof USER_FREEZE_STATES)[number];
 
 /**
  * Users. The identity (BVN/NIN) record that used to be a nested Mongo object
@@ -55,6 +63,10 @@ export const users = pgTable(
         isCompleted: boolean("is_completed").notNull().default(false),
         role: integer("role").notNull().default(ROLE_MAP.USER),
         status: text("status").$type<(typeof USER_ACCOUNT_STATUSES)[number]>().notNull().default("active"),
+        freeze: text("freeze").$type<UserFreeze>().notNull().default("none"),
+        freezeReason: text("freeze_reason"),
+        /** A daily limit (NGN) for this user that replaces their tier's; null = the tier's */
+        dailyLimitOverrideNgn: decimal("daily_limit_override_ngn"),
         sessionsValidAfter: timestamptz("sessions_valid_after"),
         lastLogin: text("last_login"),
         phoneNumber: text("phone_number"),

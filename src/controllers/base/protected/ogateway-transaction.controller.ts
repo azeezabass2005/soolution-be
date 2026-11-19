@@ -15,6 +15,9 @@ import { DETAIL_TYPE, TRANSACTION_STATUS } from "../../../common/constant";
 import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 
 import transactionLimitService from "../../../services/transaction-limit.service";
+import platformSettingsService from "../../../services/platform-settings.service";
+import { manualWindow } from "../../../common/operations";
+import { MANUAL_GHS_SEND } from "../../../common/wallet.constants";
 /**
  * GHS routes: send to Ghana mobile money or banks, and receive GHS through a
  * payment link, both through Fincra. Mounted at /protected/ogateway (the path
@@ -38,11 +41,21 @@ class OGatewayTransactionController extends BaseController {
             this.createPayout.bind(this),
         );
 
+        // Whether manual GHS sends are open right now, their hours and the manual rate
+        this.router.get("/manual", this.manualInfo.bind(this));
+
         // Send NGN → GHS manually (larger amounts, no fee, paid by ops)
         this.router.post(
             "/manual",
             TransactionRateLimitMiddleware.checkTransactionRateLimit,
             this.createManualPayout.bind(this),
+        );
+
+        // Top up the NGN wallet by paying GHS yourself (Fincra checkout); converts to naira on arrival
+        this.router.post(
+            "/top-up",
+            TransactionRateLimitMiddleware.checkTransactionRateLimit,
+            this.createTopUp.bind(this),
         );
 
         // Receive GHS → NGN (instant collection).
@@ -90,6 +103,46 @@ class OGatewayTransactionController extends BaseController {
                 },
                 201,
             );
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async createTopUp(req: Request, res: Response, next: NextFunction) {
+        try {
+            const user = res.locals.user;
+            const amount = Number(req.body?.amount);
+            if (!(amount > 0)) return next(errorResponseMessage.payloadIncorrect("Enter how many cedis you're paying in"));
+            const transaction = await transactionLimitService.withUserLock(user.id, () => this.transactionService.createGhsCollectionTransaction({
+                amount,
+                fromCurrency: "GHS",
+                toCurrency: "NGN",
+                idempotencyKey: typeof req.body?.idempotencyKey === "string" ? req.body.idempotencyKey : undefined,
+                payer: { name: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim(), email: user.email },
+                redirectUrl: `${config.FRONTEND_URL}/dashboard/user/wallet?topup=done`,
+                topUp: true,
+            }, user.id));
+            return this.sendSuccess(res, { transaction }, 201);
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async manualInfo(_req: Request, res: Response, next: NextFunction) {
+        try {
+            const ops = await platformSettingsService.getOperations();
+            const window = manualWindow(ops.manual);
+            const rate = ops.manual.rates.GHS;
+            return this.sendSuccess(res, {
+                currency: "GHS",
+                /** Naira per cedi for manual sends; null when the admin hasn't set one */
+                rate: rate > 0 ? rate : null,
+                available: window.open && rate > 0,
+                open: window.open,
+                opensAt: window.opensAt,
+                hours: window.hours,
+                minNgn: MANUAL_GHS_SEND.MIN_NGN,
+            });
         } catch (error) {
             return next(error);
         }

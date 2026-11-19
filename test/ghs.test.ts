@@ -244,8 +244,15 @@ describe("GHS through Fincra", () => {
             destination: { accountType: "bank", accountName: "Kofi Mensah", accountNumber: "1234567890", bank: "GCB Bank" },
             pin: TEST_PIN,
         }, userId);
+        const ADMIN = "00000000-0000-4000-8000-000000000001";
+        const setManual = async (manual: Record<string, unknown>) => {
+            const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
+            await platformSettingsService.updateSettings({ operations: { manual } }, ADMIN);
+        };
+        // Open around the clock at ₦100 per cedi unless a test says otherwise
+        beforeEach(() => setManual({ rates: { GHS: 100 }, days: [0, 1, 2, 3, 4, 5, 6], open: "00:00", close: "23:59", closedDates: [] }));
 
-        it("holds the naira at the user's rate with no fee, and returns it if ops rejects", async () => {
+        it("holds the naira at the admin's manual rate with no fee, and returns it if ops rejects", async () => {
             const { default: walletSendService } = await import("../src/services/wallet-send.service");
             const user = await createUser();
             await fundWallet(user.id, 600_000);
@@ -276,6 +283,26 @@ describe("GHS through Fincra", () => {
             expect(await walletBalance(user.id)).toBe(600_000);
         });
 
+        it("prices from the admin's manual rate, not Fincra's", async () => {
+            await setManual({ rates: { GHS: 110 } });                 // Fincra says ₦100
+            const user = await createUser();
+            await fundWallet(user.id, 600_000);
+            const transaction: any = await manual(user.id, 5_000);
+            expect(transaction.details).toMatchObject({ fundingAmount: 550_000, feeAmount: 0 });
+            expect(Number(transaction.lockedRate)).toBe(110);
+            expect(await walletBalance(user.id)).toBe(50_000);
+        });
+
+        it("refuses outside the manual hours, and when no manual rate is set", async () => {
+            const user = await createUser();
+            await fundWallet(user.id, 600_000);
+            await setManual({ days: [] });
+            await expect(manual(user.id, 5_000)).rejects.toMatchObject({ response_code: 400, details: { code: "MANUAL_CLOSED" } });
+            await setManual({ days: [0, 1, 2, 3, 4, 5, 6], rates: {} });
+            await expect(manual(user.id, 5_000)).rejects.toMatchObject({ response_code: 400, details: { code: "MANUAL_UNAVAILABLE" } });
+            expect(await walletBalance(user.id)).toBe(600_000);
+        });
+
         it("refuses when the wallet can't cover it", async () => {
             const user = await createUser();
             await fundWallet(user.id, 400_000);
@@ -294,6 +321,35 @@ describe("GHS through Fincra", () => {
             });
             return { owner, link, payment };
         };
+
+        it("tops up the user's own wallet: a checkout in their name, priced like a receive, marked as a top-up", async () => {
+            const user = await createUser();
+            fincra.createCheckout.mockResolvedValue({ link: "https://checkout.fincra.com/pay/top", reference: "fcr-top" });
+            const transaction: any = await transactionService.createGhsCollectionTransaction({
+                amount: 100, fromCurrency: "GHS", toCurrency: "NGN", topUp: true,
+                payer: { name: "Ada Obi", email: user.email },
+            }, user.id);
+            expect(transaction).toMatchObject({ purpose: "top_up", checkoutUrl: "https://checkout.fincra.com/pay/top", amount: 100 });
+            expect(fincra.createCheckout).toHaveBeenCalledWith(expect.objectContaining({ amount: 100, customer: { name: "Ada Obi", email: user.email } }));
+
+            fincra.getCheckout.mockResolvedValue({ status: "success", amount: 100, currency: "GHS" });
+            await fincraWebhookService.handle({ event: "charge.successful", data: { status: "success", metadata: { reference: transaction.reference } } });
+            // Same as a payment link: 100 GHS × ₦100 less 1.5%
+            expect(await walletBalance(user.id)).toBe(9_850);
+        });
+
+        it("holds a payer-entered amount to the per-payment range, and tells the pay page the range", async () => {
+            const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
+            const pricing = await platformSettingsService.getPricing();
+            await platformSettingsService.updateSettings({ pricing: { receive: { "GHS-NGN": { ...pricing.receive["GHS-NGN"], limits: { min: 50, max: 1_000 } } } } }, "00000000-0000-4000-8000-000000000001");
+            const owner = await createUser();
+            const link = await paymentLinkService.create(owner.id, { currency: "GHS", usage: "reusable" });
+            expect((await paymentLinkService.getPublic(link.slug)).limits).toEqual({ min: 50, max: 1_000 });
+            const payer = { method: "momo", momoNetwork: "MTN Momo", momoNumber: "0241234567", momoName: "Kwame Asante", email: "kwame@example.test" };
+            await expect(paymentLinkService.pay(link.slug, { ...payer, amount: 2_000 } as any)).rejects.toMatchObject({ message: "The most this link accepts in one payment is GHS 1,000." });
+            await expect(paymentLinkService.pay(link.slug, { ...payer, amount: 10 } as any)).rejects.toMatchObject({ message: "The smallest amount per transaction is GHS 50." });
+            expect(fincra.createCheckout).not.toHaveBeenCalled();
+        });
 
         it("hands the payer Fincra's checkout and credits the owner once it's paid", async () => {
             const { owner, link, payment } = await pay();

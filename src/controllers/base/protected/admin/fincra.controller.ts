@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import fincraService, { FINCRA_CHECKOUT_CURRENCIES, FINCRA_CHECKOUT_METHODS, FINCRA_VA_CHANNELS, FincraCheckoutCurrency, FincraError } from '../../../../services/fincra.service';
 import labPoller from '../../../../services/lab-poller.service';
 import errorResponseMessage, { ErrorSeverity } from '../../../../common/messages/error-response-message';
+import { redactForLog } from "../../../../utils/redact.utils";
 
 const invalid = (message: string) => errorResponseMessage.createError(400, message, ErrorSeverity.LOW);
 const NAME = /^[A-Za-z][A-Za-z'\- ]{0,49}$/;
@@ -26,7 +27,7 @@ class AdminFincraController extends BaseController {
     protected initializeMiddleware(): void {
         this.router.use((req: Request, _res: Response, next: NextFunction) => {
             const body = req.body && typeof req.body === 'object' && 'bvn' in req.body ? { ...req.body, bvn: '[masked]' } : req.body;
-            this.logger.http(`${req.method} ${req.path}`, { body, query: req.query, params: req.params, ip: req.ip });
+            this.logger.http(`${req.method} ${req.path}`, { body: redactForLog(body), query: redactForLog(req.query), params: req.params, ip: req.ip });
             next();
         });
     }

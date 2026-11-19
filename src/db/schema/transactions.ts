@@ -62,6 +62,8 @@ export const transactions = pgTable(
         payerName: text("payer_name"),
         payerEmail: text("payer_email"),
         payerPhone: text("payer_phone"),
+        /** Why the money moved, where the type alone doesn't say: "top_up" = the user paid GHS in themselves */
+        purpose: text("purpose").$type<"top_up">(),
         ...timestamps(),
     },
     (t) => [

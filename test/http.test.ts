@@ -4,6 +4,8 @@ import type { Server } from "http";
 
 /** The last sign-in code emailed, by address */
 const sentCodes = vi.hoisted(() => new Map<string, string>());
+/** The last verification link emailed, by address */
+const sentLinks = vi.hoisted(() => new Map<string, string>());
 
 vi.mock("../src/utils/notification.utils", () => ({
     default: class {
@@ -12,6 +14,7 @@ vi.mock("../src/utils/notification.utils", () => ({
             sendWelcomeEmail: vi.fn(async () => undefined),
             sendPasswordResetEmail: vi.fn(async () => undefined),
             sendLoginCodeEmail: vi.fn(async (to: string, data: { code: string }) => { sentCodes.set(to, data.code); }),
+            sendVerificationEmail: vi.fn(async (to: string, data: { verificationUrl: string }) => { sentLinks.set(to, data.verificationUrl); }),
             verifyConnection: vi.fn(async () => true),
         };
         sendTransactionNotification = vi.fn();
@@ -73,8 +76,26 @@ describe("HTTP API", () => {
             lastName: "Hopper",
         });
         expect(registered.status).toBe(201);
-        userId = registered.body.data.userId;
+        // Sign-up stops at "check your email": no way into step 2 yet
+        expect(registered.body.data).toMatchObject({ verificationRequired: true, email: "gr•••@example.test" });
+        expect(registered.body.data.registrationToken).toBeUndefined();
+
+        // Signing in before verifying sends a fresh link instead of a code
+        const early = await call("POST", "/public/auth/login", { email: "grace@example.test", password: "correct-horse-battery" });
+        expect(early.status).toBe(403);
+        expect(early.body.details?.code ?? early.body.data?.code ?? JSON.stringify(early.body)).toContain("EMAIL_NOT_VERIFIED");
+        expect(sentCodes.has("grace@example.test")).toBe(false);
+
+        // The emailed link verifies the address and opens step 2
+        const link = new URL(sentLinks.get("grace@example.test")!);
+        expect(link.pathname).toBe("/auth/verify-email");
+        const bad = await call("POST", "/public/auth/verify-email", { token: "not-a-token" });
+        expect(bad.status).toBe(400);
+        const emailVerified = await call("POST", "/public/auth/verify-email", { token: link.searchParams.get("token") });
+        expect(emailVerified.status).toBe(200);
+        userId = emailVerified.body.data.userId;
         expect(userId).toMatch(/^[0-9a-f-]{36}$/);
+        registered.body.data.registrationToken = emailVerified.body.data.registrationToken;
 
         // Weak passwords, or ones built from the person's name, are refused
         for (const [password, message] of [

@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import logger from "../../utils/logger.utils";
 import UserService from "../../services/user.service";
+import { redactForLog } from "../../utils/redact.utils";
 
 
 interface ControllerOptions {
@@ -22,9 +23,10 @@ abstract class BaseController {
 
     protected initializeMiddleware(): void {
         this.router.use((req: Request, _res: Response, next: NextFunction) => {
+            // Never log passwords, PINs, codes, tokens or identity numbers
             this.logger.http(`${req.method} ${req.path}`, {
-                body: req.body,
-                query: req.query,
+                body: redactForLog(req.body),
+                query: redactForLog(req.query),
                 params: req.params,
                 ip: req.ip
             });

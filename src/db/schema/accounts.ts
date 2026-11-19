@@ -6,6 +6,7 @@ import type { UserTier } from "../../common/tier.constants";
 import type { PricingConfig } from "../../common/pricing";
 import type { KycStatus, KycStep, KycType } from "../../common/kyc.constants";
 import type { BeneficiaryKind, CurrencyCode, VerificationKind, VerificationStatus } from "../../types/enums";
+import type { OperationsConfig } from "../../common/operations";
 
 /** Admin-managed rates: units of `to` per 1 `from` */
 export const exchangeRates = pgTable(
@@ -39,6 +40,8 @@ export const platformSettings = pgTable(
         tier2DailyLimitUsd: decimal("tier2_daily_limit_usd"),
         /** Fees and rate buffers per operation (see common/pricing.ts); null = defaults */
         pricing: jsonb("pricing").$type<Partial<PricingConfig>>(),
+        /** Manual payment hours and rates, and the pause switches (see common/operations.ts); null = defaults */
+        operations: jsonb("operations").$type<Partial<OperationsConfig>>(),
         updatedBy: uuid("updated_by"),
         ...timestamps(),
     },

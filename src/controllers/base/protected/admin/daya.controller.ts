@@ -5,6 +5,7 @@ import config from '../../../../config/env.config';
 import dayaService, { DAYA_SANDBOX_SCENARIOS, DAYA_SETTLEMENTS, DAYA_VA_CURRENCIES, DayaAccountType, DayaError } from '../../../../services/daya.service';
 import labPoller from '../../../../services/lab-poller.service';
 import errorResponseMessage, { ErrorSeverity } from '../../../../common/messages/error-response-message';
+import { redactForLog } from "../../../../utils/redact.utils";
 
 const invalid = (message: string) => errorResponseMessage.createError(400, message, ErrorSeverity.LOW);
 const UUID = /^[0-9a-f-]{36}$/i;
@@ -36,7 +37,7 @@ class AdminDayaController extends BaseController {
                 body = { ...body };
                 for (const f of SECRET_FIELDS) if (f in body) body[f] = '[masked]';
             }
-            this.logger.http(`${req.method} ${req.path}`, { body, query: req.query, params: req.params, ip: req.ip });
+            this.logger.http(`${req.method} ${req.path}`, { body: redactForLog(body), query: redactForLog(req.query), params: req.params, ip: req.ip });
             next();
         });
     }

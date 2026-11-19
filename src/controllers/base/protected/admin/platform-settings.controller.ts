@@ -4,6 +4,7 @@ import RoleMiddleware from '../../../../middlewares/role.middleware';
 import platformSettingsService from '../../../../services/platform-settings.service';
 import errorResponseMessage, { ErrorSeverity } from '../../../../common/messages/error-response-message';
 import { PricingError, legacyNgnFeePairs } from '../../../../common/pricing';
+import { OperationsError, manualWindow } from '../../../../common/operations';
 
 const invalid = (message: string) => errorResponseMessage.createError(400, message, ErrorSeverity.LOW);
 
@@ -28,8 +29,9 @@ class AdminPlatformSettingsController extends BaseController {
             const settings = await platformSettingsService.getSettings();
             // The effective pricing, defaults filled in
             const pricing = await platformSettingsService.getPricing();
+            const operations = await platformSettingsService.getOperations();
             // Pairs whose fixed fee amounts are still in NGN: the admin reviews them in the pair's currency
-            return this.sendSuccess(res, { settings: { ...settings, pricing, legacyNgnFeePairs: legacyNgnFeePairs(pricing) } });
+            return this.sendSuccess(res, { settings: { ...settings, pricing, operations, manualWindow: manualWindow(operations.manual), legacyNgnFeePairs: legacyNgnFeePairs(pricing) } });
         } catch (error) {
             return next(error);
         }
@@ -38,7 +40,7 @@ class AdminPlatformSettingsController extends BaseController {
     private async put(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            const { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn, pricing } = req.body ?? {};
+            const { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn, pricing, operations } = req.body ?? {};
 
             const inRange = (v: any, min: number, max: number) =>
                 typeof v === 'number' && isFinite(v) && v >= min && v <= max;
@@ -84,13 +86,14 @@ class AdminPlatformSettingsController extends BaseController {
             }
 
             const updated = await platformSettingsService.updateSettings(
-                { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn, pricing },
+                { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn, pricing, operations },
                 user.id,
             );
             const saved = await platformSettingsService.getPricing();
-            return this.sendSuccess(res, { settings: { ...updated, pricing: saved, legacyNgnFeePairs: legacyNgnFeePairs(saved) } });
+            const savedOps = await platformSettingsService.getOperations();
+            return this.sendSuccess(res, { settings: { ...updated, pricing: saved, operations: savedOps, manualWindow: manualWindow(savedOps.manual), legacyNgnFeePairs: legacyNgnFeePairs(saved) } });
         } catch (error) {
-            if (error instanceof PricingError) return next(invalid(error.message));
+            if (error instanceof PricingError || error instanceof OperationsError) return next(invalid(error.message));
             return next(error);
         }
     }

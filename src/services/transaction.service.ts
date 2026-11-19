@@ -34,6 +34,35 @@ import ghsRateService, { GhsLimitError, type GhsPrice } from "./ghs-rate.service
 import ghsConversionService from "./ghs-conversion.service";
 import transactionLimitService from "./transaction-limit.service";
 import platformSettingsService from "./platform-settings.service";
+import { manualWindow } from "../common/operations";
+
+/** When it next opens, in Lagos time: "Monday 8am" */
+const lagosOpening = (at: Date) =>
+    at.toLocaleString("en-GB", { timeZone: "Africa/Lagos", weekday: "long", hour: "numeric", minute: "2-digit", hour12: true })
+        .replace(":00", "").replace(" am", "am").replace(" pm", "pm");
+
+/**
+ * The terms for a manual send in `currency`: the admin's manual rate (naira
+ * per unit), only while manual payments are open. Throws a user-facing error
+ * outside the hours or when no manual rate is set.
+ */
+export async function manualSendTerms(currency: string): Promise<{ rate: number }> {
+    const ops = await platformSettingsService.getOperations();
+    const window = manualWindow(ops.manual);
+    if (!window.open) {
+        throw errorResponseMessage.createError(
+            400,
+            `Manual payments run ${window.hours}.${window.opensAt ? ` They reopen ${lagosOpening(window.opensAt)}.` : ""} Use instant to pay now.`,
+            ErrorSeverity.LOW,
+            { code: "MANUAL_CLOSED", opensAt: window.opensAt?.toISOString() ?? null },
+        );
+    }
+    const rate = ops.manual.rates[currency];
+    if (!(rate > 0)) {
+        throw errorResponseMessage.createError(400, "Manual payments aren't available right now. Use instant instead.", ErrorSeverity.LOW, { code: "MANUAL_UNAVAILABLE" });
+    }
+    return { rate };
+}
 import {
     YELLOWCARD_STATUS,
     OGATEWAY_STATUS,
@@ -2090,15 +2119,9 @@ class TransactionService {
         if (!params.pin) throw errorResponseMessage.payloadIncorrect("Transaction PIN is required");
         await this.pinService.verifyPin(userId, params.pin);
 
-        let price: GhsPrice;
-        try {
-            price = await ghsRateService.price('send', amount);
-        } catch (err: any) {
-            logger.error("GHS rate lookup failed for a manual send", { error: err?.message });
-            throw errorResponseMessage.createError(400, "We couldn't get the NGN→GHS exchange rate right now. Please try again in a few minutes.", ErrorSeverity.HIGH);
-        }
-        // No fee: the naira is the GHS at the user's (buffered) rate
-        const ngnAmount = price.subtotalNgn;
+        // Manual payments run in the admin's hours, at the admin's manual rate, with no fee
+        const manual = await manualSendTerms('GHS');
+        const ngnAmount = Math.round(amount * manual.rate * 100) / 100;
         if (!(ngnAmount >= MANUAL_GHS_SEND.MIN_NGN)) {
             throw errorResponseMessage.createError(
                 400,
@@ -2129,7 +2152,7 @@ class TransactionService {
             detailType,
             status: TRANSACTION_STATUS.PENDING_INPUT as TransactionStatus,
             initiatedAt: new Date(),
-            lockedRate: price.userRate,
+            lockedRate: manual.rate,
             lockedRateFromCurrency: 'NGN',
             lockedRateToCurrency: 'GHS',
             lockedRateAt: new Date(),
@@ -2233,6 +2256,8 @@ class TransactionService {
             payer?: { name?: string; email?: string; phone?: string };
             /** Where Fincra sends the payer afterwards */
             redirectUrl?: string;
+            /** The user is paying cedis into their own wallet (no payer of their own) */
+            topUp?: boolean;
         },
         userId: string,
     ) => {
@@ -2303,6 +2328,7 @@ class TransactionService {
             lockedRateToCurrency: 'NGN',
             lockedRateAt: new Date(),
             ...(paymentLinkId ? { paymentLink: paymentLinkId, payer: params.payer } : {}),
+            ...(params.topUp ? { purpose: 'top_up' as const } : {}),
         });
         if (idempotencyKey) await this.idempotencyService.updateKeyWithTransaction(idempotencyKey, transaction.id);
 

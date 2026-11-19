@@ -6,6 +6,7 @@ import {
     FeeBreakdown, FeePricing, FundingFeeBreakdown, FundingPricing, FxPricing, NO_LIMITS, PricingConfig, ZERO_FEE, ZERO_RATE,
     applyRateRule, parsePricing, priceFees, priceFunding, withDefaults,
 } from "../common/pricing";
+import { mergeOperations, withOperationDefaults, type OperationsConfig } from "../common/operations";
 
 export type ProviderKey = 'ogateway' | 'yellowcard' | 'fincra';
 export type RateDirection = 'send' | 'receive';
@@ -62,6 +63,8 @@ class PlatformSettingsService {
             tierDailyLimitNgn: Partial<{ tier1: number; tier2: number }>;
             /** Partial pricing: what's given replaces, the rest is kept (throws PricingError) */
             pricing: unknown;
+            /** Manual hours/rates and pause switches: what's given replaces (throws OperationsError) */
+            operations: unknown;
         }>,
         adminUserId: string,
     ): Promise<IPlatformSettings> {
@@ -90,6 +93,7 @@ class PlatformSettingsService {
             };
         }
         if (patch.pricing !== undefined) update.pricing = parsePricing(patch.pricing, this.pricingOf(current));
+        if (patch.operations !== undefined) update.operations = mergeOperations(withOperationDefaults(current.operations), patch.operations);
         update.updatedBy = adminUserId;
 
         const before = {
@@ -98,6 +102,7 @@ class PlatformSettingsService {
             providerBaseFeePercent: current.providerBaseFeePercent,
             tierDailyLimitNgn: this.tierLimits(current),
             pricing: this.pricingOf(current),
+            operations: withOperationDefaults(current.operations),
         };
 
         const updated = await platformSettingsRepository.update(update);
@@ -112,6 +117,7 @@ class PlatformSettingsService {
                 providerBaseFeePercent: updated.providerBaseFeePercent,
                 tierDailyLimitNgn: updated.tierDailyLimitNgn,
                 pricing: this.pricingOf(updated),
+                operations: withOperationDefaults(updated.operations),
             },
         });
 
@@ -132,6 +138,11 @@ class PlatformSettingsService {
             limits: { ...NO_LIMITS },
         });
         return { ...withDefaults(null), send: { "NGN-GHS": fx() }, receive: { "GHS-NGN": fx() } };
+    }
+
+    /** Manual payment hours and rates, and the pause switches, defaults filled in */
+    public async getOperations(): Promise<OperationsConfig> {
+        return withOperationDefaults((await this.getSettings()).operations);
     }
 
     public async getPricing(): Promise<PricingConfig> {

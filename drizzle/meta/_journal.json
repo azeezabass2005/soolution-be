@@ -64,6 +64,20 @@
       "when": 1795025704556,
       "tag": "0008_fx_conversions",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795110634013,
+      "tag": "0009_ops_and_user_controls",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795111106635,
+      "tag": "0010_transaction_purpose",
+      "breakpoints": true
     }
   ]
 }

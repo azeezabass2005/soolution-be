@@ -4,6 +4,7 @@ import type { PlatformSettings } from "../types/entities";
 import { DEFAULT_TIER_DAILY_LIMIT_NGN } from "../common/tier.constants";
 import { exec } from "./utils";
 import type { PricingConfig } from "../common/pricing";
+import type { OperationsConfig } from "../common/operations";
 
 type SettingsRow = typeof platformSettings.$inferSelect;
 
@@ -13,6 +14,7 @@ export interface PlatformSettingsUpdate {
     providerBaseFeePercent?: { ogateway: number; yellowcard: number; fincra: number };
     tierDailyLimitNgn?: { tier1: number; tier2: number };
     pricing?: PricingConfig;
+    operations?: OperationsConfig;
     updatedBy?: string;
 }
 
@@ -25,6 +27,7 @@ function toSettings(row: SettingsRow): PlatformSettings {
         providerBaseFeePercent: { ogateway: row.providerFeeOgatewayPercent, yellowcard: row.providerFeeYellowcardPercent, fincra: row.providerFeeFincraPercent },
         tierDailyLimitNgn: { tier1: row.tier1DailyLimitNgn, tier2: row.tier2DailyLimitNgn },
         ...(row.pricing ? { pricing: row.pricing } : {}),
+        ...(row.operations ? { operations: row.operations } : {}),
         ...(row.updatedBy ? { updatedBy: row.updatedBy } : {}),
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
@@ -60,6 +63,7 @@ class PlatformSettingsRepository {
             values.tier2DailyLimitNgn = patch.tierDailyLimitNgn.tier2;
         }
         if (patch.pricing) values.pricing = patch.pricing;
+        if (patch.operations) values.operations = patch.operations;
         if (patch.updatedBy !== undefined) values.updatedBy = patch.updatedBy;
         await this.getOrCreate();
         const [row] = await exec().update(platformSettings).set(values).where(eq(platformSettings.kind, "singleton")).returning();

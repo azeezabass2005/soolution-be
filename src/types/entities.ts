@@ -154,6 +154,8 @@ export interface PlatformSettings {
     providerBaseFeePercent: { ogateway: number; yellowcard: number; fincra: number };
     /** Stored pricing (partial); read it through platformSettingsService.getPricing() */
     pricing?: Partial<PricingConfig>;
+    /** Stored operations config (partial); read it through platformSettingsService.getOperations() */
+    operations?: Partial<import("../common/operations").OperationsConfig>;
     updatedBy?: string;
     createdAt: Date;
     updatedAt: Date;

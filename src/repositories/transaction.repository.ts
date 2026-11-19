@@ -57,12 +57,22 @@ export interface TransactionListFilter {
     search?: string;
 }
 
+/**
+ * Filters users pick from, each covering the statuses behind it:
+ * "in_progress" is anything not finished yet, "unsuccessful" is failed or cancelled.
+ */
+const STATUS_GROUPS: Record<string, TransactionStatus[]> = {
+    in_progress: ["pending", "pending_input", "awaiting_confirmation", "awaiting_kyc_verification", "processing"] as TransactionStatus[],
+    unsuccessful: ["failed", "cancelled"] as TransactionStatus[],
+};
+
 function listWhere(filter: TransactionListFilter): SQL | undefined {
     const where: SQL[] = [];
     if (filter.user) where.push(eq(transactions.user, filter.user));
     if (Array.isArray(filter.currency)) where.push(inArray(transactions.currency, filter.currency));
     else if (filter.currency) where.push(eq(transactions.currency, filter.currency));
-    if (filter.status) where.push(eq(transactions.status, filter.status as TransactionStatus));
+    if (filter.status && STATUS_GROUPS[filter.status]) where.push(inArray(transactions.status, STATUS_GROUPS[filter.status]));
+    else if (filter.status) where.push(eq(transactions.status, filter.status as TransactionStatus));
     if (filter.createdFrom) where.push(gte(transactions.createdAt, filter.createdFrom));
     if (filter.createdTo) where.push(lte(transactions.createdAt, filter.createdTo));
     if (filter.search) where.push(ilike(transactions.reference, `%${escapeLike(filter.search)}%`));
