@@ -24,7 +24,8 @@ export const FINCRA_CHECKOUT_CURRENCIES = ["GHS", "NGN"] as const;
 export type FincraCheckoutCurrency = (typeof FINCRA_CHECKOUT_CURRENCIES)[number];
 /** Methods a payer can use, per currency (GHS has no cards) */
 export const FINCRA_CHECKOUT_METHODS: Record<FincraCheckoutCurrency, string[]> = {
-    GHS: ["mobile_money", "bank_transfer"],
+    // Fincra no longer takes bank transfers for GHS checkouts ("bank_transfer is not available for GHS")
+    GHS: ["mobile_money"],
     NGN: ["bank_transfer", "card"],
 };
 /** Statuses after which a checkout won't change */
@@ -299,13 +300,13 @@ class FincraService {
         redirectUrl?: string;
         metadata?: Record<string, string>;
     }) {
-        const res = await this.request("post", "/checkout/payments", {
+        const send = (paymentMethods: string[]) => this.request("post", "/checkout/payments", {
             withPublicKey: true,
             body: {
                 currency: input.currency,
                 amount: input.amount,
                 customer: input.customer,
-                paymentMethods: input.paymentMethods,
+                paymentMethods,
                 feeBearer: input.feeBearer,
                 settlementDestination: "wallet",
                 reference: input.reference,
@@ -313,6 +314,18 @@ class FincraService {
                 metadata: input.metadata ?? { source: "solutionpay-lab" },
             },
         });
+        let res: any;
+        try {
+            res = await send(input.paymentMethods);
+        } catch (error: any) {
+            // Fincra turned a method off for this currency: drop it and try once more with the rest,
+            // so one unavailable method doesn't stop every payment
+            const unavailable = /(\w+) is not available for/i.exec(String(error?.message || ""))?.[1];
+            const rest = input.paymentMethods.filter((m) => m !== unavailable);
+            if (!unavailable || rest.length === input.paymentMethods.length || !rest.length) throw error;
+            logger.warn("Fincra checkout: method unavailable, retrying without it", { currency: input.currency, unavailable, retryWith: rest });
+            res = await send(rest);
+        }
         // Checkout answers { status: true, data: { link, reference, payCode } }
         if (!res?.data?.link) throw new FincraError(res?.message || "Fincra didn't return a payment link", 502, res);
         return res.data as { link: string; reference?: string; payCode?: string };
