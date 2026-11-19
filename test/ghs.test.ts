@@ -475,4 +475,52 @@ describe("GHS through Fincra", () => {
             }
         });
     });
+
+    describe("rates shown to users", () => {
+        const ADMIN = "00000000-0000-4000-8000-000000000001";
+        const listForUsers = async () => {
+            const { default: ExchangeRateService } = await import("../src/services/exchange-rate.service");
+            return new ExchangeRateService().listForUsers();
+        };
+        const addAdminRate = async (from: string, to: string, rate: number, isActive = true) => {
+            const { default: ExchangeRateService } = await import("../src/services/exchange-rate.service");
+            return new ExchangeRateService().create({ from: from as any, to: to as any, rate, isActive });
+        };
+
+        it("serves NGN↔GHS from Fincra with each direction's buffer, not the admin's manual rate", async () => {
+            const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
+            await platformSettingsService.updateSettings({ pricing: {
+                send: { "NGN-GHS": { rate: { percent: 2, fixed: 1 }, providerFee: { percent: 0, fixed: 0, min: 0, cap: 0 }, platformFee: { percent: 0, fixed: 0, min: 0, cap: 0 } } },
+                receive: { "GHS-NGN": { rate: { percent: 3, fixed: 0 }, providerFee: { percent: 0, fixed: 0, min: 0, cap: 0 }, platformFee: { percent: 0, fixed: 0, min: 0, cap: 0 } } },
+            } }, ADMIN);
+            await addAdminRate("NGN", "GHS", 121);
+            await addAdminRate("GHS", "NGN", 113);
+            await addAdminRate("NGN", "RMB", 0.005);
+
+            const rates = await listForUsers();
+            const pair = (from: string, to: string) => rates.find((r) => r.from === from && r.to === to);
+            // Fincra says ₦100 per GHS: sends pay ₦100 + 2% + ₦1 per cedi, receives get ₦100 − 3%.
+            // Rates are units of `to` per 1 `from`, so NGN→GHS is cedis per naira
+            expect(pair("NGN", "GHS")?.source).toBe("fincra");
+            expect(pair("NGN", "GHS")?.rate).toBeCloseTo(1 / 103, 8);
+            expect(pair("GHS", "NGN")).toMatchObject({ rate: 97, source: "fincra" });
+            // Fincra doesn't price RMB, so the admin's rate stands
+            expect(pair("NGN", "RMB")).toMatchObject({ rate: 0.005, source: "admin" });
+        });
+
+        it("shows live GHS rates even with no admin row, and hides a pair the admin switched off", async () => {
+            await addAdminRate("GHS", "NGN", 113, false);
+            const rates = await listForUsers();
+            expect(rates.find((r) => r.from === "NGN" && r.to === "GHS")?.source).toBe("fincra");
+            expect(rates.find((r) => r.from === "GHS" && r.to === "NGN")).toBeUndefined();
+        });
+
+        it("falls back to the admin's rate when Fincra can't be reached", async () => {
+            fincra.ngnPerGhs.mockRejectedValueOnce(new Error("Fincra is down")).mockRejectedValueOnce(new Error("Fincra is down"));
+            await addAdminRate("NGN", "GHS", 121);
+            const rates = await listForUsers();
+            expect(rates.find((r) => r.from === "NGN" && r.to === "GHS")).toMatchObject({ rate: 121, source: "admin" });
+            expect(rates.find((r) => r.from === "GHS" && r.to === "NGN")).toBeUndefined();
+        });
+    });
 });

@@ -29,12 +29,12 @@ class ExchangeRateController extends BaseController {
     }
 
     /**
-     * Retrieves all exchange rates based on query parameters
+     * The rates users see: NGN↔GHS live from Fincra with the admin's buffer, the rest from the admin table
      * @private
      */
     private async getExchangeRates(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            const exchangeRates = await this.exchangeRateService.list({ isActive: true });
+            const exchangeRates = await this.exchangeRateService.listForUsers();
             this.sendSuccess(res, {exchangeRates})
         } catch (error) {
             next(error);

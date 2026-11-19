@@ -205,7 +205,8 @@ const loadEnvConfig = (): EnvConfig => {
         CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
         COOKIE_DOMAIN: (process.env.COOKIE_DOMAIN || '').trim(),
         LEGACY_COOKIE_DOMAINS: (process.env.LEGACY_COOKIE_DOMAINS || '').split(',').map((d) => d.trim()).filter(Boolean),
-        RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
+        // Timers can't wait longer than 2^31−1 ms (~24.8 days); a larger value would fire every 1 ms
+        RATE_LIMIT_WINDOW_MS: Math.min(parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10), 2_147_483_647),
         RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX || '100', 10),
         REDIS_URL: process.env.REDIS_URL,
         LOG_LEVEL: process.env.LOG_LEVEL || 'info',
