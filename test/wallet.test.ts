@@ -33,6 +33,7 @@ import reconciliationService from "../src/services/reconciliation.service";
 import { SYSTEM_ACCOUNT_CODES, fincraCashCode, fincraPayoutInflightCode, userWalletAccountCode } from "../src/common/constant";
 import { WALLET_LIMITS } from "../src/config/wallet-limits.config";
 import { encryptIdentity } from "../src/utils/identity-crypto.utils";
+import NotificationService from "../src/utils/notification.utils";
 
 const fincra = fincraService as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const walletService = new WalletService();
@@ -131,6 +132,19 @@ describe("WalletService", () => {
             expect(await accountBalance(userWalletAccountCode(user.id, "NGN"))).toBe(4950);
             const history = await walletService.getTransactionHistory(user.id, { page: 1, limit: 10, type: "funding" });
             expect(history.data).toHaveLength(1);
+        });
+
+        it("emails the user once when their wallet is funded", async () => {
+            const send = vi.spyOn(NotificationService.prototype, "sendNotification").mockResolvedValue({ email: true, whatsapp: false });
+            const user = await userWithAccount("va-mail");
+            await fincraWebhookService.handle(deposit("fc-mail", "va-mail", 4950, 50));
+            await fincraWebhookService.handle(deposit("fc-mail", "va-mail", 4950, 50));
+            expect(send).toHaveBeenCalledTimes(1);
+            const [to, message] = send.mock.calls[0] as any[];
+            expect(to.id).toBe(user.id);
+            expect(message.title).toBe("Your wallet has been funded");
+            expect(message.message).toContain("NGN 4,950.00");
+            send.mockRestore();
         });
 
         it("credits once when duplicate webhooks arrive at the same time", async () => {

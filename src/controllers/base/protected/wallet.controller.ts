@@ -237,13 +237,15 @@ class WalletController extends BaseController {
     private async getTransactionHistory(req: Request, res: Response, next: NextFunction) {
         try {
             const user = res.locals.user;
-            const { page, limit, type, currency } = req.query;
+            const { page, limit, type, currency, view } = req.query;
 
             const transactions = await this.walletService.getTransactionHistory(user.id, {
                 page: parseInt(page as string) || 1,
                 limit: parseInt(limit as string) || 10,
                 type: type as string | undefined,
                 currency: typeof currency === "string" && currency ? currency : undefined,
+                // ?view=wallet: only top-ups and withdrawals (the wallet page)
+                topUpsAndWithdrawals: view === "wallet",
             });
 
             return this.sendSuccess(res, transactions);

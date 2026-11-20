@@ -21,7 +21,8 @@ export const BENEFICIARY_CURRENCIES = [
 ] as const;
 
 /** Currencies that only pay out to mobile money */
-export const MOMO_ONLY_CURRENCIES = ["XAF", "RWF", "SLL", "MWK"];
+// GHS: our Ghana providers only move cedis by mobile money
+export const MOMO_ONLY_CURRENCIES = ["GHS", "XAF", "RWF", "SLL", "MWK"];
 
 export const ALIPAY_TYPES = ["nigerian", "chinese"] as const;
 

@@ -1,5 +1,5 @@
 import { and, asc, count, desc, eq, gte, inArray, lte, notInArray, or, sql, type SQL } from "drizzle-orm";
-import { walletTransactions } from "../db/schema";
+import { transactions, walletTransactions } from "../db/schema";
 import type { Executor } from "../db/client";
 import type { WalletTransaction } from "../types/entities";
 import type { WalletTransactionStatus, WalletTransactionType } from "../types/enums";
@@ -144,13 +144,26 @@ class WalletTransactionRepository {
 
     /** A user's history, newest first. `wallet: null` (an unopened wallet) returns nothing. */
     async paginateForUser(
-        filter: { user: string; type?: string; wallet?: string | null },
+        filter: { user: string; type?: string; wallet?: string | null; topUpsAndWithdrawals?: boolean },
         request: PageRequest
     ): Promise<Paginated<WalletTransaction>> {
         const window = pageWindow(request);
         if (filter.wallet === null || !isUuid(filter.user)) return toPage([], 0, window);
         const where: SQL[] = [eq(walletTransactions.user, filter.user)];
         if (filter.type) where.push(eq(walletTransactions.type, filter.type as WalletTransactionType));
+        if (filter.topUpsAndWithdrawals) {
+            // Money the user put in or took out themselves: bank transfer fundings and their own
+            // top-ups, and withdrawals. Not money received from payers (a GHS receive), sends or exchanges.
+            const ownTopUps = exec().select({ id: transactions.id }).from(transactions)
+                .where(and(eq(transactions.user, filter.user), eq(transactions.purpose, "top_up")));
+            where.push(or(
+                eq(walletTransactions.type, "withdrawal" as WalletTransactionType),
+                and(
+                    eq(walletTransactions.type, "funding" as WalletTransactionType),
+                    or(sql`${walletTransactions.transactionId} is null`, inArray(walletTransactions.transactionId, ownTopUps)),
+                ),
+            )!);
+        }
         if (filter.wallet) where.push(eq(walletTransactions.wallet, filter.wallet));
         const condition = and(...where);
         const [rows, [{ n }]] = await Promise.all([

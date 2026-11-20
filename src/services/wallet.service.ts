@@ -29,6 +29,7 @@ import { WALLET_LIMITS } from "../config/wallet-limits.config";
 import { BASE_WALLET_CURRENCY, OPENABLE_WALLET_CURRENCIES, WALLETS_UNAVAILABLE_CODE, WALLET_CURRENCIES, WalletCurrency, isWalletCurrency } from "../common/wallet.constants";
 import logger from "../utils/logger.utils";
 import config from "../config/env.config";
+import NotificationService from "../utils/notification.utils";
 import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
 import platformSettingsService from "./platform-settings.service";
@@ -102,9 +103,30 @@ class WalletService {
     private walletTransactionService: WalletTransactionService;
     private pinService: PinService;
 
+    private notifications?: NotificationService;
+
     constructor() {
         this.walletTransactionService = new WalletTransactionService();
         this.pinService = new PinService();
+    }
+
+    /** Emails the user that their wallet was funded (best effort: never undoes the credit) */
+    private async notifyFunded(userId: string, walletTransaction: WalletTransaction): Promise<void> {
+        try {
+            const user = await userRepository.findById(userId);
+            if (!user) return;
+            this.notifications ??= new NotificationService();
+            const amount = Number(walletTransaction.amount).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            await this.notifications.sendNotification(user as any, {
+                title: "Your wallet has been funded",
+                message: `${walletTransaction.currency} ${amount} has been added to your ${walletTransaction.currency} wallet. ${walletTransaction.description || ""}`.trim()
+                    + ` Reference: ${walletTransaction.reference}. Your balance is now ${walletTransaction.currency} ${Number(walletTransaction.balanceAfter).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`,
+                actionUrl: `${config.FRONTEND_URL}/dashboard/user/wallet`,
+                buttonText: "View wallet",
+            });
+        } catch (error) {
+            logger.warn("Funding email failed", { reference: walletTransaction.reference, error: error instanceof Error ? error.message : String(error) });
+        }
     }
 
     // ===================== WALLET MANAGEMENT =====================
@@ -459,6 +481,8 @@ class WalletService {
                 error: auditError instanceof Error ? auditError.message : String(auditError),
             });
         }
+
+        await this.notifyFunded(target.user, walletTransaction);
 
         return walletTransaction;
     }
@@ -977,7 +1001,7 @@ class WalletService {
     }
 
     /** Paginated wallet transaction history, newest first */
-    async getTransactionHistory(userId: string, options: { page: number; limit: number; type?: string; currency?: string }) {
+    async getTransactionHistory(userId: string, options: { page: number; limit: number; type?: string; currency?: string; topUpsAndWithdrawals?: boolean }) {
         let wallet: string | null | undefined;
         if (options.currency) {
             const found = await walletRepository.findByUserAndCurrency(userId, options.currency.toUpperCase());
@@ -985,7 +1009,7 @@ class WalletService {
             wallet = found?.id ?? null;
         }
         const request: PageRequest = { page: options.page, limit: options.limit };
-        return walletTransactionRepository.paginateForUser({ user: userId, type: options.type, wallet }, request);
+        return walletTransactionRepository.paginateForUser({ user: userId, type: options.type, wallet, topUpsAndWithdrawals: options.topUpsAndWithdrawals }, request);
     }
 
     /** Nigerian banks Fincra pays out to, in the shape the app has always used */
