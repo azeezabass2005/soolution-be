@@ -2,7 +2,7 @@ import BaseController from "../base-controller";
 import TransactionService, { type TransactionListFilter } from "../../../services/transaction.service";
 import beneficiaryService from "../../../services/beneficiary.service";
 import {Request, Response, NextFunction} from "express";
-import errorResponseMessage from "../../../common/messages/error-response-message";
+import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 import {validateCreateAlipayTransaction, validateCreateBankTransferTransaction} from "../../../validators/z-transaction";
 import {ROLE_MAP, TRANSACTION_STATUS} from "../../../common/constant";
 import RoleMiddleware from "../../../middlewares/role.middleware";
@@ -253,6 +253,15 @@ class TransactionController extends BaseController {
         return Object.keys(dateFilter).length > 0 ? dateFilter : undefined;
     }
 
+    /** The user id an admin filtered by, if it's a well-formed id */
+    private adminUserFilter(value: unknown): string | undefined {
+        if (typeof value !== "string" || !value) return undefined;
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+            throw errorResponseMessage.createError(400, "user must be a user id", ErrorSeverity.LOW);
+        }
+        return value;
+    }
+
     private async getAlipayTransactions(req: Request, res: Response, next: NextFunction, isAdmin: boolean) {
         try {
             const { page, limit, searchTerm, status, startDate, endDate } = req.query;
@@ -261,9 +270,8 @@ class TransactionController extends BaseController {
             // Build the filter from a strict whitelist — never pass req.query straight to the database
             const filter: TransactionListFilter = { currency: 'RMB' };
 
-            if (!isAdmin) {
-                filter.user = user?.id;
-            }
+            // Users see only their own; an admin can narrow to one user (?user=<id>)
+            filter.user = isAdmin ? this.adminUserFilter(req.query.user) : user?.id;
 
             if (typeof status === 'string' && status && status !== 'all') {
                 filter.status = status;
@@ -297,9 +305,8 @@ class TransactionController extends BaseController {
                 currency: ['GHS', 'NGN', 'KES', 'XAF', 'ZAR', 'TZS', 'UGX', 'XOF', 'RWF', 'BWP', 'ZMW', 'MWK'],
             };
 
-            if (!isAdmin) {
-                filter.user = user?.id;
-            }
+            // Users see only their own; an admin can narrow to one user (?user=<id>)
+            filter.user = isAdmin ? this.adminUserFilter(req.query.user) : user?.id;
 
             if (typeof status === 'string' && status && status !== 'all') {
                 filter.status = status;
