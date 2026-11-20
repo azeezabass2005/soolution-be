@@ -21,6 +21,7 @@ import adminPlatformSettingsController from "../../controllers/base/protected/ad
 import adminFincraController from "../../controllers/base/protected/admin/fincra.controller";
 import adminSpotflowController from "../../controllers/base/protected/admin/spotflow.controller";
 import adminDayaController from "../../controllers/base/protected/admin/daya.controller";
+import adminHyperRailsController from "../../controllers/base/protected/admin/hyperrails.controller";
 import adminInsightsController from "../../controllers/base/protected/admin/insights.controller";
 import kycController from "../../controllers/base/protected/kyc.controller";
 import beneficiaryController from "../../controllers/base/protected/beneficiary.controller";
@@ -68,6 +69,7 @@ protectedRouter.use(`${path}/admin/platform-settings`, adminPlatformSettingsCont
 protectedRouter.use(`${path}/admin/fincra`, adminFincraController);
 protectedRouter.use(`${path}/admin/spotflow`, adminSpotflowController);
 protectedRouter.use(`${path}/admin/daya`, adminDayaController);
+protectedRouter.use(`${path}/admin/hyperrails`, adminHyperRailsController);
 protectedRouter.use(`${path}/admin/insights`, adminInsightsController);
 protectedRouter.use(`${path}/kyc`, kycController);
 

@@ -148,6 +148,14 @@ interface EnvConfig {
     /** Optional override; otherwise sk_sandbox_ → api.sandbox.daya.co, sk_live_ → api.daya.co */
     DAYA_BASE_URL: string;
 
+    /** HyperRails lab (admin-only, GHS and KES pay-ins and payouts); sk_test_ / sk_live_ picks the mode */
+    HYPERRAILS_LAB_ENABLED: boolean;
+    HYPERRAILS_SECRET_KEY: string;
+    /** Sent as x-service-source on every call (HyperRails requires it) */
+    HYPERRAILS_SERVICE_SOURCE: string;
+    /** One host for test and live */
+    HYPERRAILS_BASE_URL: string;
+
     /** How often the lab poller re-checks provider deposits and balances */
     LAB_POLL_SECONDS: number;
     /** How long an action in a lab tab keeps its account watched */
@@ -284,6 +292,11 @@ const loadEnvConfig = (): EnvConfig => {
         DAYA_LAB_ENABLED: process.env.DAYA_LAB_ENABLED === 'true',
         DAYA_SECRET_KEY: process.env.DAYA_SECRET_KEY || '',
         DAYA_BASE_URL: process.env.DAYA_BASE_URL || '',
+        // HyperRails lab: off unless explicitly enabled; sk_test_ / sk_live_ picks the mode
+        HYPERRAILS_LAB_ENABLED: process.env.HYPERRAILS_LAB_ENABLED === 'true',
+        HYPERRAILS_SECRET_KEY: (process.env.HYPERRAILS_SECRET_KEY || '').trim(),
+        HYPERRAILS_SERVICE_SOURCE: (process.env.HYPERRAILS_SERVICE_SOURCE || 'SolutionPay').trim(),
+        HYPERRAILS_BASE_URL: (process.env.HYPERRAILS_BASE_URL || 'https://api.hyperrails.io').trim().replace(/\/+$/, '').replace(/\/(exchange\/)?api\/v1$/, ''),
         LAB_POLL_SECONDS: Math.max(10, parseInt(process.env.LAB_POLL_SECONDS || '30', 10) || 30),
         LAB_WATCH_MINUTES: Math.max(1, parseInt(process.env.LAB_WATCH_MINUTES || '30', 10) || 30),
     };
