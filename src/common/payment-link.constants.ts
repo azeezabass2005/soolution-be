@@ -22,6 +22,13 @@ export const PAYMENT_LINK_TO_CURRENCY = "NGN";
 /** Payers in these currencies can only pay by mobile money */
 export const PAYMENT_LINK_MOMO_ONLY = ["GHS", "XAF", "RWF", "MWK"];
 
+/**
+ * Currencies YellowCard sends to and collects in for our users. Sends are paid
+ * from the NGN wallet and receipts credit it in naira (no wallet in these
+ * currencies). Each is offered only while YellowCard has that direction on.
+ */
+export const YELLOWCARD_FLOW_CURRENCIES = ["KES", "XAF", "ZAR", "TZS", "UGX", "XOF", "RWF", "BWP", "ZMW", "MWK"] as const;
+
 export const CURRENCY_COUNTRY: Record<string, string> = {
     NGN: "NG", GHS: "GH", KES: "KE", XAF: "CM", ZAR: "ZA", TZS: "TZ", UGX: "UG",
     XOF: "SN", RWF: "RW", BWP: "BW", ZMW: "ZM", MWK: "MW",

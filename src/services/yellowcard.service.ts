@@ -3,6 +3,7 @@ import crypto from "crypto";
 import axios, { AxiosInstance } from "axios";
 import logger from "../utils/logger.utils";
 import errorResponseMessage, { ErrorResponseCode, ErrorSeverity } from "../common/messages/error-response-message";
+import { CURRENCY_COUNTRY, YELLOWCARD_FLOW_CURRENCIES } from "../common/payment-link.constants";
 
 /** The KYC person on a payment (sender) or collection (recipient) */
 export type YellowCardChannelType = "bank" | "momo";
@@ -331,6 +332,20 @@ class YellowCardService {
             logger.error("YellowCard: getCountryConfig failed", { country, currency, error: error?.ycError || error?.response?.data || error?.message });
             throw error;
         }
+    }
+
+    /**
+     * Which of our YellowCard currencies can be sent to and received in right
+     * now. A currency YellowCard can't be reached for is left out.
+     */
+    public async flowCurrencies(): Promise<{ send: string[]; receive: string[] }> {
+        const configs = await Promise.all(YELLOWCARD_FLOW_CURRENCIES.map((currency) =>
+            this.getCountryConfig(CURRENCY_COUNTRY[currency], currency).catch(() => null)));
+        const usable = (c: YellowCardCountryConfig | null): c is YellowCardCountryConfig => !!c && c.channelTypes.length > 0;
+        return {
+            send: configs.filter(usable).filter((c) => c.send).map((c) => c.currency),
+            receive: configs.filter(usable).filter((c) => c.receive).map((c) => c.currency),
+        };
     }
 
     /**

@@ -31,6 +31,9 @@ class YellowCardTransactionController extends BaseController {
         // What YellowCard supports for a currency: send/receive, limits and channel types (bank, momo)
         this.router.get("/country-config", this.getCountryConfig.bind(this));
 
+        // The currencies users can send to and receive in through YellowCard right now
+        this.router.get("/currencies", this.getCurrencies.bind(this));
+
         // Get YellowCard networks for a country
         this.router.get("/networks", this.getNetworks.bind(this));
 
@@ -95,6 +98,14 @@ class YellowCardTransactionController extends BaseController {
             }
             const countryConfig = await yellowCardService.getCountryConfig(country, currency);
             return this.sendSuccess(res, countryConfig);
+        } catch (error: any) {
+            return next(error);
+        }
+    }
+
+    private async getCurrencies(_req: Request, res: Response, next: NextFunction) {
+        try {
+            return this.sendSuccess(res, await yellowCardService.flowCurrencies());
         } catch (error: any) {
             return next(error);
         }
