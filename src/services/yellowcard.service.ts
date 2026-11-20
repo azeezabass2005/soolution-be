@@ -329,22 +329,62 @@ class YellowCardService {
             this.countryConfigCache.set(key, { at: Date.now(), value });
             return value;
         } catch (error: any) {
-            logger.error("YellowCard: getCountryConfig failed", { country, currency, error: error?.ycError || error?.response?.data || error?.message });
-            throw error;
+            logger.error("YellowCard: getCountryConfig failed, trying the channel list", { country, currency, error: error?.ycError || error?.response?.data || error?.message });
+            // Some accounts can't read /country/config; the channel list says the same thing
+            const value = await this.configFromChannels(country, currency).catch(() => null);
+            if (!value) throw error;
+            this.countryConfigCache.set(key, { at: Date.now(), value });
+            return value;
         }
+    }
+
+    /** A country config pieced together from YellowCard's active channels (withdraw = send, deposit = receive) */
+    private async configFromChannels(country: string, currency: string): Promise<YellowCardCountryConfig> {
+        const data = await this.getChannels(country);
+        const rows: any[] = (Array.isArray(data?.channels) ? data.channels : Array.isArray(data) ? data : [])
+            .filter((c: any) => String(c?.currency).toUpperCase() === currency.toUpperCase()
+                && (c?.status ?? "active") === "active" && (c?.apiStatus ?? "active") === "active"
+                && (c?.channelType === "bank" || c?.channelType === "momo"));
+        const side = (rampType: string) => rows.filter((c) => c.rampType === rampType);
+        const limits = (list: any[]) => ({
+            min: list.length ? Math.min(...list.map((c) => Number(c.min) || 0)) : 0,
+            max: list.some((c) => !Number(c.max)) ? 0 : Math.max(0, ...list.map((c) => Number(c.max) || 0)),
+        });
+        const send = side("withdraw");
+        const receive = side("deposit");
+        return {
+            country, currency,
+            send: send.length > 0,
+            receive: receive.length > 0,
+            sendMin: limits(send).min, sendMax: limits(send).max,
+            receiveMin: limits(receive).min, receiveMax: limits(receive).max,
+            channelTypes: [...new Set(rows.map((c) => c.channelType as YellowCardChannelType))],
+        };
     }
 
     /**
      * Which of our YellowCard currencies can be sent to and received in right
      * now. A currency YellowCard can't be reached for is left out.
      */
-    public async flowCurrencies(): Promise<{ send: string[]; receive: string[] }> {
+    public async flowCurrencies(): Promise<{ send: string[]; receive: string[]; unavailable: Record<string, string> }> {
+        const unavailable: Record<string, string> = {};
         const configs = await Promise.all(YELLOWCARD_FLOW_CURRENCIES.map((currency) =>
-            this.getCountryConfig(CURRENCY_COUNTRY[currency], currency).catch(() => null)));
-        const usable = (c: YellowCardCountryConfig | null): c is YellowCardCountryConfig => !!c && c.channelTypes.length > 0;
+            this.getCountryConfig(CURRENCY_COUNTRY[currency], currency).catch((error: any) => {
+                const reason = error?.response?.data?.message || error?.ycError?.message || error?.message || "YellowCard could not be reached";
+                unavailable[currency] = `${error?.response?.status ? `${error.response.status}: ` : ""}${reason}`;
+                return null;
+            })));
+        const usable = configs.filter((c): c is YellowCardCountryConfig => {
+            if (!c) return false;
+            if (!c.channelTypes.length) unavailable[c.currency] = "no bank or mobile money channel is on";
+            else if (!c.send && !c.receive) unavailable[c.currency] = "send and receive are both off on this YellowCard account";
+            return c.channelTypes.length > 0;
+        });
+        if (Object.keys(unavailable).length) logger.warn("YellowCard: some currencies are not on offer", { unavailable });
         return {
-            send: configs.filter(usable).filter((c) => c.send).map((c) => c.currency),
-            receive: configs.filter(usable).filter((c) => c.receive).map((c) => c.currency),
+            send: usable.filter((c) => c.send).map((c) => c.currency),
+            receive: usable.filter((c) => c.receive).map((c) => c.currency),
+            unavailable,
         };
     }
 
