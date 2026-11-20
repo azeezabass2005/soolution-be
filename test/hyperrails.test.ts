@@ -56,6 +56,14 @@ describe("HyperRails client", () => {
         });
     });
 
+    it("finds the provider list wherever HyperRails nests it, and keeps the raw reply", async () => {
+        (config as any).HYPERRAILS_SECRET_KEY = "sk_test_abc";
+        vi.spyOn(client, "request").mockResolvedValue({ data: { status: true, data: { GH: [{ code: "mtn", name: "MTN" }] } } });
+        const { providers, raw } = await hyperRailsService.mobileMoneyProviders("GHS", "GH");
+        expect(providers).toEqual([{ code: "mtn", name: "MTN" }]);
+        expect(raw).toEqual({ status: true, data: { GH: [{ code: "mtn", name: "MTN" }] } });
+    });
+
     it("passes HyperRails' own error message on", async () => {
         (config as any).HYPERRAILS_SECRET_KEY = "sk_test_abc";
         vi.spyOn(client, "request").mockRejectedValue(Object.assign(new Error("400"), { response: { status: 400, data: { errorMessage: "Unable to fulfill requested volume at the moment." } } }));

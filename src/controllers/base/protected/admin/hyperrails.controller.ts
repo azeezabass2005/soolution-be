@@ -122,7 +122,18 @@ class AdminHyperRailsController extends BaseController {
             hyperRailsService.banks(currency).catch((e) => ({ error: e.message })),
             hyperRailsService.mobileMoneyCurrencies().catch((e) => ({ error: e.message })),
         ]);
-        return this.sendSuccess(res, { currency, country: HYPERRAILS_COUNTRY[currency], providers, banks, momoCurrencies });
+        const found = 'error' in providers ? providers : providers.providers;
+        return this.sendSuccess(res, {
+            currency,
+            country: HYPERRAILS_COUNTRY[currency],
+            providers: found,
+            // What HyperRails actually said, for when the list comes back empty
+            raw: { providers: 'error' in providers ? providers : providers.raw, momoCurrencies },
+            // Ghana's codes as HyperRails documents them, to try when it lists none
+            documentedProviders: currency === 'GHS' ? [{ code: 'mtn', name: 'MTN' }, { code: 'telecel', name: 'Telecel' }, { code: 'airtel', name: 'AirtelTigo' }] : [],
+            banks,
+            momoCurrencies,
+        });
     }
 
     /**

@@ -37,7 +37,17 @@ export const asRows = (body: any): any[] => {
         if (Array.isArray(body?.[key])) return body[key];
         if (Array.isArray(body?.data?.[key])) return body.data[key];
     }
-    return [];
+    // Otherwise the first list one or two levels down (e.g. { data: { GH: [...] } })
+    const nested = (value: any, depth: number): any[] | null => {
+        if (!value || typeof value !== "object" || depth > 2) return null;
+        for (const v of Object.values(value)) {
+            if (Array.isArray(v) && v.length) return v;
+            const deeper = nested(v, depth + 1);
+            if (deeper) return deeper;
+        }
+        return null;
+    };
+    return nested(body, 0) ?? [];
 };
 
 /** An object that may come back wrapped in { data } */
@@ -133,8 +143,10 @@ class HyperRailsService {
         return asRows(await this.firstOf("get", [`${API}/partners/marketplace/mobile-money/currencies`, `${EXCHANGE}/partners/marketplace/mobile-money/currencies`]));
     }
 
+    /** The providers for a currency, and HyperRails' reply as it came */
     async mobileMoneyProviders(currency: string, countryCode?: string) {
-        return asRows(await this.firstOf("get", [`${API}/partners/marketplace/mobile-money/providers`, `${EXCHANGE}/partners/marketplace/mobile-money/providers`], { params: { currency, ...(countryCode ? { countryCode } : {}) } }));
+        const raw = await this.firstOf("get", [`${API}/partners/marketplace/mobile-money/providers`, `${EXCHANGE}/partners/marketplace/mobile-money/providers`], { params: { currency, ...(countryCode ? { countryCode } : {}) } });
+        return { providers: asRows(raw), raw };
     }
 
     async banks(currency: string) {
