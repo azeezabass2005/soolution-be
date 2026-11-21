@@ -14,7 +14,7 @@ import { eq } from "drizzle-orm";
 import { startTestDatabase, stopTestDatabase } from "./helpers/db";
 import { bootstrapLedger, createUser } from "./helpers/fixtures";
 import { exec } from "../src/repositories/utils";
-import { transactions, walletTransactions, wallets } from "../src/db/schema";
+import { transactionDetails, transactions, walletTransactions, wallets } from "../src/db/schema";
 import transactionRepository from "../src/repositories/transaction.repository";
 
 /** The history page: transactions and wallet fundings paged together, newest first */
@@ -56,6 +56,23 @@ describe("transaction history with wallet fundings", () => {
         const w2: any = second.data[1];
         expect(w2).toMatchObject({ isFunding: true, detailType: "funding", status: "completed", amount: 5000, currency: "NGN" });
         expect(w2.details).toMatchObject({ type: "funding", fee: 50, balanceAfter: 4950 });
+    });
+
+    it("leaves failed receives out of the user's history but keeps failed sends", async () => {
+        const owner = (await createUser()).id;
+        const make = async (reference: string, currency: string, fromCurrency: string, status: string, fundingCurrency?: string) => {
+            const [t] = await exec().insert(transactions).values({
+                user: owner, reference, amount: 100, currency, fromCurrency, detailType: "yellowcard" as any, status: status as any,
+            }).returning();
+            await exec().insert(transactionDetails).values({ transactionId: t.id, type: "yellowcard" as any, ...(fundingCurrency ? { fundingCurrency } : {}) });
+        };
+        await make("RECV-FAILED", "NGN", "KES", "failed");
+        await make("RECV-DONE", "NGN", "KES", "completed");
+        await make("SEND-FAILED", "KES", "NGN", "failed", "NGN");
+        const seen = await transactionRepository.paginateHistory({ user: owner, hideFailedReceives: true }, { page: 1, limit: 20 });
+        expect(seen.data.map((r: any) => r.reference).sort()).toEqual(["RECV-DONE", "SEND-FAILED"]);
+        const admin = await transactionRepository.paginateHistory({ user: owner }, { page: 1, limit: 20 });
+        expect(admin.data).toHaveLength(3);
     });
 
     it("applies the status filter and search to fundings too", async () => {

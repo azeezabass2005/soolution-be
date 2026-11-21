@@ -16,7 +16,7 @@ import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/er
 
 import transactionLimitService from "../../../services/transaction-limit.service";
 import platformSettingsService from "../../../services/platform-settings.service";
-import { manualWindow } from "../../../common/operations";
+import { isManualSendCurrency, MANUAL_SEND_CURRENCIES, manualWindow } from "../../../common/operations";
 import { MANUAL_GHS_SEND } from "../../../common/wallet.constants";
 /**
  * GHS routes: send to Ghana mobile money or banks, and receive GHS through a
@@ -128,20 +128,29 @@ class OGatewayTransactionController extends BaseController {
         }
     }
 
-    private async manualInfo(_req: Request, res: Response, next: NextFunction) {
+    /** Manual sends for one currency (?currency=GHS|KES|XAF|RMB, GHS by default): open now, hours, rate */
+    private async manualInfo(req: Request, res: Response, next: NextFunction) {
         try {
+            const currency = String(req.query.currency || "GHS").toUpperCase();
+            if (!isManualSendCurrency(currency)) {
+                return this.sendSuccess(res, { currency, rate: null, available: false, open: false, opensAt: null, hours: "", minNgn: 0, supported: false });
+            }
             const ops = await platformSettingsService.getOperations();
             const window = manualWindow(ops.manual);
-            const rate = ops.manual.rates.GHS;
+            const rate = ops.manual.rates[currency];
             return this.sendSuccess(res, {
-                currency: "GHS",
+                currency,
+                supported: true,
                 /** Naira per cedi for manual sends; null when the admin hasn't set one */
                 rate: rate > 0 ? rate : null,
                 available: window.open && rate > 0,
                 open: window.open,
                 opensAt: window.opensAt,
                 hours: window.hours,
-                minNgn: MANUAL_GHS_SEND.MIN_NGN,
+                /** Every manual currency's rate, so the app can price any manual send */
+                rates: Object.fromEntries(MANUAL_SEND_CURRENCIES.map((c) => [c, ops.manual.rates[c] > 0 ? ops.manual.rates[c] : null])),
+                // The ₦500,000 floor is for manual GHS only
+                minNgn: currency === "GHS" ? MANUAL_GHS_SEND.MIN_NGN : 0,
             });
         } catch (error) {
             return next(error);

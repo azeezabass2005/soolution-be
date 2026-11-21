@@ -275,6 +275,8 @@ class TransactionController extends BaseController {
             const filter: TransactionListFilter & { user: string } = {
                 user: res.locals.user?.id,
                 currency: ['RMB', ...LISTED_CURRENCIES],
+                // Failed receives stay on the admin side only
+                hideFailedReceives: true,
             };
             if (typeof status === 'string' && status && status !== 'all') filter.status = status;
             const createdAt = this.buildDateRangeFilter(startDate, endDate);
@@ -302,6 +304,7 @@ class TransactionController extends BaseController {
 
             // Users see only their own; an admin can narrow to one user (?user=<id>)
             filter.user = isAdmin ? this.adminUserFilter(req.query.user) : user?.id;
+            if (!isAdmin) filter.hideFailedReceives = true;
 
             if (typeof status === 'string' && status && status !== 'all') {
                 filter.status = status;
@@ -335,6 +338,7 @@ class TransactionController extends BaseController {
 
             // Users see only their own; an admin can narrow to one user (?user=<id>)
             filter.user = isAdmin ? this.adminUserFilter(req.query.user) : user?.id;
+            if (!isAdmin) filter.hideFailedReceives = true;
 
             if (typeof status === 'string' && status && status !== 'all') {
                 filter.status = status;

@@ -31,9 +31,10 @@ export interface BankDirectory {
 const YC_BANK_CURRENCIES = ["KES", "XAF", "ZAR", "TZS", "UGX", "XOF", "RWF", "BWP", "ZMW", "MWK"];
 const CACHE_MS = 60 * 60 * 1000;
 
+/** An active bank (not a mobile wallet), however YellowCard labels it */
 const isBankNetwork = (n: any) => {
-    const kind = String(n?.accountNumberType || n?.type || "").toLowerCase();
-    return n?.status === "active" && kind === "bank";
+    const kinds = [n?.accountNumberType, n?.channelType, n?.type].map((k) => String(k || "").toLowerCase());
+    return String(n?.status || "active").toLowerCase() === "active" && kinds.includes("bank");
 };
 
 class BankDirectoryService {
@@ -66,8 +67,14 @@ class BankDirectoryService {
             if (!banks.length) banks = GHANA_BANKS.map((name) => ({ code: name, name }));
             value = { currency, banks, canResolve: false };
         } else if (YC_BANK_CURRENCIES.includes(currency)) {
-            const data: any = await yellowCardService.getNetworks(CURRENCY_COUNTRY[currency]);
-            const networks: any[] = data?.networks || data || [];
+            let networks: any[] = [];
+            try {
+                const data: any = await yellowCardService.getNetworks(CURRENCY_COUNTRY[currency]);
+                networks = Array.isArray(data?.networks) ? data.networks : Array.isArray(data) ? data : [];
+            } catch (error: any) {
+                logger.warn("YellowCard bank list unavailable", { currency, status: error?.response?.status, error: error?.response?.data?.message || error?.message });
+                throw errorResponseMessage.createError(422, "We couldn't load the list of banks. Try again shortly.", ErrorSeverity.MEDIUM);
+            }
             value = {
                 currency,
                 banks: networks.filter(isBankNetwork).map((n) => ({ code: String(n.id), name: String(n.name).trim() })),

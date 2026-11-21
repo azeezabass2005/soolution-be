@@ -43,6 +43,12 @@ import walletTransactionRepository from "../src/repositories/wallet-transaction.
 import reconciliationService from "../src/services/reconciliation.service";
 import { SYSTEM_ACCOUNT_CODES } from "../src/common/constant";
 import { manualPayoutPendingCode } from "../src/common/wallet.constants";
+import platformSettingsService from "../src/services/platform-settings.service";
+const ADMIN_ID = "00000000-0000-4000-8000-000000000001";
+/** Manual payments open around the clock at the given rates (naira per unit) */
+const openManual = (rates: Record<string, number>) =>
+    platformSettingsService.updateSettings({ operations: { manual: { rates, days: [0, 1, 2, 3, 4, 5, 6], open: "00:00", close: "23:59", closedDates: [] } } }, ADMIN_ID);
+
 
 const yc = yellowCardService as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const transactionService = new TransactionService();
@@ -176,6 +182,7 @@ describe("TransactionService", () => {
     // GHS sends and payment-link receives (Fincra) are covered in ghs.test.ts
 
     describe("manual payouts paid from a wallet", () => {
+        beforeEach(() => openManual({ GHS: 100 }));
         it("holds the money, and refunds once when an admin rejects it", async () => {
             const user = await createUser();
             await fundWallet(user.id, 1000, "GHS");
@@ -229,6 +236,7 @@ describe("TransactionService", () => {
     });
 
     describe("bank transfer paid by the customer", () => {
+        beforeEach(() => openManual({ KES: 10 }));
         it("shows the company's default account and lists the transaction with details and owner", async () => {
             const user = await createUser();
             const banks = new BankAccountDetailsService();
@@ -250,6 +258,29 @@ describe("TransactionService", () => {
             expect(page.paginator.itemsCount).toBe(1);
             expect(page.data[0].details?.accountName).toBe("Wanjiku");
             expect((page.data[0].user as any).firstName).toBe("Ada");
+        });
+
+        it("prices from the admin's manual rate, whatever amount the client sends", async () => {
+            const user = await createUser();
+            await new BankAccountDetailsService().createAccountDetails({ currency: "NGN", accountNumber: "0011223344", accountName: "Solution Pay", bankName: "Zenith" });
+            const created: any = await transactionService.createBankTransferTransaction(
+                {
+                    amount: 500, fromAmount: 1, fromCurrency: "NGN", toCurrency: "KES", paymentMethod: "bank_transfer", institutionType: "bank",
+                    bankName: "KCB", accountNumber: "123456", accountName: "Wanjiku", transactionType: "send", pin: TEST_PIN,
+                } as any,
+                user.id
+            );
+            expect(created.details.fromAmount).toBe(5000);
+            expect(created.lockedRate).toBe(10);
+        });
+
+        it("only sends GHS, KES and XAF manually, and never receives", async () => {
+            const user = await createUser();
+            const base = { amount: 500, fromCurrency: "NGN", paymentMethod: "bank_transfer", institutionType: "bank", bankName: "X", accountNumber: "123456", accountName: "A", pin: TEST_PIN } as any;
+            await expect(transactionService.createBankTransferTransaction({ ...base, toCurrency: "ZAR", transactionType: "send" }, user.id))
+                .rejects.toMatchObject({ message: "ZAR can only be sent instantly." });
+            await expect(transactionService.createBankTransferTransaction({ ...base, fromCurrency: "KES", toCurrency: "NGN", transactionType: "receive" }, user.id))
+                .rejects.toMatchObject({ message: expect.stringContaining("Receiving is instant only") });
         });
     });
 });

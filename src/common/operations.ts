@@ -4,6 +4,10 @@
  * settings row (`operations`), read through platform-settings.service.
  */
 
+/** The only sends that can go manually (paid out by our team at the admin's manual rate) */
+export const MANUAL_SEND_CURRENCIES = ["GHS", "KES", "XAF", "RMB"] as const;
+export const isManualSendCurrency = (currency?: string | null) => !!currency && (MANUAL_SEND_CURRENCIES as readonly string[]).includes(currency);
+
 export interface ManualConfig {
     /** Naira per one unit of each currency, for manual payments (e.g. { GHS: 121 }) */
     rates: Record<string, number>;

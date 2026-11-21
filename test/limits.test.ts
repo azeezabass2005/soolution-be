@@ -11,6 +11,7 @@ vi.mock("../src/services/yellowcard.service", () => ({
 
 import transactionLimitService from "../src/services/transaction-limit.service";
 import transactionRepository from "../src/repositories/transaction.repository";
+import transactionDetailRepository from "../src/repositories/transaction-detail.repository";
 import platformSettingsService from "../src/services/platform-settings.service";
 import { resetTestDatabase, startTestDatabase, stopTestDatabase } from "./helpers/db";
 import { bootstrapLedger, createUser } from "./helpers/fixtures";
@@ -52,6 +53,15 @@ describe("daily tier limits (NGN)", () => {
         const refusal = transactionLimitService.assertAllowed(user.id, [{ amount: 1_000_001, currency: "NGN" }]);
         await expect(refusal).rejects.toMatchObject({ response_code: 403 });
         await expect(refusal).rejects.toMatchObject({ message: expect.stringContaining("₦5,000,000") });
+    });
+
+    it("doesn't count a payment the provider has failed, even before our status catches up", async () => {
+        const user = await createUser();
+        const pending = await record(user.id, 2_000_000, "processing");
+        await transactionDetailRepository.create({ transactionId: pending.id, type: "yellowcard", ycStatus: "expired" } as any);
+        const live = await record(user.id, 1_000_000, "processing");
+        await transactionDetailRepository.create({ transactionId: live.id, type: "yellowcard", ycStatus: "processing" } as any);
+        expect(await transactionLimitService.getUsedTodayNgn(user.id)).toBe(1_000_000);
     });
 
     it("values GHS at Fincra's rate without YellowCard", async () => {

@@ -55,7 +55,19 @@ export interface TransactionListFilter {
     createdTo?: Date;
     /** Matches the reference (case-insensitive, partial) */
     search?: string;
+    /** Leave out receives (collections and top-ups) that failed or were cancelled: users don't need them, admins do */
+    hideFailedReceives?: boolean;
 }
+
+/**
+ * A receive: a top-up, or money collected from a payer through a provider.
+ * Sends always record the wallet that paid (funding_currency); receives don't.
+ */
+const isReceive = sql`(coalesce(${transactions.purpose}, '') = 'top_up' or (
+    ${transactions.detailType} in ('yellowcard', 'fincra', 'spotflow', 'ogateway')
+    and ${transactions.currency} <> ${transactions.fromCurrency}
+    and not exists (select 1 from transaction_details d where d.transaction_id = "transactions"."id" and d.funding_currency is not null)
+))`;
 
 /**
  * The wallet statuses a funding can be in for a transaction status filter.
@@ -114,6 +126,7 @@ function listWhere(filter: TransactionListFilter): SQL | undefined {
     if (filter.createdFrom) where.push(gte(transactions.createdAt, filter.createdFrom));
     if (filter.createdTo) where.push(lte(transactions.createdAt, filter.createdTo));
     if (filter.search) where.push(ilike(transactions.reference, `%${escapeLike(filter.search)}%`));
+    if (filter.hideFailedReceives) where.push(sql`not (${transactions.status} in ('failed', 'cancelled') and ${isReceive})`);
     return where.length ? and(...where) : undefined;
 }
 
@@ -199,12 +212,24 @@ class TransactionRepository {
     }
 
     /** The user's transactions created since `since`, excluding `excludeStatuses` (daily limit) */
+    /**
+     * The user's transactions since `since` that use up their daily limit. Leaves
+     * out `excludeStatuses`, and anything a provider has already reported as
+     * failed, expired, refunded or cancelled even if our status hasn't caught up.
+     */
     async listForLimit(userId: string, since: Date, excludeStatuses: TransactionStatus[]) {
         if (!isUuid(userId)) return [];
+        const providerFailed = sql`lower(coalesce(${transactionDetails.ycStatus}, ${transactionDetails.ogStatus}, ${transactionDetails.providerStatus}, '')) in ('failed', 'expired', 'refunded', 'cancelled', 'rejected')`;
         const rows = await exec()
             .select({ ngnValue: transactions.ngnValue, amount: transactions.amount, currency: transactions.currency })
             .from(transactions)
-            .where(and(eq(transactions.user, userId), gte(transactions.createdAt, since), notInArray(transactions.status, excludeStatuses)));
+            .leftJoin(transactionDetails, eq(transactionDetails.transactionId, transactions.id))
+            .where(and(
+                eq(transactions.user, userId),
+                gte(transactions.createdAt, since),
+                notInArray(transactions.status, excludeStatuses),
+                sql`not (${providerFailed})`,
+            ));
         return rows.map((row) => stripNulls(row) as { ngnValue?: number; amount: number; currency: string });
     }
 

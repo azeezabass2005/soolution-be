@@ -34,7 +34,7 @@ import ghsRateService, { GhsLimitError, type GhsPrice } from "./ghs-rate.service
 import ghsConversionService from "./ghs-conversion.service";
 import transactionLimitService from "./transaction-limit.service";
 import platformSettingsService from "./platform-settings.service";
-import { manualWindow } from "../common/operations";
+import { isManualSendCurrency, manualWindow } from "../common/operations";
 
 /** When it next opens, in Lagos time: "Monday 8am" */
 const lagosOpening = (at: Date) =>
@@ -46,7 +46,10 @@ const lagosOpening = (at: Date) =>
  * per unit), only while manual payments are open. Throws a user-facing error
  * outside the hours or when no manual rate is set.
  */
-export async function manualSendTerms(currency: string): Promise<{ rate: number }> {
+export async function manualSendTerms(currency: string, { needsRate = true }: { needsRate?: boolean } = {}): Promise<{ rate: number }> {
+    if (!isManualSendCurrency(currency)) {
+        throw errorResponseMessage.createError(400, `${currency} can only be sent instantly.`, ErrorSeverity.LOW, { code: "MANUAL_UNSUPPORTED" });
+    }
     const ops = await platformSettingsService.getOperations();
     const window = manualWindow(ops.manual);
     if (!window.open) {
@@ -58,7 +61,7 @@ export async function manualSendTerms(currency: string): Promise<{ rate: number 
         );
     }
     const rate = ops.manual.rates[currency];
-    if (!(rate > 0)) {
+    if (needsRate && !(rate > 0)) {
         throw errorResponseMessage.createError(400, "Manual payments aren't available right now. Use instant instead.", ErrorSeverity.LOW, { code: "MANUAL_UNAVAILABLE" });
     }
     return { rate };
@@ -263,21 +266,20 @@ class TransactionService {
             await this.pinService.verifyPin(user, pin);
         }
 
-        // Validate exchange rate exists and is active before creating transaction
-        const rateUtils = new RateUtils(fromCurrency, toCurrency);
-        await rateUtils.validateExchangeRate();
-
-        // Calculate fromAmount if not provided (convert amount from target currency to source currency)
-        // For bank transfers: amount is in toCurrency, fromAmount is in fromCurrency (NGN)
-        let calculatedFromAmount = fromAmount;
-        if (!calculatedFromAmount) {
-            // Convert target currency amount to source currency (NGN)
-            // We need reverse conversion: if rate is NGN->KES, we need KES->NGN
-            // Use convertAmountReverse to properly handle reverse conversion
-            const rateUtils = new RateUtils(fromCurrency, toCurrency);
-            calculatedFromAmount = await rateUtils.convertAmountReverse(amount);
+        // Manual is for sending GHS, KES and XAF (RMB has its own route); receiving is instant only
+        if (transactionType !== 'send') {
+            throw errorResponseMessage.createError(400, "Receiving is instant only. Use the instant receive option.", ErrorSeverity.LOW, { code: "MANUAL_UNSUPPORTED" });
         }
-        calculatedFromAmount = Math.round(calculatedFromAmount * 100) / 100; // Round to 2 decimal places
+        if (toCurrency === 'RMB') {
+            throw errorResponseMessage.createError(400, "RMB is sent through Alipay or WeChat.", ErrorSeverity.LOW);
+        }
+        // The admin's manual rate (naira per unit) and hours; paid from the destination wallet needs no rate
+        const manual = await manualSendTerms(toCurrency, { needsRate: !fromWallet });
+
+        // What the user pays in naira, always from the manual rate (never trusted from the client)
+        const calculatedFromAmount = fromWallet
+            ? Math.round(Number(fromAmount || amount * (manual.rate || 0)) * 100) / 100
+            : Math.round(amount * manual.rate * 100) / 100;
 
         // Determine NGN equivalent for validation
         // For receive transactions: toCurrency is NGN, so amount is already the NGN equivalent
@@ -314,6 +316,7 @@ class TransactionService {
         }
 
         const transaction = await transactionRepository.create({
+            ...(manual.rate > 0 ? { lockedRate: manual.rate, lockedRateFromCurrency: fromCurrency, lockedRateToCurrency: toCurrency, lockedRateAt: new Date() } : {}),
             ngnValue: txNgnValue ?? undefined,
             user,
             reference: this.generateBankTransferTransactionReference(toCurrency),
@@ -475,14 +478,11 @@ class TransactionService {
         }
         await this.pinService.verifyPin(user, pin);
 
-        // Validate exchange rate exists and is active before creating transaction
-        const rateUtils = new RateUtils(fromCurrency, "RMB");
-        await rateUtils.validateExchangeRate();
-
-        // Calculate NGN equivalent for minimum amount validation
-        // For RMB transactions, amount is in RMB, we need to convert to NGN (reverse conversion)
-        // Use convertAmountReverse because we're converting from RMB (toCurrency) to NGN (fromCurrency)
-        const ngnEquivalent = await rateUtils.convertAmountReverse(amount);
+        // The admin's manual RMB rate (naira per yuan) and hours; paid from the RMB wallet needs no rate
+        const manual = await manualSendTerms("RMB", { needsRate: !fromWallet });
+        const ngnEquivalent = manual.rate > 0
+            ? Math.round(amount * manual.rate * 100) / 100
+            : await new RateUtils(fromCurrency, "RMB").convertAmountReverse(amount);
 
         // Validate amount against transaction limits (using NGN equivalent for minimum)
         const amountValidation = validateTransactionAmount(amount, fromCurrency as any, "RMB", ngnEquivalent);
@@ -527,6 +527,7 @@ class TransactionService {
         }
 
         const transaction = await transactionRepository.create({
+            ...(manual.rate > 0 ? { lockedRate: manual.rate, lockedRateFromCurrency: fromCurrency, lockedRateToCurrency: "RMB", lockedRateAt: new Date() } : {}),
             ngnValue: txNgnValue ?? undefined,
             user,
             reference: this.generateTransactionReference(),
