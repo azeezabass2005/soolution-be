@@ -31,7 +31,7 @@ export const GHS_ACCOUNT_LIFETIME_MS = 30 * 60 * 1000;
 /** Extra time before an unpaid one is closed, for transfers still on their way */
 const GHS_ACCOUNT_GRACE_MS = 6 * 60 * 60 * 1000;
 import ghsRateService, { GhsLimitError, type GhsPrice } from "./ghs-rate.service";
-import ghsConversionService from "./ghs-conversion.service";
+import ghsConversionService, { settledGhsFromCheckout } from "./ghs-conversion.service";
 import transactionLimitService from "./transaction-limit.service";
 import platformSettingsService from "./platform-settings.service";
 import { isManualSendCurrency, manualWindow } from "../common/operations";
@@ -2846,11 +2846,7 @@ class TransactionService {
             }
             const wallet = await this.walletService.getOrCreateWallet(transaction.user);
             // What Fincra settled to our GHS balance (it keeps its fee, which we bear): that's what gets converted
-            const reportedReceived = Number(checkout?.amountReceived);
-            const reportedFee = Number(checkout?.fee);
-            const settledGhs = reportedReceived > 0 && reportedReceived <= paid + 0.001
-                ? reportedReceived
-                : reportedFee > 0 && reportedFee < paid ? paid - reportedFee : transaction.amount;
+            const settledGhs = settledGhsFromCheckout(checkout, transaction.amount);
             const credited = await withTransaction(async (tx) => {
                 if (!(await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() }, tx))) return false;
                 await this.creditWalletFromGhsCollection(transaction, detail, wallet.id, tx);

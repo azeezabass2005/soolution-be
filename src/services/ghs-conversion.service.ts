@@ -1,5 +1,7 @@
 import fincraService, { FincraError } from "./fincra.service";
 import fxConversionRepository, { type FxConversion } from "../repositories/fx-conversion.repository";
+import transactionRepository from "../repositories/transaction.repository";
+import transactionDetailRepository from "../repositories/transaction-detail.repository";
 import ledgerService from "./ledger.service";
 import { withTransaction } from "../db/transaction";
 import type { Executor } from "../db/client";
@@ -10,6 +12,29 @@ import logger from "../utils/logger.utils";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
+
+/** Credited receipts this recent with no conversion are queued by the sweeper (older ones wait for an admin) */
+const BACKFILL_WINDOW_MS = 3 * 24 * HOUR;
+/** Left alone this long after the credit, so the normal path gets there first */
+const BACKFILL_GRACE_MS = 3 * MINUTE;
+
+/**
+ * What Fincra settled to our GHS balance for a checkout: its amountReceived,
+ * else the amount less its fee, else what was asked. That's what gets converted.
+ */
+export function settledGhsFromCheckout(checkout: any, askedGhs: number): number {
+    const paid = Number(checkout?.amount ?? checkout?.amountReceived ?? 0);
+    const reportedReceived = Number(checkout?.amountReceived);
+    const reportedFee = Number(checkout?.fee);
+    if (reportedReceived > 0 && reportedReceived <= paid + 0.001) return reportedReceived;
+    if (reportedFee > 0 && reportedFee < paid) return paid - reportedFee;
+    return askedGhs;
+}
+
+/** NGN a GHS receipt was booked at: what the user was credited plus our fee */
+const bookedNgnFor = (detail: { fromAmount?: unknown; feeAmount?: unknown }) =>
+    round2((Number(detail.fromAmount) || 0) + (Number(detail.feeAmount) || 0));
 
 /** Waits between attempts to start a conversion (Fincra may not have settled the GHS yet): about 2 days in all */
 const RETRY_DELAYS_MIN = [2, 5, 15, 30, 60, 120, 240, 480, 720, 1440];
@@ -61,6 +86,7 @@ class GhsConversionService {
     /** The sweeper: start, retry or check every conversion that's due */
     async processDue(now = new Date()): Promise<{ due: number }> {
         if (!this.enabled) return { due: 0 };
+        await this.queueMissed(now).catch((error) => logger.warn("GHS conversion: looking for missed receipts failed", { error: error?.message }));
         const due = await fxConversionRepository.listDue(25, now);
         for (const conversion of due) {
             try {
@@ -96,10 +122,11 @@ class GhsConversionService {
         });
         if (!claimed) return;
         try {
+            const amount = await this.convertibleAmount(conversion);
             const started = await fincraService.convert({
                 sourceCurrency: conversion.sourceCurrency,
                 destinationCurrency: conversion.destinationCurrency,
-                amount: Number(conversion.sourceAmount),
+                amount,
                 customerReference,
             });
             await fxConversionRepository.update(conversion.id, {
@@ -124,6 +151,91 @@ class GhsConversionService {
             await fxConversionRepository.update(conversion.id, { lastError: message.slice(0, 500), nextAttemptAt: new Date(now.getTime() + delay * MINUTE) });
             logger.warn("GHS conversion: attempt failed, will retry", { conversionId: conversion.id, attempt, retryInMinutes: delay, error: message });
         }
+    }
+
+    /**
+     * How much to convert. Normally the settled amount; if Fincra's GHS balance
+     * is a little short of it (a fee we didn't see), the balance, so the
+     * conversion isn't refused over a few pesewas. Never more than was settled.
+     */
+    private async convertibleAmount(conversion: FxConversion): Promise<number> {
+        const wanted = round2(Number(conversion.sourceAmount));
+        try {
+            const balance = (await fincraService.getBalances()).find((b) => b.currency === conversion.sourceCurrency);
+            const available = round2(Number(balance?.available) || 0);
+            if (available > 0 && available < wanted && available >= wanted * 0.9) {
+                logger.warn("GHS conversion: balance a little short of the settled amount; converting the balance", { conversionId: conversion.id, wanted, available });
+                return available;
+            }
+            if (available < wanted * 0.9) {
+                throw new FincraError(`Fincra's ${conversion.sourceCurrency} balance is ${available}, short of the ${wanted} to convert (not settled yet?)`, 409, balance);
+            }
+        } catch (error) {
+            if (error instanceof FincraError && error.status === 409) throw error;
+            // Balance unreadable: try the full amount and let Fincra decide
+        }
+        return wanted;
+    }
+
+    /**
+     * The safety net: a credited Fincra GHS receipt from the last few days with
+     * no conversion (the queue step was missed) gets one now.
+     */
+    async queueMissed(now = new Date()): Promise<number> {
+        if (!this.enabled) return 0;
+        const missed = await transactionRepository.listFincraGhsReceiptsWithoutConversion(
+            new Date(now.getTime() - BACKFILL_WINDOW_MS),
+            new Date(now.getTime() - BACKFILL_GRACE_MS),
+        );
+        let queued = 0;
+        for (const transaction of missed) {
+            if (await this.queueCredited(transaction.id)) {
+                queued += 1;
+                logger.warn("GHS conversion: queued a credited receipt that had none", { transactionId: transaction.id, reference: transaction.reference });
+            }
+        }
+        return queued;
+    }
+
+    /** Queues a conversion for a credited GHS receipt that has none; false if it can't */
+    private async queueCredited(transactionId: string): Promise<boolean> {
+        const transaction = await transactionRepository.findById(transactionId);
+        if (!transaction || transaction.status !== "completed" || transaction.fromCurrency !== "GHS") return false;
+        const detail = await transactionDetailRepository.findByTransactionId(transactionId);
+        if (!detail) return false;
+        const ghsAmount = round2(settledGhsFromCheckout(detail.providerPayload, Number(transaction.amount)));
+        if (!(ghsAmount > 0)) return false;
+        const row = await fxConversionRepository.queue({
+            transactionId,
+            provider: WEBHOOK_PROVIDER.FINCRA,
+            sourceCurrency: "GHS",
+            destinationCurrency: "NGN",
+            sourceAmount: ghsAmount,
+            bookedNgn: bookedNgnFor(detail),
+        });
+        return !!row;
+    }
+
+    /**
+     * Admin: convert this receipt now. Queues it if it never was, puts a failed
+     * one back in line (with fresh retries), or checks a started one at Fincra.
+     */
+    async convertNow(transactionId: string): Promise<FxConversion | undefined> {
+        let conversion = await fxConversionRepository.findByTransaction(transactionId);
+        if (!conversion) {
+            if (!(await this.queueCredited(transactionId))) {
+                throw new Error("Only a credited GHS receipt can be converted here");
+            }
+            conversion = await fxConversionRepository.findByTransaction(transactionId);
+        } else if (conversion.status === "failed") {
+            await fxConversionRepository.updateIfStatus(conversion.id, "failed", { status: "pending", attempts: 0, providerReference: null, nextAttemptAt: new Date() });
+            conversion = await fxConversionRepository.findById(conversion.id);
+        } else if (conversion.status === "pending") {
+            await fxConversionRepository.update(conversion.id, { nextAttemptAt: new Date() });
+            conversion = await fxConversionRepository.findById(conversion.id);
+        }
+        if (conversion && (conversion.status === "pending" || conversion.status === "processing")) await this.process(conversion);
+        return fxConversionRepository.findByTransaction(transactionId);
     }
 
     /** Asks Fincra how a started conversion went, and books it when it's done */

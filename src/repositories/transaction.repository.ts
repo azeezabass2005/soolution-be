@@ -1,5 +1,5 @@
 import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, lte, notInArray, sql, type SQL } from "drizzle-orm";
-import { transactionDetails, transactions, users, walletTransactions } from "../db/schema";
+import { fxConversions, transactionDetails, transactions, users, walletTransactions } from "../db/schema";
 import type { Executor } from "../db/client";
 import type { PublicUser, Transaction, TransactionDetail, TransactionView, WalletTransaction } from "../types/entities";
 import type { DetailType, TransactionStatus, WalletTransactionStatus } from "../types/enums";
@@ -416,6 +416,57 @@ class TransactionRepository {
             .map((r) => (r.kind === "transaction" ? views.get(r.id) : funded.get(r.id)))
             .filter((row): row is HistoryRow => !!row);
         return toPage(rows, Number(transactionCount) + Number(fundingCount), window);
+    }
+
+    /** Credited GHS receipts at Fincra, completed between `since` and `before`, that have no conversion */
+    async listFincraGhsReceiptsWithoutConversion(since: Date, before: Date): Promise<Array<{ id: string; reference: string }>> {
+        return exec()
+            .select({ id: transactions.id, reference: transactions.reference })
+            .from(transactions)
+            .leftJoin(fxConversions, eq(fxConversions.transactionId, transactions.id))
+            .where(and(
+                eq(transactions.detailType, "fincra"),
+                eq(transactions.fromCurrency, "GHS"),
+                eq(transactions.currency, "NGN"),
+                eq(transactions.status, "completed"),
+                gte(transactions.completedAt, since),
+                lte(transactions.completedAt, before),
+                isNull(fxConversions.id),
+            ))
+            .limit(50);
+    }
+
+    /** Admin: the latest GHS receipts at Fincra with their conversion, newest first */
+    async listFincraGhsReceipts(limit = 50) {
+        const rows = await exec()
+            .select({
+                id: transactions.id,
+                reference: transactions.reference,
+                status: transactions.status,
+                amount: transactions.amount,
+                createdAt: transactions.createdAt,
+                completedAt: transactions.completedAt,
+                purpose: transactions.purpose,
+                firstName: users.firstName,
+                lastName: users.lastName,
+                email: users.email,
+                creditedNgn: transactionDetails.fromAmount,
+                providerStatus: transactionDetails.providerStatus,
+                conversion: fxConversions,
+            })
+            .from(transactions)
+            .leftJoin(users, eq(users.id, transactions.user))
+            .leftJoin(transactionDetails, eq(transactionDetails.transactionId, transactions.id))
+            .leftJoin(fxConversions, eq(fxConversions.transactionId, transactions.id))
+            .where(and(eq(transactions.detailType, "fincra"), eq(transactions.fromCurrency, "GHS"), eq(transactions.currency, "NGN")))
+            .orderBy(desc(transactions.createdAt))
+            .limit(Math.min(Math.max(limit, 1), 200));
+        return rows.map(({ conversion, ...row }) => ({
+            ...stripNulls(row),
+            amount: toNumber(row.amount),
+            creditedNgn: row.creditedNgn === null ? null : toNumber(row.creditedNgn),
+            conversion: conversion ? stripNulls(conversion) : null,
+        }));
     }
 
     /** Latest transactions with a few owner fields (admin dashboard) */
