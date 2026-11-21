@@ -1,8 +1,8 @@
 import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, lte, notInArray, sql, type SQL } from "drizzle-orm";
-import { transactionDetails, transactions, users } from "../db/schema";
+import { transactionDetails, transactions, users, walletTransactions } from "../db/schema";
 import type { Executor } from "../db/client";
-import type { PublicUser, Transaction, TransactionDetail, TransactionView } from "../types/entities";
-import type { DetailType, TransactionStatus } from "../types/enums";
+import type { PublicUser, Transaction, TransactionDetail, TransactionView, WalletTransaction } from "../types/entities";
+import type { DetailType, TransactionStatus, WalletTransactionStatus } from "../types/enums";
 import { TRANSACTION_STATUS } from "../common/constant";
 import { pageWindow, toPage, type PageRequest, type Paginated } from "../db/pagination";
 import { definedOnly, escapeLike, exec, isUuid, stripNulls, toNumber, upper } from "./utils";
@@ -55,6 +55,44 @@ export interface TransactionListFilter {
     createdTo?: Date;
     /** Matches the reference (case-insensitive, partial) */
     search?: string;
+}
+
+/**
+ * The wallet statuses a funding can be in for a transaction status filter.
+ * undefined means any status; an empty list means no funding matches.
+ */
+function fundingStatuses(status?: string): WalletTransactionStatus[] | undefined {
+    if (!status) return undefined;
+    const map: Record<string, WalletTransactionStatus[]> = {
+        completed: ["successful"],
+        in_progress: ["pending", "processing"],
+        pending: ["pending"],
+        processing: ["processing"],
+        unsuccessful: ["failed", "reversed"],
+        failed: ["failed"],
+    };
+    return (map[status] ?? []) as WalletTransactionStatus[];
+}
+
+/** One row of the history page: a transaction, or a wallet funding shaped like one */
+export type HistoryRow = TransactionView | (Record<string, unknown> & { isFunding: true });
+
+/** A funding in the shape the transaction lists render */
+function fundingAsRow(row: WalletTransaction): HistoryRow {
+    const status = row.status === "successful" ? "completed" : row.status;
+    return {
+        id: row.id,
+        reference: row.reference,
+        fromCurrency: row.currency || "NGN",
+        currency: row.currency || "NGN",
+        amount: toNumber(row.amount as any),
+        detailType: "funding",
+        details: stripNulls({ type: "funding", description: row.description ?? null, fee: row.fee != null ? toNumber(row.fee as any) : null, balanceAfter: toNumber(row.balanceAfter as any) }),
+        status,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        isFunding: true,
+    };
 }
 
 /**
@@ -300,6 +338,59 @@ class TransactionRepository {
             exec().select({ n: count() }).from(transactions).where(where),
         ]);
         return toPage(await this.toViews(rows.map(toTransaction)), Number(n), window);
+    }
+
+    /**
+     * A user's transaction history in one list, newest first: their transactions
+     * plus the bank transfers into their wallet (fundings not tied to a
+     * transaction; a GHS top-up's funding is already its transaction). Both are
+     * paged together in the database, so every page is complete and in order.
+     */
+    async paginateHistory(filter: TransactionListFilter & { user: string }, request: PageRequest): Promise<Paginated<HistoryRow>> {
+        const window = pageWindow(request);
+        if (!isUuid(filter.user)) return toPage([], 0, window);
+
+        const fundingWhere: SQL[] = [
+            eq(walletTransactions.user, filter.user),
+            eq(walletTransactions.type, "funding"),
+            isNull(walletTransactions.transactionId),
+        ];
+        const statuses = fundingStatuses(filter.status);
+        if (statuses) fundingWhere.push(statuses.length ? inArray(walletTransactions.status, statuses) : sql`false`);
+        if (filter.createdFrom) fundingWhere.push(gte(walletTransactions.createdAt, filter.createdFrom));
+        if (filter.createdTo) fundingWhere.push(lte(walletTransactions.createdAt, filter.createdTo));
+        if (filter.search) fundingWhere.push(ilike(walletTransactions.reference, `%${escapeLike(filter.search)}%`));
+        const fundings = and(...fundingWhere);
+        const own = listWhere(filter);
+
+        const page = await exec()
+            .select({ kind: sql<string>`'transaction'`.as("kind"), id: transactions.id, createdAt: transactions.createdAt })
+            .from(transactions)
+            .where(own)
+            .unionAll(
+                exec()
+                    .select({ kind: sql<string>`'funding'`.as("kind"), id: walletTransactions.id, createdAt: walletTransactions.createdAt })
+                    .from(walletTransactions)
+                    .where(fundings)
+            )
+            .orderBy(sql`created_at desc`, sql`id desc`)
+            .limit(window.limit)
+            .offset(window.offset);
+
+        const transactionIds = page.filter((r) => r.kind === "transaction").map((r) => r.id);
+        const fundingIds = page.filter((r) => r.kind === "funding").map((r) => r.id);
+        const [[{ n: transactionCount }], [{ n: fundingCount }], transactionRows, fundingRows] = await Promise.all([
+            exec().select({ n: count() }).from(transactions).where(own),
+            exec().select({ n: count() }).from(walletTransactions).where(fundings),
+            transactionIds.length ? exec().select().from(transactions).where(inArray(transactions.id, transactionIds)) : Promise.resolve([]),
+            fundingIds.length ? exec().select().from(walletTransactions).where(inArray(walletTransactions.id, fundingIds)) : Promise.resolve([]),
+        ]);
+        const views = new Map((await this.toViews(transactionRows.map(toTransaction))).map((v) => [v.id, v as HistoryRow]));
+        const funded = new Map(fundingRows.map((row) => [row.id, fundingAsRow(stripNulls(row) as WalletTransaction)]));
+        const rows = page
+            .map((r) => (r.kind === "transaction" ? views.get(r.id) : funded.get(r.id)))
+            .filter((row): row is HistoryRow => !!row);
+        return toPage(rows, Number(transactionCount) + Number(fundingCount), window);
     }
 
     /** Latest transactions with a few owner fields (admin dashboard) */

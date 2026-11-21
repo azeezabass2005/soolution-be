@@ -2918,6 +2918,12 @@ class TransactionService {
         return transactionRepository.paginateViews({ ...filter, ...(search ? { search } : {}) }, page);
     }
 
+    /** The user's transactions and wallet fundings, paged together */
+    public async listHistory(filter: TransactionListFilter & { user: string }, page: PageRequest, searchTerm?: string) {
+        const search = searchTerm?.trim();
+        return transactionRepository.paginateHistory({ ...filter, ...(search ? { search } : {}) }, page);
+    }
+
     /** A transaction with its details and owner */
     public async findView(transactionId: string): Promise<TransactionView | undefined> {
         return transactionRepository.findViewById(transactionId);

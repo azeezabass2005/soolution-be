@@ -17,6 +17,9 @@ import transactionLimitService from "../../../services/transaction-limit.service
 /** Lagos is UTC+1 all year */
 const WAT_OFFSET_MS = 60 * 60 * 1000;
 
+/** Currencies the bank transfer / mobile money list covers (RMB has its own list) */
+const LISTED_CURRENCIES = ['GHS', 'NGN', 'KES', 'XAF', 'ZAR', 'TZS', 'UGX', 'XOF', 'RWF', 'BWP', 'ZMW', 'MWK'] as const;
+
 class TransactionController extends BaseController {
 
     private transactionService: TransactionService;
@@ -40,6 +43,9 @@ class TransactionController extends BaseController {
 
         // Route to create bank transfer / mobile money transaction (GHS, XAF, KES)
         this.router.post("/bank-transfer", TransactionRateLimitMiddleware.checkTransactionRateLimit, validateCreateBankTransferTransaction, this.createBankTransferTransaction.bind(this));
+
+        // Route for user to get every transaction and wallet funding in one paged list
+        this.router.get("/history", this.getHistory.bind(this));
 
         // Route for user to get alipay transactions
         this.router.get("/alipay", (req: Request, res: Response, next: NextFunction) => this.getAlipayTransactions(req, res, next, false));
@@ -262,6 +268,30 @@ class TransactionController extends BaseController {
         return value;
     }
 
+    /** The signed-in user's history: sends, receives (any currency) and bank transfers into their wallet */
+    private async getHistory(req: Request, res: Response, next: NextFunction) {
+        try {
+            const { page, limit, searchTerm, status, startDate, endDate } = req.query;
+            const filter: TransactionListFilter & { user: string } = {
+                user: res.locals.user?.id,
+                currency: ['RMB', ...LISTED_CURRENCIES],
+            };
+            if (typeof status === 'string' && status && status !== 'all') filter.status = status;
+            const createdAt = this.buildDateRangeFilter(startDate, endDate);
+            filter.createdFrom = createdAt?.from;
+            filter.createdTo = createdAt?.to;
+
+            const history = await this.transactionService.listHistory(
+                filter,
+                { page: parseInt(page as string) || 1, limit: parseInt(limit as string) || 10 },
+                typeof searchTerm === 'string' ? searchTerm : undefined
+            );
+            return this.sendSuccess(res, history);
+        } catch (error: any) {
+            return next(error);
+        }
+    }
+
     private async getAlipayTransactions(req: Request, res: Response, next: NextFunction, isAdmin: boolean) {
         try {
             const { page, limit, searchTerm, status, startDate, endDate } = req.query;
@@ -301,9 +331,7 @@ class TransactionController extends BaseController {
             // Build the filter from a strict whitelist — never pass req.query straight to the database.
             // Bank transfer / YellowCard / OGateway transactions (send and receive); RMB (alipay/wechat)
             // is served by a separate endpoint.
-            const filter: TransactionListFilter = {
-                currency: ['GHS', 'NGN', 'KES', 'XAF', 'ZAR', 'TZS', 'UGX', 'XOF', 'RWF', 'BWP', 'ZMW', 'MWK'],
-            };
+            const filter: TransactionListFilter = { currency: [...LISTED_CURRENCIES] };
 
             // Users see only their own; an admin can narrow to one user (?user=<id>)
             filter.user = isAdmin ? this.adminUserFilter(req.query.user) : user?.id;
