@@ -1401,10 +1401,13 @@ class TransactionService {
             paymentLinkId?: string;
             /** The payer's name and email from the payment link form */
             payer?: { name?: string; email?: string; phone?: string };
+            /** The user paying in from their own mobile money or bank (a top-up), not a payer */
+            topUp?: boolean;
         },
         userId: string,
     ) => {
         const { amount, fromCurrency, toCurrency, destination, idempotencyKey, paymentLinkId } = params;
+        const topUp = params.topUp === true && !paymentLinkId;
 
         if (!amount || amount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
@@ -1474,6 +1477,7 @@ class TransactionService {
         let transactionDetails: any;
         try {
             transaction = await transactionRepository.create({
+            ...(topUp ? { purpose: 'top_up' as const } : {}),
                 ngnValue: txNgnValue ?? undefined,
                 user: userId,
                 reference: sequenceId,

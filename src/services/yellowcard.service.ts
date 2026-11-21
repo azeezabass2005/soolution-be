@@ -20,6 +20,32 @@ export interface YellowCardCountryConfig {
     /** 0 means no maximum */
     receiveMax: number;
     channelTypes: YellowCardChannelType[];
+    /**
+     * When money arrives, per direction and channel type, from YellowCard's
+     * channel settlement times. Missing when the channel list can't be read.
+     */
+    arrival?: { send: Partial<Record<YellowCardChannelType, YellowCardArrival>>; receive: Partial<Record<YellowCardChannelType, YellowCardArrival>> };
+}
+
+/** "minutes": instant settlement; "same_day": within the day; "next_day": T+1 or later */
+export type YellowCardArrival = "minutes" | "same_day" | "next_day";
+
+/**
+ * How soon a channel settles. YellowCard gives a settlementType ("instant",
+ * "T+1", …) and an estimatedSettlementTime in seconds; the slower reading wins.
+ */
+export function channelArrival(channel: { settlementType?: unknown; estimatedSettlementTime?: unknown }): YellowCardArrival {
+    const type = String(channel.settlementType ?? "").toLowerCase().replace(/[\s_-]/g, "");
+    const seconds = Number(channel.estimatedSettlementTime);
+    let fromType: YellowCardArrival | null = null;
+    if (/^t\+?[1-9]|nextday|nextbusinessday|t1/.test(type)) fromType = "next_day";
+    else if (/sameday|t\+?0|t0/.test(type)) fromType = "same_day";
+    else if (type.includes("instant")) fromType = "minutes";
+    let fromTime: YellowCardArrival | null = null;
+    if (Number.isFinite(seconds) && seconds > 0) fromTime = seconds <= 60 * 60 ? "minutes" : seconds < 12 * 60 * 60 ? "same_day" : "next_day";
+    const order: YellowCardArrival[] = ["minutes", "same_day", "next_day"];
+    const picks = [fromType, fromTime].filter((a): a is YellowCardArrival => !!a);
+    return picks.length ? picks.reduce((a, b) => (order.indexOf(b) > order.indexOf(a) ? b : a)) : "minutes";
 }
 
 const COUNTRY_CONFIG_TTL_MS = 5 * 60 * 1000;
@@ -326,6 +352,7 @@ class YellowCardService {
                 channelTypes: (Array.isArray(raw.channelTypes) ? raw.channelTypes : [])
                     .filter((t: unknown): t is YellowCardChannelType => t === "bank" || t === "momo"),
             };
+            value.arrival = await this.arrivalTimes(country, currency).catch(() => undefined);
             this.countryConfigCache.set(key, { at: Date.now(), value });
             return value;
         } catch (error: any) {
@@ -359,7 +386,36 @@ class YellowCardService {
             sendMin: limits(send).min, sendMax: limits(send).max,
             receiveMin: limits(receive).min, receiveMax: limits(receive).max,
             channelTypes: [...new Set(rows.map((c) => c.channelType as YellowCardChannelType))],
+            arrival: this.arrivalFromRows(rows),
         };
+    }
+
+    /** Active channels for a currency, from YellowCard's channel list */
+    private async activeChannels(country: string, currency: string): Promise<any[]> {
+        const data = await this.getChannels(country);
+        return (Array.isArray(data?.channels) ? data.channels : Array.isArray(data) ? data : [])
+            .filter((c: any) => String(c?.currency).toUpperCase() === currency.toUpperCase()
+                && (c?.status ?? "active") === "active" && (c?.apiStatus ?? "active") === "active"
+                && (c?.channelType === "bank" || c?.channelType === "momo"));
+    }
+
+    private async arrivalTimes(country: string, currency: string) {
+        return this.arrivalFromRows(await this.activeChannels(country, currency));
+    }
+
+    /** The slowest active channel of each type sets when money arrives that way */
+    private arrivalFromRows(rows: any[]): NonNullable<YellowCardCountryConfig["arrival"]> {
+        const order: YellowCardArrival[] = ["minutes", "same_day", "next_day"];
+        const pick = (rampType: string) => {
+            const out: Partial<Record<YellowCardChannelType, YellowCardArrival>> = {};
+            for (const c of rows.filter((r) => r.rampType === rampType)) {
+                const type = c.channelType as YellowCardChannelType;
+                const arrival = channelArrival(c);
+                if (!out[type] || order.indexOf(arrival) > order.indexOf(out[type]!)) out[type] = arrival;
+            }
+            return out;
+        };
+        return { send: pick("withdraw"), receive: pick("deposit") };
     }
 
     /**

@@ -45,3 +45,15 @@ describe("YellowCard currencies on offer", () => {
         get.mockRestore();
     });
 });
+
+describe("when YellowCard money arrives", () => {
+    it("reads instant, same-day and next-day settlement", async () => {
+        const { channelArrival } = await import("../src/services/yellowcard.service");
+        expect(channelArrival({ settlementType: "instant", estimatedSettlementTime: 60 })).toBe("minutes");
+        expect(channelArrival({ settlementType: "T+1" })).toBe("next_day");
+        expect(channelArrival({ settlementType: "next_day" })).toBe("next_day");
+        expect(channelArrival({ settlementType: "instant", estimatedSettlementTime: 86_400 })).toBe("next_day");
+        expect(channelArrival({ estimatedSettlementTime: 4 * 60 * 60 })).toBe("same_day");
+        expect(channelArrival({})).toBe("minutes");
+    });
+});
