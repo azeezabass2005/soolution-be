@@ -172,3 +172,22 @@ export const ledgerAlerts = pgTable(
         index("ledger_alerts_unacknowledged_idx").on(t.createdAt).where(sql`${t.acknowledgedAt} is null`),
     ]
 );
+
+/**
+ * What it cost to move money around (rebalancing between providers, buying
+ * USD, bank charges): recorded by admins, taken off gross profit to give net.
+ */
+export const treasuryExpenses = pgTable(
+    "treasury_expenses",
+    {
+        id: id(),
+        amountNgn: decimal("amount_ngn").notNull(),
+        category: text("category").notNull(),
+        note: text("note"),
+        /** The day it happened, YYYY-MM-DD (Lagos) */
+        occurredOn: text("occurred_on").notNull(),
+        createdBy: uuid("created_by"),
+        ...timestamps(),
+    },
+    (t) => [index("treasury_expenses_day_idx").on(t.occurredOn)]
+);

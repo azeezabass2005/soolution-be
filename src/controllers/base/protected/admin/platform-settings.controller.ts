@@ -23,7 +23,7 @@ class AdminPlatformSettingsController extends BaseController {
 
     protected setupRoutes(): void {
         // Anyone who manages a part of these settings can read them; saving checks each part (see put)
-        this.router.use(RoleMiddleware.can('pricing.api_currencies', 'pricing.manual_payments', 'pricing.daily_limits', 'platform_controls', 'dashboard.platform_controls'));
+        this.router.use(RoleMiddleware.can('pricing.api_currencies', 'pricing.manual_payments', 'pricing.daily_limits', 'platform_controls', 'dashboard.platform_controls', 'profit_balances'));
         this.router.get('/', this.get.bind(this));
         // How each YellowCard currency's naira rate is made right now (pricing admins)
         this.router.get('/yellowcard-rates', RoleMiddleware.can('pricing.api_currencies'), this.yellowCardRates.bind(this));
@@ -66,6 +66,7 @@ class AdminPlatformSettingsController extends BaseController {
                 [operations?.pause !== undefined, ['platform_controls', 'dashboard.platform_controls'], 'platform controls'],
                 [operations?.currencies !== undefined, ['platform_controls'], 'which currencies are on'],
                 [operations?.approvals !== undefined, ['platform_controls'], 'the approval limit'],
+                [operations?.liquidity !== undefined, ['profit_balances'], 'low-balance alerts'],
             ];
             for (const [touched, permissions, what] of needs) {
                 if (!touched) continue;

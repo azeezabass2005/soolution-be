@@ -1,4 +1,5 @@
 import transactionRepository from '../repositories/transaction.repository';
+import treasuryService from "../services/treasury.service";
 import walletTransactionRepository from '../repositories/wallet-transaction.repository';
 import ghsConversionService from '../services/ghs-conversion.service';
 import TransactionService from '../services/transaction.service';
@@ -127,6 +128,8 @@ async function convertReceivedGhs(): Promise<number> {
 }
 
 export async function runStaleTransactionSweep(): Promise<void> {
+    // Low provider balances alert the team (at most every 6 hours each)
+    await treasuryService.checkLiquidity().catch((error) => logger.warn('Sweeper: liquidity check failed', { error: error instanceof Error ? error.message : String(error) }));
     const [yc, withdrawals, ghs, ghsAccountsClosed, ghsConversions] = await Promise.all([
         sweepStaleYC(),
         sweepStaleWithdrawals(),

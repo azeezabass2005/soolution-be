@@ -39,11 +39,20 @@ export interface ApprovalsConfig {
     thresholdNgn: number;
 }
 
+/** Alert the team when a provider balance (after payouts already on their way) falls below these; 0 = no alert */
+export interface LiquidityConfig {
+    /** YellowCard's USD balance */
+    yellowcardUsdMin: number;
+    /** Fincra's NGN balance */
+    fincraNgnMin: number;
+}
+
 export interface OperationsConfig {
     manual: ManualConfig;
     pause: PauseConfig;
     currencies: CurrenciesConfig;
     approvals: ApprovalsConfig;
+    liquidity: LiquidityConfig;
 }
 
 export const DEFAULT_OPERATIONS: OperationsConfig = {
@@ -51,6 +60,7 @@ export const DEFAULT_OPERATIONS: OperationsConfig = {
     pause: { payments: false, logins: false, message: "" },
     currencies: { off: [] },
     approvals: { thresholdNgn: 500_000 },
+    liquidity: { yellowcardUsdMin: 0, fincraNgnMin: 0 },
 };
 
 export class OperationsError extends Error {}
@@ -80,14 +90,24 @@ export function withOperationDefaults(stored: unknown): OperationsConfig {
         pause: { ...DEFAULT_OPERATIONS.pause, ...(s.pause ?? {}) },
         currencies: { off: Array.isArray(s.currencies?.off) ? [...s.currencies!.off] : [] },
         approvals: { ...DEFAULT_OPERATIONS.approvals, ...(s.approvals ?? {}) },
+        liquidity: { ...DEFAULT_OPERATIONS.liquidity, ...(s.liquidity ?? {}) },
     };
 }
 
 /** Checks an admin's change and merges it into the current config (throws OperationsError) */
 export function mergeOperations(current: OperationsConfig, patch: unknown): OperationsConfig {
     if (!patch || typeof patch !== "object") throw new OperationsError("Operations settings must be an object");
-    const p = patch as { manual?: Partial<ManualConfig>; pause?: Partial<PauseConfig>; currencies?: Partial<CurrenciesConfig>; approvals?: Partial<ApprovalsConfig> };
-    const next: OperationsConfig = { manual: { ...current.manual }, pause: { ...current.pause }, currencies: { off: [...current.currencies.off] }, approvals: { ...current.approvals } };
+    const p = patch as { manual?: Partial<ManualConfig>; pause?: Partial<PauseConfig>; currencies?: Partial<CurrenciesConfig>; approvals?: Partial<ApprovalsConfig>; liquidity?: Partial<LiquidityConfig> };
+    const next: OperationsConfig = { manual: { ...current.manual }, pause: { ...current.pause }, currencies: { off: [...current.currencies.off] }, approvals: { ...current.approvals }, liquidity: { ...current.liquidity } };
+
+    if (p.liquidity) {
+        for (const key of ["yellowcardUsdMin", "fincraNgnMin"] as const) {
+            if (p.liquidity[key] === undefined) continue;
+            const n = Number(p.liquidity[key]);
+            if (!(n >= 0) || n > 100_000_000_000) throw new OperationsError("Enter a low-balance alert amount (0 turns it off)");
+            next.liquidity[key] = Math.round(n * 100) / 100;
+        }
+    }
 
     if (p.approvals?.thresholdNgn !== undefined) {
         const n = Number(p.approvals.thresholdNgn);

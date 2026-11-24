@@ -127,6 +127,13 @@
       "when": 1795562119830,
       "tag": "0017_support",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795562528248,
+      "tag": "0018_treasury",
+      "breakpoints": true
     }
   ]
 }
