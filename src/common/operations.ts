@@ -34,16 +34,23 @@ export interface CurrenciesConfig {
     off: string[];
 }
 
+/** Large payouts wait for an admin: anything above this (NGN) is held; 0 = off */
+export interface ApprovalsConfig {
+    thresholdNgn: number;
+}
+
 export interface OperationsConfig {
     manual: ManualConfig;
     pause: PauseConfig;
     currencies: CurrenciesConfig;
+    approvals: ApprovalsConfig;
 }
 
 export const DEFAULT_OPERATIONS: OperationsConfig = {
     manual: { rates: {}, days: [1, 2, 3, 4, 5], open: "08:00", close: "20:00", closedDates: [] },
     pause: { payments: false, logins: false, message: "" },
     currencies: { off: [] },
+    approvals: { thresholdNgn: 500_000 },
 };
 
 export class OperationsError extends Error {}
@@ -72,14 +79,21 @@ export function withOperationDefaults(stored: unknown): OperationsConfig {
         manual: { ...DEFAULT_OPERATIONS.manual, ...(s.manual ?? {}) },
         pause: { ...DEFAULT_OPERATIONS.pause, ...(s.pause ?? {}) },
         currencies: { off: Array.isArray(s.currencies?.off) ? [...s.currencies!.off] : [] },
+        approvals: { ...DEFAULT_OPERATIONS.approvals, ...(s.approvals ?? {}) },
     };
 }
 
 /** Checks an admin's change and merges it into the current config (throws OperationsError) */
 export function mergeOperations(current: OperationsConfig, patch: unknown): OperationsConfig {
     if (!patch || typeof patch !== "object") throw new OperationsError("Operations settings must be an object");
-    const p = patch as { manual?: Partial<ManualConfig>; pause?: Partial<PauseConfig>; currencies?: Partial<CurrenciesConfig> };
-    const next: OperationsConfig = { manual: { ...current.manual }, pause: { ...current.pause }, currencies: { off: [...current.currencies.off] } };
+    const p = patch as { manual?: Partial<ManualConfig>; pause?: Partial<PauseConfig>; currencies?: Partial<CurrenciesConfig>; approvals?: Partial<ApprovalsConfig> };
+    const next: OperationsConfig = { manual: { ...current.manual }, pause: { ...current.pause }, currencies: { off: [...current.currencies.off] }, approvals: { ...current.approvals } };
+
+    if (p.approvals?.thresholdNgn !== undefined) {
+        const n = Number(p.approvals.thresholdNgn);
+        if (!(n >= 0) || n > 100_000_000_000) throw new OperationsError("Enter the approval limit in naira (0 turns approvals off)");
+        next.approvals.thresholdNgn = Math.round(n * 100) / 100;
+    }
 
     if (p.manual) {
         const m = p.manual;

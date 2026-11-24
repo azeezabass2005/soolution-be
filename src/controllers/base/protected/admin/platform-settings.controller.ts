@@ -65,6 +65,7 @@ class AdminPlatformSettingsController extends BaseController {
                 [operations?.manual !== undefined, ['pricing.manual_payments'], 'manual payments'],
                 [operations?.pause !== undefined, ['platform_controls', 'dashboard.platform_controls'], 'platform controls'],
                 [operations?.currencies !== undefined, ['platform_controls'], 'which currencies are on'],
+                [operations?.approvals !== undefined, ['platform_controls'], 'the approval limit'],
             ];
             for (const [touched, permissions, what] of needs) {
                 if (!touched) continue;

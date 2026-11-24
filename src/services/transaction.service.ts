@@ -94,6 +94,7 @@ import { CURRENCY_COUNTRY, ycCountryFor } from "../common/payment-link.constants
 import ycRateService, { type YcPrice } from "./yc-rate.service";
 import currencyAccessService from "./currency-access.service";
 import inboxService from "./inbox.service";
+import payoutHoldsService from "./payout-holds.service";
 import { limitProblem } from "../common/pricing";
 
 
@@ -184,6 +185,39 @@ type ManualTransactionInput = {
     alipayNo?: string;
     alipayName?: string;
 };
+
+/** What a YellowCard send needs to be paid out (kept on a held payout until it's approved) */
+export interface YcSendContext {
+    transactionId: string;
+    walletTransactionId: string;
+    walletTxRef: string;
+    userId: string;
+    totalDebit: number;
+    feeAmount: number;
+    walletDebit: number;
+    walletCurrency: string;
+    targetType: "bank" | "momo";
+    destCountry: string;
+    toCurrency: string;
+    sequenceId: string;
+    amount: number;
+    destination: { accountName: string; accountNumber: string; accountType: string; networkId: string; country: string };
+}
+
+/** What a GHS send needs to be paid out by Fincra (kept on a held payout until it's approved) */
+export interface GhsPayoutContext {
+    transactionId: string;
+    walletTransactionId: string;
+    walletTxRef: string;
+    userId: string;
+    reference: string;
+    amount: number;
+    totalDebit: number;
+    isMomo: boolean;
+    senderName?: string;
+    accountName: string;
+    beneficiaryTarget: any;
+}
 
 class TransactionService {
     /** The admin's per-transaction GHS limits, as a 400 the user can act on */
@@ -1139,6 +1173,55 @@ class TransactionService {
             );
         }
 
+        // Everything YellowCard needs, kept so the send can go now or once an admin approves it
+        const ctx: YcSendContext = {
+            transactionId: transaction.id,
+            walletTransactionId: walletTransaction.id,
+            walletTxRef,
+            userId,
+            totalDebit,
+            feeAmount,
+            walletDebit,
+            walletCurrency,
+            targetType,
+            destCountry,
+            toCurrency,
+            sequenceId,
+            amount,
+            destination: {
+                accountName: destination.accountName,
+                accountNumber: destination.accountNumber,
+                accountType: destination.accountType,
+                networkId: network.id,
+                country: destination.country,
+            },
+        };
+
+        // Over the approval limit: the money stays held and YellowCard isn't asked until an admin approves
+        if (await payoutHoldsService.needsApproval(userId, totalDebit)) {
+            await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.AWAITING_APPROVAL as TransactionStatus });
+            await payoutHoldsService.hold({
+                kind: "yellowcard_send", userId, transactionId: transaction.id, walletTransactionId: walletTransaction.id,
+                reference: sequenceId, amountNgn: totalDebit, amount, currency: toCurrency,
+                recipient: destination.accountName, payload: { ctx },
+            });
+            return { ...transaction, status: TRANSACTION_STATUS.AWAITING_APPROVAL, details: transactionDetails };
+        }
+
+        return this.submitYellowCardSend(ctx, kycPerson, transaction, transactionDetails);
+    };
+
+    /**
+     * Asks YellowCard to pay out a send whose money is already taken. On
+     * refusal the send fails and the wallet is refunded, then it throws.
+     */
+    public submitYellowCardSend = async (ctx: YcSendContext, kycPerson: any, transaction: any, transactionDetails: any) => {
+        const { userId, totalDebit, feeAmount, walletDebit, walletCurrency, targetType, destCountry, toCurrency, sequenceId, amount, walletTxRef } = ctx;
+        const destination = ctx.destination;
+        const network = { id: ctx.destination.networkId };
+        const walletTransaction = { id: ctx.walletTransactionId };
+        const wallet = { id: undefined };
+
         let lastError: any = null;
         try {
             const paymentResponse = await yellowCardService.submitPaymentRequest({
@@ -2074,6 +2157,45 @@ class TransactionService {
             throw errorResponseMessage.createError(500, "We couldn't create this transaction. Please try again.", ErrorSeverity.CRITICAL);
         }
 
+        const ghsCtx: GhsPayoutContext = {
+            transactionId: transaction.id,
+            walletTransactionId: walletTransaction.id,
+            walletTxRef: walletTransaction.reference,
+            userId,
+            reference,
+            amount,
+            totalDebit,
+            isMomo,
+            senderName: params.senderName,
+            accountName: destination.accountName,
+            beneficiaryTarget,
+        };
+
+        // Over the approval limit: the money stays held and Fincra isn't asked until an admin approves
+        if (await payoutHoldsService.needsApproval(userId, totalDebit)) {
+            await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.AWAITING_APPROVAL as TransactionStatus });
+            await payoutHoldsService.hold({
+                kind: "ghs_send", userId, transactionId: transaction.id, walletTransactionId: walletTransaction.id,
+                reference, amountNgn: totalDebit, amount, currency: "GHS", recipient: destination.accountName,
+                payload: { ctx: ghsCtx },
+            });
+            return { ...transaction, status: TRANSACTION_STATUS.AWAITING_APPROVAL, details: transactionDetails };
+        }
+
+        return this.submitGhsPayout(ghsCtx, transaction, transactionDetails, { reference: quote.reference, sourceNgn: quoteSourceNgn });
+    };
+
+    /**
+     * Asks Fincra to pay out a GHS send whose money is already taken. Without a
+     * quote (an approved hold, minutes later) it gets a fresh one, and if
+     * Fincra now costs more than the user paid, the send is refunded instead.
+     */
+    public submitGhsPayout = async (ctx: GhsPayoutContext, transaction: any, transactionDetails: any, givenQuote?: { reference: string; sourceNgn: number }) => {
+        const { reference, amount, isMomo, beneficiaryTarget, totalDebit } = ctx;
+        const params = { senderName: ctx.senderName };
+        const destination = { accountName: ctx.accountName };
+        const walletTransaction = { id: ctx.walletTransactionId, reference: ctx.walletTxRef };
+
         const failAndRefund = async (message: string) => {
             await transactionRepository.update(transaction.id, { status: TRANSACTION_STATUS.FAILED, failedAt: new Date() });
             await transactionDetailRepository.updateByTransactionId(transaction.id, { providerStatus: 'failed' });
@@ -2081,6 +2203,25 @@ class TransactionService {
             logger.error("GHS payout rejected", { transactionId: transaction.id, providerMessage: message });
             throw errorResponseMessage.createError(400, `${providerFailureMessage(message, "send")} Your wallet has not been charged.`, ErrorSeverity.HIGH, { code: "PROVIDER_REJECTED" });
         };
+
+        let quote = givenQuote;
+        if (!quote) {
+            try {
+                const fresh = await fincraService.quote({
+                    sourceCurrency: 'NGN', destinationCurrency: 'GHS', amount, action: 'receive', transactionType: 'disbursement',
+                    paymentDestination: isMomo ? 'mobile_money_wallet' : 'bank_account',
+                });
+                const cost = Math.round(Number(fresh.amountToCharge ?? fresh.sourceAmount) * 100) / 100;
+                if (!(Number(fresh.sourceAmount) > 0) || !(cost > 0)) return failAndRefund("We couldn't get a rate for this payout");
+                if (cost > totalDebit) return failAndRefund("The exchange rate moved past what was paid");
+                await transactionDetailRepository.updateByTransactionId(transaction.id, { providerQuoteReference: fresh.reference, providerCost: cost });
+                quote = { reference: fresh.reference, sourceNgn: Number(fresh.sourceAmount) };
+            } catch (error: any) {
+                if (error?.response_code) throw error;
+                return failAndRefund(error?.message || "We couldn't get a rate for this payout");
+            }
+        }
+        const quoteSourceNgn = quote.sourceNgn;
 
         try {
             const payout = await fincraService.createPayout({

@@ -189,6 +189,8 @@ export const TRANSACTION_STATUS = {
     AWAITING_KYC_VERIFICATION: "awaiting_kyc_verification",
     PROCESSING: "processing",
     COMPLETED: "completed",
+    // Over the approval limit: paid for, waiting for an admin before the provider is asked
+    AWAITING_APPROVAL: "awaiting_approval",
 };
 
 export const PAYMENT_METHOD = {

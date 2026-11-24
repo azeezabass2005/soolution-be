@@ -64,6 +64,8 @@ class UserController extends BaseController {
         this.router.patch("/:id/controls", RoleMiddleware.can("users.account_controls", "users.daily_limit"), this.updateControls.bind(this));
         // Currencies turned off for one user (super admins: platform controls)
         this.router.put("/:id/currencies", RoleMiddleware.can("platform_controls"), this.setUserCurrencies.bind(this));
+        // Large-payout approvals for one user: exempt, or their own limit (super admins: platform controls)
+        this.router.put("/:id/approval", RoleMiddleware.can("platform_controls"), this.setUserApproval.bind(this));
     }
 
     private async changePassword(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -196,6 +198,8 @@ class UserController extends BaseController {
                     stats: stats.get(user.id) ?? null,
                     duplicateCount: duplicates.get(user.id)?.length ?? 0,
                     disabledCurrencies: user.disabledCurrencies ?? [],
+                    approvalExempt: user.approvalExempt ?? false,
+                    approvalThresholdNgn: user.approvalThresholdNgn ?? null,
                 });
             });
 
@@ -208,7 +212,7 @@ class UserController extends BaseController {
                 else if (row.stats && !can("users.cards")) row.stats = { balanceNgn: row.stats.balanceNgn };
                 if (!can("users.repeat_signups")) delete row.duplicateCount;
                 if (!can("users.account_controls")) { delete row.freeze; }
-                if (!can("platform_controls")) delete row.disabledCurrencies;
+                if (!can("platform_controls")) { delete row.disabledCurrencies; delete row.approvalExempt; delete row.approvalThresholdNgn; }
                 return row;
             });
 
@@ -257,6 +261,30 @@ class UserController extends BaseController {
             transactions: can("users.transactions") ? overview.transactions : null,
             walletEntries: can("users.wallet_activity") ? overview.walletEntries : null,
         };
+    }
+
+    private async setUserApproval(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const target = await userRepository.findById(String(req.params.id));
+            if (!target) return next(errorResponseMessage.resourceNotFound("User"));
+            const body = req.body ?? {};
+            const patch: { approvalExempt?: boolean; approvalThresholdNgn?: number | null } = {};
+            if (body.exempt !== undefined) patch.approvalExempt = Boolean(body.exempt);
+            if (body.thresholdNgn !== undefined) {
+                if (body.thresholdNgn === null || body.thresholdNgn === "") patch.approvalThresholdNgn = null;
+                else {
+                    const n = Number(body.thresholdNgn);
+                    if (!(n > 0) || n > 100_000_000_000) return next(errorResponseMessage.createError(400, "Enter this user's approval limit in naira, or leave it empty for the platform's", ErrorSeverity.LOW));
+                    patch.approvalThresholdNgn = Math.round(n * 100) / 100;
+                }
+            }
+            if (!Object.keys(patch).length) return next(errorResponseMessage.createError(400, "Nothing to change", ErrorSeverity.LOW));
+            const updated = await userRepository.update(target.id, patch);
+            logger.info("Admin changed a user's payout approvals", { adminId: res.locals.user?.id, userId: target.id, change: patch });
+            return this.sendSuccess(res, { id: target.id, approvalExempt: updated?.approvalExempt ?? false, approvalThresholdNgn: updated?.approvalThresholdNgn ?? null });
+        } catch (error) {
+            return next(error);
+        }
     }
 
     private async setUserCurrencies(req: Request, res: Response, next: NextFunction): Promise<void> {

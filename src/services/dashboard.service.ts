@@ -13,7 +13,7 @@ const num = (v: unknown) => Math.round((Number(v) || 0) * 100) / 100;
 export const MANUAL_DETAIL_TYPES = [DETAIL_TYPE.ALIPAY, DETAIL_TYPE.WECHAT, DETAIL_TYPE.BANK_TRANSFER, DETAIL_TYPE.MOBILE_MONEY];
 
 /** Not finished yet: waiting on the user, on us, or on a provider */
-export const IN_PROGRESS_STATUSES = ["pending", "pending_input", "awaiting_confirmation", "awaiting_kyc_verification", "processing"] as TransactionStatus[];
+export const IN_PROGRESS_STATUSES = ["pending", "pending_input", "awaiting_confirmation", "awaiting_kyc_verification", "processing", "awaiting_approval"] as TransactionStatus[];
 
 /** Naira in and out of user wallets, from the wallet ledger (successful NGN entries) */
 export interface WalletFlows {

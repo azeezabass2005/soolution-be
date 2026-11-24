@@ -30,6 +30,7 @@ import paymentLinkController from "../../controllers/base/protected/payment-link
 import bankController from "../../controllers/base/protected/bank.controller";
 import adminTeamController from "../../controllers/base/protected/admin/team.controller";
 import notificationsController from "../../controllers/base/protected/notifications.controller";
+import adminApprovalsController from "../../controllers/base/protected/admin/approvals.controller";
 import adminInviteController from "../../controllers/base/protected/admin-invite.controller";
 
 const path = "/protected";
@@ -78,6 +79,7 @@ protectedRouter.use(`${path}/admin/daya`, adminDayaController);
 protectedRouter.use(`${path}/admin/hyperrails`, adminHyperRailsController);
 protectedRouter.use(`${path}/admin/insights`, adminInsightsController);
 protectedRouter.use(`${path}/admin/team`, adminTeamController);
+protectedRouter.use(`${path}/admin/approvals`, adminApprovalsController);
 // Any signed-in account: accept an invitation to the admin team
 protectedRouter.use(`${path}/admin-invites`, adminInviteController);
 protectedRouter.use(`${path}/kyc`, kycController);

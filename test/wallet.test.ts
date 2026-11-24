@@ -182,6 +182,35 @@ describe("WalletService", () => {
     });
 
     describe("withdrawals (Fincra NGN payouts)", () => {
+        it("holds a withdrawal over the approval limit until an admin decides, and a rejection gives the money back", async () => {
+            const { default: approvalService } = await import("../src/services/approval.service");
+            const ADMIN_ID = "00000000-0000-4000-8000-000000000001";
+            await platformSettingsService.updateSettings({ operations: { approvals: { thresholdNgn: 3_000 } } }, ADMIN_ID);
+            const user = await createUser();
+            await fundWallet(user.id, 10_000);
+            const withdrawal = await walletService.initiateWithdrawal(user.id, 4000, "058", "0123456789", "Ada Lovelace", TEST_PIN);
+            expect(fincra.createPayout).not.toHaveBeenCalled();
+            expect(withdrawal.status).toBe("pending");
+            expect(await walletBalance(user.id)).toBe(6000);
+            // The status check doesn't refund a held withdrawal however long it waits
+            expect((await walletService.verifyAndUpdateTransfer(user.id, withdrawal.id)).message).toBe("Waiting for approval");
+
+            const [hold] = await approvalService.list("pending");
+            expect(hold).toMatchObject({ kind: "withdrawal", reference: withdrawal.reference, amountNgn: 4000 });
+            await approvalService.reject(hold.id, ADMIN_ID, "Unusual activity");
+            expect(await walletBalance(user.id)).toBe(10_000);
+            expect(await accountBalance(NGN_INFLIGHT)).toBe(0);
+
+            // Approved: sent to Fincra as it would have been at once
+            const second = await walletService.initiateWithdrawal(user.id, 4000, "058", "0123456789", "Ada Lovelace", TEST_PIN);
+            fincra.createPayout.mockResolvedValue({ reference: "FP_H", status: "processing" });
+            const [next] = await approvalService.list("pending");
+            expect(await approvalService.approve(next.id, ADMIN_ID)).toMatchObject({ outcome: "approved" });
+            expect(fincra.createPayout).toHaveBeenCalledWith(expect.objectContaining({ customerReference: second.reference, amount: 4000 }));
+            expect((await walletTransactionRepository.findById(second.id))?.status).toBe("processing");
+            await platformSettingsService.updateSettings({ operations: { approvals: { thresholdNgn: 500_000 } } }, ADMIN_ID);
+        });
+
         it("debits, pays out with our reference, then settles once on payout.successful", async () => {
             const user = await createUser();
             await fundWallet(user.id, 10_000);

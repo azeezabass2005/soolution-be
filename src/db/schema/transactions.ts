@@ -270,3 +270,33 @@ export const fxConversions = pgTable(
         index("fx_conversions_due_idx").on(t.status, t.nextAttemptAt),
     ]
 );
+
+/**
+ * Large payouts waiting for an admin: the money is already taken from the
+ * user's wallet, the provider hasn't been asked. `payload` holds what's
+ * needed to send it once approved.
+ */
+export const payoutHolds = pgTable(
+    "payout_holds",
+    {
+        id: id(),
+        kind: text("kind").$type<"yellowcard_send" | "ghs_send" | "withdrawal">().notNull(),
+        user: uuid("user_id").notNull().references(() => users.id),
+        transactionId: uuid("transaction_id"),
+        walletTransactionId: uuid("wallet_transaction_id"),
+        reference: text("reference").notNull(),
+        /** Naira value, compared with the approval limit */
+        amountNgn: decimal("amount_ngn").notNull(),
+        /** What the recipient gets, in their currency */
+        amount: decimal("amount").notNull(),
+        currency: text("currency").notNull(),
+        recipient: text("recipient"),
+        payload: jsonb("payload").$type<Record<string, any>>().notNull(),
+        status: text("status").$type<"pending" | "approving" | "approved" | "rejected" | "failed">().notNull().default("pending"),
+        decidedBy: uuid("decided_by"),
+        decidedAt: timestamptz("decided_at"),
+        note: text("note"),
+        ...timestamps(),
+    },
+    (t) => [index("payout_holds_status_idx").on(t.status, t.createdAt)]
+);

@@ -107,6 +107,28 @@ describe("YellowCard currencies priced like GHS", () => {
         expect(row).toMatchObject({ profitNgn: 0, volumeNgn: 1000, profitPercent: 0, userRate: 10, providerRate: 10 });
     });
 
+    it("holds a YellowCard send over the approval limit and only asks YellowCard once approved", async () => {
+        const { default: approvalService } = await import("../src/services/approval.service");
+        await platformSettingsService.updateSettings({ operations: { approvals: { thresholdNgn: 500 } } }, ADMIN);
+        const service = new TransactionService();
+        const user = await createUser();
+        await fundWallet(user.id, 50_000);
+        const yc: any = (await import("../src/services/yellowcard.service")).default;
+        yc.submitPaymentRequest.mockClear();
+        yc.submitPaymentRequest.mockResolvedValue({ id: "pay-h", channelId: "ch-1", status: "processing" });
+        const held: any = await service.createYellowCardTransaction({
+            amount: 100, fromCurrency: "NGN", toCurrency: "KES", pin: TEST_PIN,
+            destination: { accountName: "Wanjiru", accountNumber: "+254712345678", accountType: "momo", country: "KE", network: "Mpesa" },
+        } as any, user.id);
+        expect(held.status).toBe("awaiting_approval");
+        expect(yc.submitPaymentRequest).not.toHaveBeenCalled();
+        const [hold] = await approvalService.list("pending");
+        expect(await approvalService.approve(hold.id, ADMIN)).toMatchObject({ outcome: "approved" });
+        expect(yc.submitPaymentRequest).toHaveBeenCalledWith(expect.objectContaining({ sequenceId: held.reference, localAmount: 100, currency: "KES" }));
+        const [tx] = await exec().select().from(transactions).where((await import("drizzle-orm")).eq(transactions.id, held.id));
+        expect(tx.status).toBe("processing");
+    });
+
     it("turns currencies off for everyone or one user, and hides them from the user", async () => {
         const user = await createUser();
         await currencyAccessService.assertOn(user.id, "KES");

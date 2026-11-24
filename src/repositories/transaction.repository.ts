@@ -112,7 +112,7 @@ function fundingAsRow(row: WalletTransaction): HistoryRow {
  * "in_progress" is anything not finished yet, "unsuccessful" is failed or cancelled.
  */
 const STATUS_GROUPS: Record<string, TransactionStatus[]> = {
-    in_progress: ["pending", "pending_input", "awaiting_confirmation", "awaiting_kyc_verification", "processing"] as TransactionStatus[],
+    in_progress: ["pending", "pending_input", "awaiting_confirmation", "awaiting_kyc_verification", "processing", "awaiting_approval"] as TransactionStatus[],
     unsuccessful: ["failed", "cancelled"] as TransactionStatus[],
 };
 

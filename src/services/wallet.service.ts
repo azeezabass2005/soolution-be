@@ -1,4 +1,5 @@
 import type { Executor } from "../db/client";
+import payoutHoldsService from "./payout-holds.service";
 import { lockKey, withTransaction } from "../db/transaction";
 import { isUniqueViolation } from "../db/errors";
 import walletRepository from "../repositories/wallet.repository";
@@ -98,6 +99,21 @@ const WITHDRAWAL_SETTLED = [
     WALLET_TRANSACTION_STATUS.FAILED as "failed",
     WALLET_TRANSACTION_STATUS.REVERSED as "reversed",
 ];
+
+/** What a withdrawal needs to be paid out (kept on a held payout until it's approved) */
+export interface WithdrawalPayoutContext {
+    walletId: string;
+    userId: string;
+    amount: number;
+    fee: number;
+    charge: number;
+    bankCode: string;
+    accountNumber: string;
+    accountName: string;
+    reference: string;
+    userAccountCode: string;
+    initTxGroupId: string;
+}
 
 class WalletService {
     private walletTransactionService: WalletTransactionService;
@@ -636,79 +652,19 @@ class WalletService {
             return { walletTransaction: created, initTxGroupId: post.txGroupId };
         });
 
-        // Fincra is called OUTSIDE the transaction — the balance is already debited.
-        // Our reference is the payout's customerReference, so it can't be paid twice.
-        try {
-            const payout = await fincraService.createPayout({
-                customerReference: reference,
-                sourceCurrency: "NGN",
-                destinationCurrency: "NGN",
-                amount,
-                paymentDestination: "bank_account",
-                description: `Wallet withdrawal ${reference}`,
-                beneficiary: {
-                    ...splitName(accountName),
-                    accountHolderName: accountName,
-                    accountNumber,
-                    bankCode,
-                    country: "NG",
-                },
-            });
-            await walletTransactionRepository.update(walletTransaction.id, {
-                status: WALLET_TRANSACTION_STATUS.PROCESSING,
-                paystackTransferCode: payout.reference ? String(payout.reference) : reference,
-            });
-        } catch (providerError: any) {
-            // A timeout or server error may still have created the payout: ask
-            // Fincra before refunding, so a payout that went out isn't refunded too
-            if (!definitelyRejected(providerError)) {
-                const existing = await fincraService.getPayout(reference).catch(() => undefined);
-                if (existing !== null) {
-                    logger.warn("Fincra payout outcome unclear; left processing for the sweeper", { reference, error: providerError?.message });
-                    await walletTransactionRepository.update(walletTransaction.id, {
-                        status: WALLET_TRANSACTION_STATUS.PROCESSING,
-                        ...(existing?.reference ? { paystackTransferCode: String(existing.reference) } : {}),
-                    });
-                    return walletTransaction;
-                }
-            }
+        const payoutCtx: WithdrawalPayoutContext = { walletId: wallet.id, userId, amount, fee, charge, bankCode, accountNumber, accountName, reference, userAccountCode, initTxGroupId };
 
-            logger.error("Fincra payout failed, reversing balance", { reference, error: providerError?.message, fincra: providerError?.fincra });
-            try {
-                await withTransaction(async (tx) => {
-                    await walletRepository.credit(wallet.id, charge, tx);
-                    await ledgerService.post({
-                        legs: withdrawalLegs(userAccountCode, amount, fee, "reverse"),
-                        source: JOURNAL_SOURCE.REVERSAL,
-                        reference,
-                        description: `Reversal — payout initiation failed`,
-                        metadata: { reverses: initTxGroupId },
-                        tx,
-                    });
-                    await walletTransactionRepository.update(
-                        walletTransaction.id,
-                        {
-                            status: WALLET_TRANSACTION_STATUS.FAILED,
-                            failureReason: withoutProviderName(providerError?.message, "Transfer initiation failed"),
-                        },
-                        tx
-                    );
-                });
-            } catch (reverseError) {
-                logger.error("Reversal of failed payout initiation also failed", { reference, error: (reverseError as any)?.message });
-                throw reverseError;
-            }
-
-            const providerMessage: string = providerError?.message || "";
-            if (/resolve|invalid account|account number|beneficiary|bank code/i.test(providerMessage)) {
-                throw errorResponseMessage.createError(
-                    400,
-                    "The bank couldn't confirm this account. Check the account number and bank, then try again. Your balance has not been charged.",
-                    ErrorSeverity.MEDIUM
-                );
-            }
-            throw errorResponseMessage.createError(500, "We couldn't send this withdrawal right now. Your balance has not been charged. Please try again shortly.", ErrorSeverity.HIGH);
+        // Over the approval limit: the money stays held and Fincra isn't asked until an admin approves
+        if (await payoutHoldsService.needsApproval(userId, charge)) {
+            await payoutHoldsService.hold({
+                kind: "withdrawal", userId, walletTransactionId: walletTransaction.id, reference,
+                amountNgn: charge, amount, currency: "NGN", recipient: `${accountName} (${accountNumber})`,
+                payload: { ctx: payoutCtx },
+            });
+            return walletTransaction;
         }
+
+        await this.sendWithdrawalPayout(walletTransaction, payoutCtx);
 
         logger.info("Withdrawal initiated", { walletId: wallet.id, amount, reference });
 
@@ -912,6 +868,89 @@ class WalletService {
         }
     }
 
+    /**
+     * Asks Fincra to pay out a withdrawal whose money is already taken. If
+     * Fincra refuses, the balance and journal are reversed and it throws.
+     */
+    async sendWithdrawalPayout(walletTransaction: { id: string }, ctx: WithdrawalPayoutContext): Promise<void> {
+        const { walletId, amount, fee, charge, bankCode, accountNumber, accountName, reference, userAccountCode, initTxGroupId } = ctx;
+        const wallet = { id: walletId };
+        // Fincra is called OUTSIDE the transaction — the balance is already debited.
+        // Our reference is the payout's customerReference, so it can't be paid twice.
+        try {
+            const payout = await fincraService.createPayout({
+                customerReference: reference,
+                sourceCurrency: "NGN",
+                destinationCurrency: "NGN",
+                amount,
+                paymentDestination: "bank_account",
+                description: `Wallet withdrawal ${reference}`,
+                beneficiary: {
+                    ...splitName(accountName),
+                    accountHolderName: accountName,
+                    accountNumber,
+                    bankCode,
+                    country: "NG",
+                },
+            });
+            await walletTransactionRepository.update(walletTransaction.id, {
+                status: WALLET_TRANSACTION_STATUS.PROCESSING,
+                paystackTransferCode: payout.reference ? String(payout.reference) : reference,
+            });
+        } catch (providerError: any) {
+            // A timeout or server error may still have created the payout: ask
+            // Fincra before refunding, so a payout that went out isn't refunded too
+            if (!definitelyRejected(providerError)) {
+                const existing = await fincraService.getPayout(reference).catch(() => undefined);
+                if (existing !== null) {
+                    logger.warn("Fincra payout outcome unclear; left processing for the sweeper", { reference, error: providerError?.message });
+                    await walletTransactionRepository.update(walletTransaction.id, {
+                        status: WALLET_TRANSACTION_STATUS.PROCESSING,
+                        ...(existing?.reference ? { paystackTransferCode: String(existing.reference) } : {}),
+                    });
+                    return;
+                }
+            }
+
+            logger.error("Fincra payout failed, reversing balance", { reference, error: providerError?.message, fincra: providerError?.fincra });
+            try {
+                await withTransaction(async (tx) => {
+                    await walletRepository.credit(wallet.id, charge, tx);
+                    await ledgerService.post({
+                        legs: withdrawalLegs(userAccountCode, amount, fee, "reverse"),
+                        source: JOURNAL_SOURCE.REVERSAL,
+                        reference,
+                        description: `Reversal — payout initiation failed`,
+                        metadata: { reverses: initTxGroupId },
+                        tx,
+                    });
+                    await walletTransactionRepository.update(
+                        walletTransaction.id,
+                        {
+                            status: WALLET_TRANSACTION_STATUS.FAILED,
+                            failureReason: withoutProviderName(providerError?.message, "Transfer initiation failed"),
+                        },
+                        tx
+                    );
+                });
+            } catch (reverseError) {
+                logger.error("Reversal of failed payout initiation also failed", { reference, error: (reverseError as any)?.message });
+                throw reverseError;
+            }
+
+            const providerMessage: string = providerError?.message || "";
+            if (/resolve|invalid account|account number|beneficiary|bank code/i.test(providerMessage)) {
+                throw errorResponseMessage.createError(
+                    400,
+                    "The bank couldn't confirm this account. Check the account number and bank, then try again. Your balance has not been charged.",
+                    ErrorSeverity.MEDIUM
+                );
+            }
+            throw errorResponseMessage.createError(500, "We couldn't send this withdrawal right now. Your balance has not been charged. Please try again shortly.", ErrorSeverity.HIGH);
+        }
+
+    }
+
     // ===================== TRANSFER VERIFICATION (Polling fallback) =====================
 
     /**
@@ -928,6 +967,11 @@ class WalletService {
             walletTx.status === WALLET_TRANSACTION_STATUS.REVERSED
         ) {
             return { transaction: walletTx, message: `Transaction already ${walletTx.status}` };
+        }
+
+        // Held for approval: Fincra hasn't been asked yet, so there's nothing to check (and nothing to refund)
+        if (walletTx.status === WALLET_TRANSACTION_STATUS.PENDING && (await payoutHoldsService.isHeld(walletTx.id))) {
+            return { transaction: walletTx, message: "Waiting for approval" };
         }
 
         let payout: any;

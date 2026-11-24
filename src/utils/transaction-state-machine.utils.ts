@@ -40,6 +40,12 @@ class TransactionStateMachine {
             TRANSACTION_STATUS.FAILED,
             TRANSACTION_STATUS.CANCELLED
         ],
+        // Held for an admin: approving sends it (back to pending, then on), rejecting fails it
+        [TRANSACTION_STATUS.AWAITING_APPROVAL]: [
+            TRANSACTION_STATUS.PENDING,
+            TRANSACTION_STATUS.FAILED,
+            TRANSACTION_STATUS.CANCELLED
+        ],
         [TRANSACTION_STATUS.COMPLETED]: [], // Terminal state - no transitions allowed
         [TRANSACTION_STATUS.SUCCESSFUL]: [], // Terminal state - no transitions allowed
         [TRANSACTION_STATUS.FAILED]: [], // Terminal state - no transitions allowed

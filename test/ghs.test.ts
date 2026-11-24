@@ -777,4 +777,68 @@ describe("GHS through Fincra", () => {
             expect(fincra.createCheckout).not.toHaveBeenCalled();
         });
     });
+
+    describe("large sends held for an admin", () => {
+        const ADMIN_ID = "00000000-0000-4000-8000-000000000001";
+        const limitTo = async (thresholdNgn: number) => {
+            const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
+            await platformSettingsService.updateSettings({ operations: { approvals: { thresholdNgn } } }, ADMIN_ID);
+        };
+
+        it("holds a send over the limit (money taken, Fincra not asked), then sends it with a fresh quote when approved", async () => {
+            const { default: approvalService } = await import("../src/services/approval.service");
+            await limitTo(5_000);
+            const user = await createUser();
+            await fundWallet(user.id, 50_000);
+            const held: any = await send(user.id);
+            expect(held.status).toBe("awaiting_approval");
+            expect(await walletBalance(user.id)).toBe(39_850);
+            expect(fincra.createPayout).not.toHaveBeenCalled();
+
+            const [hold] = await approvalService.list("pending");
+            expect(hold).toMatchObject({ kind: "ghs_send", reference: held.reference, currency: "GHS", amountNgn: 10_150, user: { id: user.id } });
+
+            fincra.quote.mockResolvedValueOnce({ reference: "q-fresh", sourceAmount: 9_950, destinationAmount: 100, amountToCharge: 10_000 });
+            fincra.createPayout.mockResolvedValue({ reference: "FP_GH_H", status: "processing" });
+            expect(await approvalService.approve(hold.id, ADMIN_ID)).toMatchObject({ outcome: "approved" });
+            expect(fincra.createPayout).toHaveBeenCalledWith(expect.objectContaining({ customerReference: held.reference, quoteReference: "q-fresh", amount: 9_950 }));
+            expect((await transactionRepository.findById(held.id))?.status).toBe("processing");
+            // Decided once only
+            await expect(approvalService.approve(hold.id, ADMIN_ID)).rejects.toMatchObject({ response_code: 409 });
+        });
+
+        it("refunds instead of sending when the rate has moved past what the user paid", async () => {
+            const { default: approvalService } = await import("../src/services/approval.service");
+            await limitTo(5_000);
+            const user = await createUser();
+            await fundWallet(user.id, 50_000);
+            const held: any = await send(user.id);
+            const [hold] = await approvalService.list("pending");
+            fincra.quote.mockResolvedValueOnce({ reference: "q-dear", sourceAmount: 10_500, destinationAmount: 100, amountToCharge: 10_600 });
+            expect(await approvalService.approve(hold.id, ADMIN_ID)).toMatchObject({ outcome: "failed" });
+            expect(fincra.createPayout).not.toHaveBeenCalled();
+            expect(await walletBalance(user.id)).toBe(50_000);
+            expect((await transactionRepository.findById(held.id))?.status).toBe("failed");
+        });
+
+        it("refunds a rejected send with the reason, and leaves exempt users and smaller sends alone", async () => {
+            const { default: approvalService } = await import("../src/services/approval.service");
+            const { default: userRepository } = await import("../src/repositories/user.repository");
+            await limitTo(5_000);
+            const user = await createUser();
+            await fundWallet(user.id, 50_000);
+            const held: any = await send(user.id);
+            const [hold] = await approvalService.list("pending");
+            await expect(approvalService.reject(hold.id, ADMIN_ID, "")).rejects.toMatchObject({ response_code: 400 });
+            expect(await approvalService.reject(hold.id, ADMIN_ID, "Recipient looks wrong")).toMatchObject({ outcome: "rejected" });
+            expect(await walletBalance(user.id)).toBe(50_000);
+            expect(await transactionRepository.findById(held.id)).toMatchObject({ status: "failed", cancelReason: "Recipient looks wrong" });
+
+            fincra.createPayout.mockResolvedValue({ reference: "FP_GH_X", status: "processing" });
+            await userRepository.update(user.id, { approvalExempt: true });
+            expect(((await send(user.id)) as any).status).toBe("processing");
+            await userRepository.update(user.id, { approvalExempt: false, approvalThresholdNgn: 100_000 });
+            expect(((await send(user.id)) as any).status).toBe("processing");
+        });
+    });
 });
