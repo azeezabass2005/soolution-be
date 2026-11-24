@@ -62,6 +62,20 @@ export interface FundingPricing extends FeePricing {
     customerFee: FeeRule;
 }
 
+/**
+ * The naira-per-USD used to price YellowCard currencies. YellowCard quotes
+ * every currency against USD and settles with us in USD, so a KES price is
+ * (NGN per USD) / (KES per USD). "yellowcard" uses YellowCard's own NGN rate;
+ * "ours" uses the rates we actually buy and sell USD at.
+ */
+export interface UsdPricing {
+    mode: "yellowcard" | "ours";
+    /** NGN we pay for 1 USD (sends: we buy USD to pay out) */
+    buyNgn: number;
+    /** NGN we get for 1 USD (receives: we sell the USD collected) */
+    sellNgn: number;
+}
+
 export interface PricingConfig {
     /** Deposits into the user's NGN account number */
     funding: { NGN: FundingPricing };
@@ -71,9 +85,13 @@ export interface PricingConfig {
     send: Record<string, FxPricing>;
     /** Someone pays the foreign currency, the user gets NGN. Key: "GHS-NGN" */
     receive: Record<string, FxPricing>;
+    /** The USD rate behind YellowCard currencies */
+    usd: UsdPricing;
 }
 
-export type PricedOperation = keyof PricingConfig;
+export type PricedOperation = Exclude<keyof PricingConfig, "usd">;
+
+export const DEFAULT_USD: UsdPricing = { mode: "yellowcard", buyNgn: 0, sellNgn: 0 };
 
 export const ZERO_FEE: FeeRule = { percent: 0, fixed: 0, min: 0, cap: 0 };
 export const ZERO_RATE: RateRule = { percent: 0, fixed: 0 };
@@ -94,6 +112,7 @@ export const DEFAULT_PRICING: PricingConfig = {
     withdrawal: { NGN: { providerFee: { ...ZERO_FEE }, platformFee: { ...ZERO_FEE } } },
     send: { "NGN-GHS": { providerFee: { percent: 1.5, fixed: 0, min: 0, cap: 0 }, platformFee: { ...ZERO_FEE }, rate: { ...ZERO_RATE }, feeCurrency: "GHS", limits: { ...NO_LIMITS } } },
     receive: { "GHS-NGN": { providerFee: { percent: 1.5, fixed: 0, min: 0, cap: 0 }, platformFee: { ...ZERO_FEE }, rate: { ...ZERO_RATE }, feeCurrency: "GHS", limits: { ...NO_LIMITS } } },
+    usd: { ...DEFAULT_USD },
 };
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -174,6 +193,8 @@ export function applyRateRule(rule: RateRule | undefined, providerRate: number, 
 const MAX_PERCENT = 50;
 const MAX_NGN = 100_000_000;
 const MAX_LIMIT = 1_000_000_000;
+/** No naira rate for 1 USD is anywhere near this */
+const MAX_USD_NGN = 100_000;
 
 export class PricingError extends Error {}
 
@@ -216,6 +237,7 @@ const PAIR = /^[A-Z]{3}-[A-Z]{3}$/;
 export function parsePricing(input: any, current: PricingConfig): PricingConfig {
     if (!input || typeof input !== "object") throw new PricingError("pricing must be an object");
     const next: PricingConfig = JSON.parse(JSON.stringify(current));
+    next.usd = { ...DEFAULT_USD, ...(current.usd ?? {}) };
     for (const op of ["funding", "withdrawal"] as const) {
         if (input[op]?.NGN === undefined) continue;
         const src = input[op].NGN;
@@ -228,6 +250,21 @@ export function parsePricing(input: any, current: PricingConfig): PricingConfig 
             const customer = src.customerFee ?? base.customerFee;
             if (customer) (next.funding.NGN as FundingPricing).customerFee = feeRule(customer, "funding.NGN.customerFee");
         }
+    }
+    if (input.usd !== undefined) {
+        const src = input.usd;
+        if (!src || typeof src !== "object") throw new PricingError("usd must be an object");
+        const mode = src.mode ?? current.usd?.mode ?? "yellowcard";
+        if (mode !== "yellowcard" && mode !== "ours") throw new PricingError('usd.mode must be "yellowcard" or "ours"');
+        const usd: UsdPricing = {
+            mode,
+            buyNgn: num(src.buyNgn ?? current.usd?.buyNgn ?? 0, "usd.buyNgn", MAX_USD_NGN),
+            sellNgn: num(src.sellNgn ?? current.usd?.sellNgn ?? 0, "usd.sellNgn", MAX_USD_NGN),
+        };
+        if (usd.mode === "ours" && !(usd.buyNgn > 0 && usd.sellNgn > 0)) {
+            throw new PricingError("Enter both of our USD rates (what we buy and sell 1 USD for) before using them");
+        }
+        next.usd = usd;
     }
     for (const op of ["send", "receive"] as const) {
         if (input[op] === undefined) continue;

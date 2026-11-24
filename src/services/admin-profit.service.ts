@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, isNull, lte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { fxConversions, transactionDetails, transactions, users, walletTransactions } from "../db/schema";
 import { exec } from "../repositories/utils";
 import platformSettingsService from "./platform-settings.service";
@@ -40,6 +40,10 @@ export interface ProfitRow {
      */
     userRate?: number | null;
     providerRate?: number | null;
+    /** The transaction's whole value in naira (what the user paid, or what the payment was worth) */
+    volumeNgn?: number;
+    /** profitNgn as a % of volumeNgn */
+    profitPercent?: number | null;
 }
 
 export interface ProfitFilter {
@@ -65,7 +69,7 @@ class AdminProfitService {
         const people = new Map<string, { name: string; email: string }>();
         const person = (id: string) => people.get(id) ?? { name: "", email: "" };
 
-        // Transactions: GHS sends and receives through Fincra
+        // Transactions: GHS through Fincra, and YellowCard currencies
         if (kinds.includes("send") || kinds.includes("receive")) {
             const tx = transactions;
             const rows = await exec()
@@ -77,7 +81,8 @@ class AdminProfitService {
                     filter.userId ? eq(tx.user, filter.userId) : undefined,
                     filter.from ? gte(tx.createdAt, filter.from) : undefined,
                     filter.to ? lte(tx.createdAt, filter.to) : undefined,
-                    inArray(tx.fromCurrency, ["NGN", "GHS"]),
+                    // Naira on one side: sends from NGN, receives into NGN
+                    sql`(${tx.fromCurrency} = 'NGN' or ${tx.currency} = 'NGN')`,
                 ))
                 .orderBy(desc(tx.createdAt))
                 .limit(5_000);
@@ -89,6 +94,37 @@ class AdminProfitService {
 
             for (const { t, d } of rows) {
                 const fee = n(d?.feeAmount);
+                // YellowCard: priced at the provider's rate (stored, or worked back from the old global markup)
+                if (t.detailType === "yellowcard" && (d?.type ?? "yellowcard") === "yellowcard") {
+                    const units = n(t.amount);
+                    const markup = n(d?.markupPercent) / 100;
+                    if (t.fromCurrency === "NGN" && t.currency !== "NGN" && kinds.includes("send")) {
+                        const charged = n(d?.fromAmount);
+                        const subtotal = charged - fee;
+                        const userRate = units > 0 ? subtotal / units : 0;
+                        const providerRate = n(d?.providerRate) || (userRate > 0 ? userRate / (1 + markup) : 0);
+                        if (!(units > 0 && providerRate > 0 && charged > 0)) {
+                            out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: null, profitNgn: null, userRate: userRate || null, providerRate: null, note: "Rate not recorded" });
+                            continue;
+                        }
+                        const providerFee = subtotal * n(d?.providerFeePercent) / 100;
+                        const profit = r2(charged - (units * providerRate + providerFee));
+                        out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: r2(profit - r2(fee - providerFee)), profitNgn: profit, userRate: rate(userRate), providerRate: rate(providerRate), volumeNgn: r2(charged) });
+                    } else if (t.currency === "NGN" && t.fromCurrency !== "NGN" && kinds.includes("receive")) {
+                        const credited = n(d?.fromAmount);
+                        const gross = credited + fee;
+                        const userRate = units > 0 ? gross / units : 0;
+                        const providerRate = n(d?.providerRate) || (userRate > 0 && markup < 1 ? userRate / (1 - markup) : 0);
+                        if (!(units > 0 && providerRate > 0)) {
+                            out.push({ ...this.base(t, "receive"), feeNgn: fee, spreadNgn: null, profitNgn: null, userRate: userRate || null, providerRate: null, note: "Rate not recorded" });
+                            continue;
+                        }
+                        const providerFee = gross * n(d?.providerFeePercent) / 100;
+                        const profit = r2(units * providerRate - providerFee - credited);
+                        out.push({ ...this.base(t, "receive"), feeNgn: fee, spreadNgn: r2(profit - r2(fee - providerFee)), profitNgn: profit, userRate: rate(userRate), providerRate: rate(providerRate), volumeNgn: r2(gross) });
+                    }
+                    continue;
+                }
                 if (t.fromCurrency === "NGN" && t.currency === "GHS" && kinds.includes("send")) {
                     const charged = n(d?.fromAmount);
                     const cost = n(d?.providerCost);
@@ -102,7 +138,7 @@ class AdminProfitService {
                     const providerFee = ngnAmount * n(d?.providerFeePercent) / 100;
                     const profit = r2(charged - cost);
                     const platformFee = r2(fee - providerFee);
-                    out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: r2(profit - platformFee), profitNgn: profit, userRate, providerRate: units > 0 ? rate(cost / units) : null });
+                    out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: r2(profit - platformFee), profitNgn: profit, userRate, providerRate: units > 0 ? rate(cost / units) : null, volumeNgn: r2(charged) });
                 } else if (t.fromCurrency === "GHS" && t.currency === "NGN" && kinds.includes("receive")) {
                     const credited = n(d?.fromAmount);
                     const gross = credited + fee;
@@ -119,7 +155,7 @@ class AdminProfitService {
                     // What Fincra gave per cedi converted
                     const converted_ = n(c.sourceAmount);
                     const providerRate = converted_ > 0 ? rate(n(c.amountReceived) / converted_) : n(c.rate) > 0 ? rate(n(c.rate)) : null;
-                    out.push({ ...this.base(t, "receive"), feeNgn: fee, spreadNgn: r2(profit - platformFee), profitNgn: profit, userRate, providerRate });
+                    out.push({ ...this.base(t, "receive"), feeNgn: fee, spreadNgn: r2(profit - platformFee), profitNgn: profit, userRate, providerRate, volumeNgn: r2(gross) });
                 }
             }
         }
@@ -148,10 +184,10 @@ class AdminProfitService {
                 const base = { id: e.id, userId: e.user, userName: "", userEmail: "", reference: e.reference, at: e.createdAt, amount: n(e.amount), currency: e.currency || "NGN" };
                 if (e.type === "funding") {
                     // The stored fee is already SolutionPay's part (the provider kept theirs)
-                    out.push({ ...base, kind: "fund", feeNgn: fee, spreadNgn: 0, profitNgn: r2(fee) });
+                    out.push({ ...base, kind: "fund", feeNgn: fee, spreadNgn: 0, profitNgn: r2(fee), volumeNgn: r2(n(e.amount) + fee) });
                 } else {
                     const providerFee = fee > 0 ? (await platformSettingsService.priceFees("withdrawal", n(e.amount))).providerFee : 0;
-                    out.push({ ...base, kind: "withdraw", feeNgn: fee, spreadNgn: 0, profitNgn: r2(Math.max(0, fee - providerFee)) });
+                    out.push({ ...base, kind: "withdraw", feeNgn: fee, spreadNgn: 0, profitNgn: r2(Math.max(0, fee - providerFee)), volumeNgn: r2(n(e.amount)) });
                 }
             }
         }
@@ -162,7 +198,10 @@ class AdminProfitService {
             const found = await exec().select({ id: users.id, firstName: users.firstName, lastName: users.lastName, email: users.email }).from(users).where(inArray(users.id, ids));
             for (const u of found) people.set(u.id, { name: `${u.firstName} ${u.lastName}`.trim(), email: u.email });
         }
-        for (const r of out) Object.assign(r, { userName: person(r.userId).name, userEmail: person(r.userId).email });
+        for (const r of out) {
+            Object.assign(r, { userName: person(r.userId).name, userEmail: person(r.userId).email });
+            r.profitPercent = r.profitNgn !== null && r.volumeNgn ? Math.round((r.profitNgn / r.volumeNgn) * 100 * 100) / 100 : null;
+        }
         return out.sort((a, b) => b.at.getTime() - a.at.getTime());
     }
 
@@ -185,15 +224,50 @@ class AdminProfitService {
         return [...map.values()].sort((a, b) => b.profitNgn - a.profitNgn);
     }
 
+    /**
+     * Totals, and average profit per day, week and calendar month. Each
+     * period's profit % is its profit over its volume; the averages are over
+     * the periods that had anything (Lagos dates; weeks start on Monday).
+     */
     totals(rows: ProfitRow[]) {
-        const t = { count: rows.length, feeNgn: 0, spreadNgn: 0, profitNgn: 0, pending: 0 };
+        const t = { count: rows.length, feeNgn: 0, spreadNgn: 0, profitNgn: 0, pending: 0, volumeNgn: 0, profitPercent: 0 as number | null };
         for (const r of rows) {
             t.feeNgn = r2(t.feeNgn + r.feeNgn);
             t.spreadNgn = r2(t.spreadNgn + (r.spreadNgn ?? 0));
             t.profitNgn = r2(t.profitNgn + (r.profitNgn ?? 0));
             if (r.profitNgn === null) t.pending += 1;
+            else t.volumeNgn = r2(t.volumeNgn + (r.volumeNgn ?? 0));
         }
-        return t;
+        t.profitPercent = t.volumeNgn > 0 ? Math.round((t.profitNgn / t.volumeNgn) * 100 * 100) / 100 : null;
+        return { ...t, averages: { daily: this.average(rows, "day"), weekly: this.average(rows, "week"), monthly: this.average(rows, "month") } };
+    }
+
+    private average(rows: ProfitRow[], period: "day" | "week" | "month") {
+        const buckets = new Map<string, { profit: number; volume: number }>();
+        for (const r of rows) {
+            if (r.profitNgn === null) continue;
+            const lagos = new Date(r.at.getTime() + 60 * 60 * 1000);
+            let key: string;
+            if (period === "month") key = lagos.toISOString().slice(0, 7);
+            else if (period === "day") key = lagos.toISOString().slice(0, 10);
+            else {
+                const monday = new Date(lagos);
+                monday.setUTCDate(lagos.getUTCDate() - ((lagos.getUTCDay() + 6) % 7));
+                key = monday.toISOString().slice(0, 10);
+            }
+            const b = buckets.get(key) ?? { profit: 0, volume: 0 };
+            b.profit += r.profitNgn;
+            b.volume += r.volumeNgn ?? 0;
+            buckets.set(key, b);
+        }
+        const list = [...buckets.values()];
+        if (!list.length) return { periods: 0, profitNgn: 0, profitPercent: null as number | null };
+        const percents = list.filter((b) => b.volume > 0).map((b) => (b.profit / b.volume) * 100);
+        return {
+            periods: list.length,
+            profitNgn: r2(list.reduce((sum, b) => sum + b.profit, 0) / list.length),
+            profitPercent: percents.length ? Math.round((percents.reduce((a, b) => a + b, 0) / percents.length) * 100) / 100 : null,
+        };
     }
 
     private base(t: typeof transactions.$inferSelect, kind: ProfitKind) {

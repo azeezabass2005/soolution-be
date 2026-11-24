@@ -90,6 +90,8 @@ export const users = pgTable(
         status: text("status").$type<(typeof USER_ACCOUNT_STATUSES)[number]>().notNull().default("active"),
         freeze: text("freeze").$type<UserFreeze>().notNull().default("none"),
         freezeReason: text("freeze_reason"),
+        /** Currencies a super admin turned off for this user (on top of any turned off for everyone) */
+        disabledCurrencies: text("disabled_currencies").array().notNull().default(sql`'{}'::text[]`),
         /** A daily limit (NGN) for this user that replaces their tier's; null = the tier's */
         dailyLimitOverrideNgn: decimal("daily_limit_override_ngn"),
         sessionsValidAfter: timestamptz("sessions_valid_after"),

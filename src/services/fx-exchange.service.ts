@@ -1,4 +1,5 @@
 import { withTransaction } from "../db/transaction";
+import currencyAccessService from "./currency-access.service";
 import fxQuoteRepository from "../repositories/fx-quote.repository";
 import walletRepository from "../repositories/wallet.repository";
 import walletTransactionRepository from "../repositories/wallet-transaction.repository";
@@ -61,6 +62,7 @@ class FxExchangeService {
         const toCurrency = String(request.toCurrency ?? "").toUpperCase();
         const amount = Number(request.amount);
         const side = request.side === "to" ? "to" : "from";
+        await currencyAccessService.assertOn(userId, fromCurrency, toCurrency);
         // Exchanging would open the other wallet: only for currencies users may hold now
         for (const code of [fromCurrency, toCurrency]) {
             if (code === BASE_WALLET_CURRENCY || OPENABLE_WALLET_CURRENCIES.includes(code)) continue;

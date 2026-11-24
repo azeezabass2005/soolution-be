@@ -17,6 +17,8 @@ import { clearAuthCookies } from "../../../utils/auth-cookies";
 import { ErrorSeverity } from "../../../common/messages/error-response-message";
 import logger from "../../../utils/logger.utils";
 import adminUsersService from "../../../services/admin-users.service";
+import userRepository from "../../../repositories/user.repository";
+import { cleanCurrencyList } from "../../../common/operations";
 
 /**
  * Controller handling authentication-related operations
@@ -60,6 +62,8 @@ class UserController extends BaseController {
         this.router.get("/:id/overview", RoleMiddleware.can("users.directory"), this.getOverview.bind(this));
         // Suspend, freeze, or set a personal daily limit
         this.router.patch("/:id/controls", RoleMiddleware.can("users.account_controls", "users.daily_limit"), this.updateControls.bind(this));
+        // Currencies turned off for one user (super admins: platform controls)
+        this.router.put("/:id/currencies", RoleMiddleware.can("platform_controls"), this.setUserCurrencies.bind(this));
     }
 
     private async changePassword(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -191,6 +195,7 @@ class UserController extends BaseController {
                     kyc: kyc.get(user.id) ?? null,
                     stats: stats.get(user.id) ?? null,
                     duplicateCount: duplicates.get(user.id)?.length ?? 0,
+                    disabledCurrencies: user.disabledCurrencies ?? [],
                 });
             });
 
@@ -203,6 +208,7 @@ class UserController extends BaseController {
                 else if (row.stats && !can("users.cards")) row.stats = { balanceNgn: row.stats.balanceNgn };
                 if (!can("users.repeat_signups")) delete row.duplicateCount;
                 if (!can("users.account_controls")) { delete row.freeze; }
+                if (!can("platform_controls")) delete row.disabledCurrencies;
                 return row;
             });
 
@@ -251,6 +257,24 @@ class UserController extends BaseController {
             transactions: can("users.transactions") ? overview.transactions : null,
             walletEntries: can("users.wallet_activity") ? overview.walletEntries : null,
         };
+    }
+
+    private async setUserCurrencies(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const target = await userRepository.findById(String(req.params.id));
+            if (!target) return next(errorResponseMessage.resourceNotFound("User"));
+            let off: string[];
+            try {
+                off = cleanCurrencyList(req.body?.off ?? []);
+            } catch (error: any) {
+                return next(errorResponseMessage.createError(400, error.message, ErrorSeverity.LOW));
+            }
+            await userRepository.update(target.id, { disabledCurrencies: off });
+            logger.info("Admin changed a user's currencies", { adminId: res.locals.user?.id, userId: target.id, before: target.disabledCurrencies ?? [], after: off });
+            return this.sendSuccess(res, { id: target.id, off, message: off.length ? `Turned off for this user: ${off.join(", ")}` : "Every currency is on for this user" });
+        } catch (error) {
+            return next(error);
+        }
     }
 
     private async updateControls(req: Request, res: Response, next: NextFunction): Promise<void> {

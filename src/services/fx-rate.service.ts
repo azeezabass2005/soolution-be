@@ -2,6 +2,7 @@ import exchangeRateRepository from "../repositories/exchange-rate.repository";
 import yellowCardService from "./yellowcard.service";
 import ghsRateService from "./ghs-rate.service";
 import platformSettingsService from "./platform-settings.service";
+import ycRateService, { isYellowCardCurrency } from "./yc-rate.service";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import { YC_CURRENCIES } from "../common/constant";
 import { BASE_WALLET_CURRENCY } from "../common/wallet.constants";
@@ -35,6 +36,11 @@ class FxRateService {
                     ? await ghsRateService.getUserFacingRate(BASE_WALLET_CURRENCY, currency, "send")
                     : await ghsRateService.getUserFacingRate(currency, BASE_WALLET_CURRENCY, "receive");
                 return { rate: userRate, providerRate, source: "fincra" };
+            }
+            if (isYellowCardCurrency(currency)) {
+                // The pair's price, as sends and receives use (the admin's buffer for that currency)
+                const { providerRate, userRate } = await ycRateService.userRate(side === "buy" ? "send" : "receive", currency);
+                return { rate: userRate, providerRate, source: "yellowcard" };
             }
             if ((YC_CURRENCIES as readonly string[]).includes(currency)) {
                 const providerRate = side === "buy"

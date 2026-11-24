@@ -154,6 +154,12 @@ export const transactionDetails = pgTable(
         providerQuoteReference: text("provider_quote_reference"),
         /** NGN Fincra deducts for an NGN→GHS payout (the quote's amountToCharge) */
         providerCost: decimal("provider_cost"),
+        /**
+         * NGN per 1 unit of the foreign currency at the provider when this was
+         * priced, before our buffer: what it cost us (send) or fetched us
+         * (receive). For YellowCard it's through USD, with our own USD rate when set.
+         */
+        providerRate: decimal("provider_rate"),
         checkoutUrl: text("checkout_url"),
         providerPayload: jsonb("provider_payload").$type<unknown>(),
 

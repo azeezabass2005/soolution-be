@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import currencyAccessService from "./currency-access.service";
 import paymentLinkRepository from "../repositories/payment-link.repository";
 import transactionRepository from "../repositories/transaction.repository";
 import transactionDetailRepository from "../repositories/transaction-detail.repository";
@@ -122,6 +123,8 @@ class PaymentLinkService {
         // Same rule as receiving directly: verify your BVN first
         await transactionLimitService.assertCanTransact(userId);
         const data = parse<{ currency: string; country?: string; amount?: number; title?: string; description?: string; usage: "single" | "reusable"; redirectUrl?: string; collect: PaymentLinkCollectField[] }>(ZCreatePaymentLink, body);
+        // A currency turned off for this user (or everyone) can't be put on a link
+        await currencyAccessService.assertOn(userId, data.currency);
         // YellowCard collects every currency except GHS and needs the owner's KYC details
         if (data.currency !== "GHS") await identityService.assertTransferDetails(userId);
         // Fincra's GHS checkout takes whole cedis
@@ -259,7 +262,9 @@ class PaymentLinkService {
         const methods = await this.payMethods(link.currency, link.country);
         // No way to pay in this currency right now (e.g. YellowCard has collections off)
         const paused = (await platformSettingsService.getOperations()).pause.payments;
-        const payable = !paused && this.canTakePayments(link, owner) && methods.length > 0;
+        // Turned off for the owner (or everyone): the link can't take payments
+        const currencyOff = (await currencyAccessService.offFor(owner.id)).has(link.currency);
+        const payable = !paused && !currencyOff && this.canTakePayments(link, owner) && methods.length > 0;
         return {
             slug: link.slug,
             payee: (owner.tier >= USER_TIER.BUSINESS ? await approvedBusinessName(owner.id) : undefined) || ownerName(owner),

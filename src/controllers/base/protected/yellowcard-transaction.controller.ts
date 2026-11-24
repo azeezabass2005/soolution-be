@@ -1,4 +1,6 @@
 import BaseController from "../base-controller";
+import currencyAccessService from "../../../services/currency-access.service";
+import ycRateService, { isYellowCardCurrency } from "../../../services/yc-rate.service";
 import TransactionService from "../../../services/transaction.service";
 import yellowCardService from "../../../services/yellowcard.service";
 import { CURRENCY_COUNTRY } from "../../../common/payment-link.constants";
@@ -105,7 +107,16 @@ class YellowCardTransactionController extends BaseController {
 
     private async getCurrencies(_req: Request, res: Response, next: NextFunction) {
         try {
-            return this.sendSuccess(res, await yellowCardService.flowCurrencies());
+            // Currencies turned off for this user (or everyone) aren't offered; `off` lets the app hide GHS and RMB too
+            const [flow, off] = await Promise.all([yellowCardService.flowCurrencies(), currencyAccessService.offFor(res.locals.user?.id)]);
+            const on = (c: string) => !off.has(c);
+            return this.sendSuccess(res, {
+                ...flow,
+                send: flow.send.filter(on),
+                receive: flow.receive.filter(on),
+                markets: { send: flow.markets.send.filter((m) => on(m.currency)), receive: flow.markets.receive.filter((m) => on(m.currency)) },
+                off: [...off],
+            });
         } catch (error: any) {
             return next(error);
         }
@@ -154,6 +165,24 @@ class YellowCardTransactionController extends BaseController {
             }
             if (!isFinite(amount) || amount <= 0) {
                 return next({ response_code: 400, message: "amount must be a positive number" });
+            }
+
+            // A YellowCard currency against naira: the pair's own price (same as what's charged)
+            const foreign = from === 'NGN' ? to : to === 'NGN' ? from : null;
+            if (foreign && isYellowCardCurrency(foreign)) {
+                const price = await ycRateService.price(direction, foreign, amount);
+                return this.sendSuccess(res, {
+                    from, to, direction, amount,
+                    providerRate: price.providerRate,
+                    userRate: price.userRate,
+                    rate: price.userRate,
+                    convertedAmount: price.subtotalNgn,
+                    feeAmount: price.feeAmount,
+                    feePercent: price.feePercent,
+                    providerFeePercent: price.providerFeePercent,
+                    totalAmount: price.totalNgn,
+                    limits: price.limits,
+                });
             }
 
             const providerRate = await yellowCardService.getImpliedRate(from, to, direction);

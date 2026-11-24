@@ -91,6 +91,9 @@ import ledgerService from "./ledger.service";
 import { pickYellowCardNetwork } from "../utils/momo-network.utils";
 import identityService from "./identity.service";
 import { CURRENCY_COUNTRY, ycCountryFor } from "../common/payment-link.constants";
+import ycRateService, { type YcPrice } from "./yc-rate.service";
+import currencyAccessService from "./currency-access.service";
+import { limitProblem } from "../common/pricing";
 
 
 
@@ -239,6 +242,8 @@ class TransactionService {
         ipAddress?: string,
         userAgent?: string
     ) => {
+        // A currency a super admin turned off (for everyone or this user) can't be used
+        await currencyAccessService.assertOn(user, transactionData.fromCurrency, transactionData.toCurrency);
         const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName, idempotencyKey, fromAmount, transactionType, pin } = transactionData;
         // A send paid from the destination currency's wallet: ops pays out directly
         const fromWallet = transactionType === 'send' && toCurrency
@@ -460,6 +465,7 @@ class TransactionService {
     };
 
     public createAlipayTransaction = async (transactionData: ManualTransactionInput, alipayQrCode: Express.Multer.File | { qrCodeUrl: string }, user: string, ipAddress?: string, userAgent?: string) =>  {
+        await currencyAccessService.assertOn(user, 'RMB');
         const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod, idempotencyKey, pin } = transactionData;
         // Paid from the RMB wallet: no bank transfer or receipt, ops pays out directly
         const fromWallet = this.resolveManualWallet(transactionData.walletCurrency, "RMB");
@@ -910,6 +916,7 @@ class TransactionService {
         ipAddress?: string,
         userAgent?: string
     ) => {
+        await currencyAccessService.assertOn(userId, params.toCurrency);
         const { amount, fromCurrency, toCurrency, destination, idempotencyKey, pin } = params;
         const walletCurrency = walletSendService.resolveWalletCurrency(params.walletCurrency, toCurrency);
 
@@ -928,24 +935,26 @@ class TransactionService {
         const kycPerson = await identityService.yellowCardPerson(userId);
 
         // ========== SERVER-SIDE RATE + FEE ==========
-        // Compute the NGN debit from YellowCard's live rates and apply the
-        // platform's universal markup so display and journal agree. Client-
-        // supplied fromAmount is ignored.
-        let providerRate: number;
-        let userRate: number;
+        // The pair's price (YellowCard's rate through USD, or ours, plus the
+        // admin's buffer, fees and limits), so what the user was shown is what
+        // they're charged. Client-supplied fromAmount is ignored.
+        if (fromCurrency !== 'NGN') {
+            throw errorResponseMessage.payloadIncorrect(`${toCurrency} sends are paid from your NGN wallet.`);
+        }
+        let price: YcPrice;
         try {
-            providerRate = await yellowCardService.getImpliedRate(fromCurrency, toCurrency, 'send');
-            userRate = await platformSettingsService.applyRateMarkup(providerRate, 'send');
+            price = await ycRateService.price('send', toCurrency, amount);
         } catch (err: any) {
             logger.error("YellowCard rate lookup failed during send", { fromCurrency, toCurrency, error: err?.message });
             throw errorResponseMessage.createError(400, `We couldn't get the ${fromCurrency}→${toCurrency} exchange rate right now. Please try again in a few minutes.`, ErrorSeverity.HIGH);
         }
-        const ngnAmount = Math.round(amount * userRate * 100) / 100;
+        const limitIssue = limitProblem(price.limits, amount, toCurrency);
+        if (limitIssue) throw errorResponseMessage.createError(400, limitIssue, ErrorSeverity.LOW, { code: "TX_LIMIT" });
+        const { providerRate, userRate, feeAmount, feePercent, providerFeePercent } = price;
+        const ngnAmount = price.subtotalNgn;
         if (!ngnAmount || ngnAmount <= 0) {
             throw errorResponseMessage.payloadIncorrect("Source amount (fromAmount) must be a positive number");
         }
-
-        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('yellowcard', ngnAmount);
         const totalDebit = Math.round((ngnAmount + feeAmount) * 100) / 100;
 
         // Daily tier limit (throws when this would exceed today's limit)
@@ -953,7 +962,7 @@ class TransactionService {
             { amount: totalDebit, currency: fromCurrency },
             { amount, currency: toCurrency },
         ]);
-        const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
+        const markupPercent = price.markupPercent;
 
         // Check the paying wallet exists and has enough before calling YellowCard
         await walletSendService.assertCanPay(
@@ -1089,6 +1098,8 @@ class TransactionService {
                 fundingFee: walletFee,
                 providerFeePercent,
                 markupPercent,
+                // What each unit cost us at YellowCard (our USD rate when set), for profit
+                providerRate,
                 accountName: destination.accountName,
                 accountNumber: destination.accountNumber,
                 institutionType: destination.accountType,
@@ -1408,6 +1419,7 @@ class TransactionService {
         },
         userId: string,
     ) => {
+        await currencyAccessService.assertOn(userId, params.fromCurrency);
         const { amount, fromCurrency, toCurrency, destination, idempotencyKey, paymentLinkId } = params;
         const topUp = params.topUp === true && !paymentLinkId;
 
@@ -1419,18 +1431,23 @@ class TransactionService {
         // Refuses before anything is created when details are missing (production only).
         const kycPerson = await identityService.yellowCardPerson(userId);
 
-        // Server-side rate + fee for the collection. The user receives
-        // `gross − fee` NGN at the markup-adjusted (receive) rate.
-        let providerRate: number;
-        let userRate: number;
+        // Server-side rate + fee for the collection, from the pair's price
+        // (YellowCard's rate through USD, or ours, with the admin's buffer,
+        // fees and limits). The user receives `gross − fee` NGN.
+        if (toCurrency !== 'NGN') {
+            throw errorResponseMessage.payloadIncorrect(`${fromCurrency} payments are credited to your NGN wallet.`);
+        }
+        let price: YcPrice;
         try {
-            providerRate = await yellowCardService.getImpliedRate(fromCurrency, toCurrency, 'receive');
-            userRate = await platformSettingsService.applyRateMarkup(providerRate, 'receive');
+            price = await ycRateService.price('receive', fromCurrency, amount);
         } catch (err: any) {
             logger.error("YellowCard rate lookup failed during collection", { fromCurrency, toCurrency, error: err?.message });
             throw errorResponseMessage.createError(400, `We couldn't get the ${fromCurrency}→${toCurrency} exchange rate right now. Please try again in a few minutes.`, ErrorSeverity.HIGH);
         }
-        const grossNgn = Math.round(amount * userRate * 100) / 100;
+        const limitIssue = limitProblem(price.limits, amount, fromCurrency);
+        if (limitIssue) throw errorResponseMessage.createError(400, limitIssue, ErrorSeverity.LOW, { code: "TX_LIMIT" });
+        const { providerRate, userRate } = price;
+        const grossNgn = price.subtotalNgn;
 
         // Daily tier limit (throws when this would exceed today's limit)
         const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(userId, [
@@ -1438,12 +1455,12 @@ class TransactionService {
             { amount: grossNgn, currency: toCurrency },
         ]);
 
-        const { feeAmount, feePercent, providerFeePercent } = await platformSettingsService.computeFee('yellowcard', grossNgn);
-        const ngnAmount = Math.round((grossNgn - feeAmount) * 100) / 100;
+        const { feeAmount, feePercent, providerFeePercent } = price;
+        const ngnAmount = price.totalNgn;
         if (ngnAmount <= 0) {
             throw errorResponseMessage.createError(400, "Fee exceeds the converted amount. Please increase the amount.", ErrorSeverity.MEDIUM);
         }
-        const markupPercent = (await platformSettingsService.getSettings()).rateMarkupPercent;
+        const markupPercent = price.markupPercent;
 
         // Handle idempotency
         if (idempotencyKey) {
@@ -1516,6 +1533,8 @@ class TransactionService {
                 feePercent,
                 providerFeePercent,
                 markupPercent,
+                // What each unit fetches us at YellowCard (our USD rate when set), for profit
+                providerRate,
                 accountName: destination?.accountName,
                 accountNumber: destination?.accountNumber,
                 institutionType: destination?.accountType,
@@ -1878,6 +1897,7 @@ class TransactionService {
         },
         userId: string,
     ) => {
+        await currencyAccessService.assertOn(userId, 'GHS');
         const { destination, idempotencyKey, pin } = params;
         const amount = Math.round(Number(params.amount) * 100) / 100;
         const walletCurrency = walletSendService.resolveWalletCurrency(params.walletCurrency, 'GHS');
@@ -2103,6 +2123,7 @@ class TransactionService {
         },
         userId: string,
     ) => {
+        await currencyAccessService.assertOn(userId, 'GHS');
         const amount = Math.round(Number(params.amount) * 100) / 100;
         if (!(amount > 0)) throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
         const destination = params.destination;
@@ -2268,6 +2289,7 @@ class TransactionService {
         },
         userId: string,
     ) => {
+        await currencyAccessService.assertOn(userId, 'GHS');
         const { idempotencyKey, paymentLinkId } = params;
         const amount = Number(params.amount);
         if (!amount || amount <= 0) {
@@ -2498,6 +2520,7 @@ class TransactionService {
         params: { amount: number; paymentLinkId?: string; payer?: { name?: string; email?: string; phone?: string }; idempotencyKey?: string },
         userId: string,
     ) => {
+        await currencyAccessService.assertOn(userId, 'GHS');
         if (!spotflowService.ghsAccountsAvailable) {
             throw errorResponseMessage.createError(503, "Paying by bank transfer in Ghana isn't available right now. Use a payment link instead.", ErrorSeverity.LOW, { code: "GHS_ACCOUNTS_UNAVAILABLE" });
         }

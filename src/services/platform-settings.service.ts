@@ -7,6 +7,7 @@ import {
     applyRateRule, parsePricing, priceFees, priceFunding, withDefaults,
 } from "../common/pricing";
 import { mergeOperations, withOperationDefaults, type OperationsConfig } from "../common/operations";
+import { YELLOWCARD_FLOW_CURRENCIES } from "../common/payment-link.constants";
 
 export type ProviderKey = 'ogateway' | 'yellowcard' | 'fincra';
 export type RateDirection = 'send' | 'receive';
@@ -146,13 +147,48 @@ class PlatformSettingsService {
     }
 
     public async getPricing(): Promise<PricingConfig> {
-        return this.pricingOf(await this.getSettings());
+        const settings = await this.getSettings();
+        return this.withYellowCardPairs(this.pricingOf(settings), settings);
+    }
+
+    /**
+     * Every YellowCard currency priced like GHS: a send pair (NGN-KES) and a
+     * receive pair (KES-NGN). Until an admin saves one, it's built from the
+     * older global knobs (markup %, YellowCard's fee %, additional fee %), so
+     * prices don't change until someone sets them.
+     */
+    private withYellowCardPairs(config: PricingConfig, settings: IPlatformSettings): PricingConfig {
+        const legacy = (currency: string): FxPricing => ({
+            providerFee: { ...ZERO_FEE, percent: settings.providerBaseFeePercent?.yellowcard ?? 0 },
+            platformFee: { ...ZERO_FEE, percent: settings.additionalFeePercent ?? 0 },
+            rate: { ...ZERO_RATE, percent: settings.rateMarkupPercent ?? 0 },
+            // Percent-only fees come out the same in either currency
+            feeCurrency: currency,
+            limits: { ...NO_LIMITS },
+        });
+        for (const currency of YELLOWCARD_FLOW_CURRENCIES) {
+            config.send[`NGN-${currency}`] ??= legacy(currency);
+            config.receive[`${currency}-NGN`] ??= legacy(currency);
+        }
+        return config;
+    }
+
+    /** YellowCard pairs nobody has saved yet (still on the older global knobs) */
+    public async inheritedYellowCardPairs(): Promise<{ op: "send" | "receive"; pair: string }[]> {
+        const settings = await this.getSettings();
+        const saved = settings.pricing ? withDefaults(settings.pricing) : null;
+        const out: { op: "send" | "receive"; pair: string }[] = [];
+        for (const currency of YELLOWCARD_FLOW_CURRENCIES) {
+            if (!saved?.send[`NGN-${currency}`]) out.push({ op: "send", pair: `NGN-${currency}` });
+            if (!saved?.receive[`${currency}-NGN`]) out.push({ op: "receive", pair: `${currency}-NGN` });
+        }
+        return out;
     }
 
     /** Fees for an operation on `amount` (NGN). Funding charges only SolutionPay's fee: Fincra takes its own. */
     public async priceFees(operation: "funding" | "withdrawal", amount: number): Promise<FeeBreakdown & { pricing: FeePricing }>;
     public async priceFees(operation: "send" | "receive", amount: number, pair: string): Promise<FeeBreakdown & { pricing: FeePricing }>;
-    public async priceFees(operation: keyof PricingConfig, amount: number, pair?: string) {
+    public async priceFees(operation: "funding" | "withdrawal" | "send" | "receive", amount: number, pair?: string) {
         const pricing = await this.getPricing();
         const rules: FeePricing | undefined = operation === "funding" || operation === "withdrawal"
             ? pricing[operation].NGN

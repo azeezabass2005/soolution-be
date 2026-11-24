@@ -6,7 +6,8 @@ vi.mock("../src/services/yellowcard.service", () => ({
         getRates: vi.fn(async () => ({
             rates: [
                 { code: "NGN", buy: 1500, sell: 1500 },
-                { code: "KES", buy: 130, sell: 130 },
+                // ₦1,500 per USD and KES 150 per USD: ₦10 per KES, the rate these tests expect
+                { code: "KES", buy: 150, sell: 150 },
                 { code: "GHS", buy: 15, sell: 15 },
             ],
         })),

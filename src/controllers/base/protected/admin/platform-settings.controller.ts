@@ -6,6 +6,8 @@ import platformSettingsService from '../../../../services/platform-settings.serv
 import errorResponseMessage, { ErrorSeverity } from '../../../../common/messages/error-response-message';
 import { PricingError, legacyNgnFeePairs } from '../../../../common/pricing';
 import { OperationsError, manualWindow } from '../../../../common/operations';
+import ycRateService from '../../../../services/yc-rate.service';
+import { YELLOWCARD_FLOW_CURRENCIES } from '../../../../common/payment-link.constants';
 
 const invalid = (message: string) => errorResponseMessage.createError(400, message, ErrorSeverity.LOW);
 
@@ -23,6 +25,8 @@ class AdminPlatformSettingsController extends BaseController {
         // Anyone who manages a part of these settings can read them; saving checks each part (see put)
         this.router.use(RoleMiddleware.can('pricing.api_currencies', 'pricing.manual_payments', 'pricing.daily_limits', 'platform_controls', 'dashboard.platform_controls'));
         this.router.get('/', this.get.bind(this));
+        // How each YellowCard currency's naira rate is made right now (pricing admins)
+        this.router.get('/yellowcard-rates', RoleMiddleware.can('pricing.api_currencies'), this.yellowCardRates.bind(this));
         this.router.put('/', this.put.bind(this));
     }
 
@@ -33,7 +37,17 @@ class AdminPlatformSettingsController extends BaseController {
             const pricing = await platformSettingsService.getPricing();
             const operations = await platformSettingsService.getOperations();
             // Pairs whose fixed fee amounts are still in NGN: the admin reviews them in the pair's currency
-            return this.sendSuccess(res, { settings: { ...settings, pricing, operations, manualWindow: manualWindow(operations.manual), legacyNgnFeePairs: legacyNgnFeePairs(pricing) } });
+            const inheritedPairs = await platformSettingsService.inheritedYellowCardPairs();
+            return this.sendSuccess(res, { settings: { ...settings, pricing, operations, manualWindow: manualWindow(operations.manual), legacyNgnFeePairs: legacyNgnFeePairs(pricing), inheritedPairs } });
+        } catch (error) {
+            return next(error);
+        }
+    }
+
+    private async yellowCardRates(_req: Request, res: Response, next: NextFunction) {
+        try {
+            const results = await Promise.all(YELLOWCARD_FLOW_CURRENCIES.map((c) => ycRateService.explain(c).catch(() => null)));
+            return this.sendSuccess(res, { currencies: results.filter(Boolean) });
         } catch (error) {
             return next(error);
         }
@@ -50,6 +64,7 @@ class AdminPlatformSettingsController extends BaseController {
                 [tierDailyLimitNgn !== undefined, ['pricing.daily_limits'], 'daily limits'],
                 [operations?.manual !== undefined, ['pricing.manual_payments'], 'manual payments'],
                 [operations?.pause !== undefined, ['platform_controls', 'dashboard.platform_controls'], 'platform controls'],
+                [operations?.currencies !== undefined, ['platform_controls'], 'which currencies are on'],
             ];
             for (const [touched, permissions, what] of needs) {
                 if (!touched) continue;
@@ -106,7 +121,8 @@ class AdminPlatformSettingsController extends BaseController {
             );
             const saved = await platformSettingsService.getPricing();
             const savedOps = await platformSettingsService.getOperations();
-            return this.sendSuccess(res, { settings: { ...updated, pricing: saved, operations: savedOps, manualWindow: manualWindow(savedOps.manual), legacyNgnFeePairs: legacyNgnFeePairs(saved) } });
+            const inheritedPairs = await platformSettingsService.inheritedYellowCardPairs();
+            return this.sendSuccess(res, { settings: { ...updated, pricing: saved, operations: savedOps, manualWindow: manualWindow(savedOps.manual), legacyNgnFeePairs: legacyNgnFeePairs(saved), inheritedPairs } });
         } catch (error) {
             if (error instanceof PricingError || error instanceof OperationsError) return next(invalid(error.message));
             return next(error);

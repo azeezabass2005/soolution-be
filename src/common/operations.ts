@@ -29,17 +29,37 @@ export interface PauseConfig {
     message: string;
 }
 
+/** Currencies a super admin has turned off for everyone (sending, receiving, links and exchanges) */
+export interface CurrenciesConfig {
+    off: string[];
+}
+
 export interface OperationsConfig {
     manual: ManualConfig;
     pause: PauseConfig;
+    currencies: CurrenciesConfig;
 }
 
 export const DEFAULT_OPERATIONS: OperationsConfig = {
     manual: { rates: {}, days: [1, 2, 3, 4, 5], open: "08:00", close: "20:00", closedDates: [] },
     pause: { payments: false, logins: false, message: "" },
+    currencies: { off: [] },
 };
 
 export class OperationsError extends Error {}
+
+/** A checked list of currency codes (each once, upper case); throws OperationsError */
+export function cleanCurrencyList(value: unknown): string[] {
+    if (!Array.isArray(value)) throw new OperationsError("Currencies must be a list like [\"KES\", \"GHS\"]");
+    const out = new Set<string>();
+    for (const code of value) {
+        const c = String(code ?? "").trim().toUpperCase();
+        if (!/^[A-Z]{3,4}$/.test(c)) throw new OperationsError(`${code} isn't a currency code`);
+        if (c === "NGN") throw new OperationsError("Naira can't be turned off: it's every wallet's currency");
+        out.add(c);
+    }
+    return [...out].sort();
+}
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -51,14 +71,15 @@ export function withOperationDefaults(stored: unknown): OperationsConfig {
     return {
         manual: { ...DEFAULT_OPERATIONS.manual, ...(s.manual ?? {}) },
         pause: { ...DEFAULT_OPERATIONS.pause, ...(s.pause ?? {}) },
+        currencies: { off: Array.isArray(s.currencies?.off) ? [...s.currencies!.off] : [] },
     };
 }
 
 /** Checks an admin's change and merges it into the current config (throws OperationsError) */
 export function mergeOperations(current: OperationsConfig, patch: unknown): OperationsConfig {
     if (!patch || typeof patch !== "object") throw new OperationsError("Operations settings must be an object");
-    const p = patch as { manual?: Partial<ManualConfig>; pause?: Partial<PauseConfig> };
-    const next: OperationsConfig = { manual: { ...current.manual }, pause: { ...current.pause } };
+    const p = patch as { manual?: Partial<ManualConfig>; pause?: Partial<PauseConfig>; currencies?: Partial<CurrenciesConfig> };
+    const next: OperationsConfig = { manual: { ...current.manual }, pause: { ...current.pause }, currencies: { off: [...current.currencies.off] } };
 
     if (p.manual) {
         const m = p.manual;
@@ -97,6 +118,10 @@ export function mergeOperations(current: OperationsConfig, patch: unknown): Oper
             }
             next.manual.closedDates = [...new Set(m.closedDates.map(String))].sort();
         }
+    }
+
+    if (p.currencies?.off !== undefined) {
+        next.currencies.off = cleanCurrencyList(p.currencies.off);
     }
 
     if (p.pause) {
