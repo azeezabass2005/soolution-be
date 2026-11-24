@@ -37,6 +37,25 @@ export const CURRENCY_COUNTRY: Record<string, string> = {
 export const COUNTRY_DIAL_CODE: Record<string, string> = {
     NG: "+234", GH: "+233", KE: "+254", CM: "+237", ZA: "+27", TZ: "+255", UG: "+256",
     SN: "+221", RW: "+250", BW: "+267", ZM: "+260", MW: "+265",
+    CI: "+225", BJ: "+229", ML: "+223", BF: "+226", TG: "+228", GA: "+241", CG: "+242",
+};
+
+/**
+ * The CFA francs are shared by several countries, each its own YellowCard
+ * market. The first one is the default (CURRENCY_COUNTRY); the rest are
+ * offered wherever YellowCard has them on.
+ */
+export const MULTI_COUNTRY_CURRENCIES: Record<string, string[]> = {
+    XOF: ["SN", "CI", "BJ", "ML", "BF", "TG"],
+    XAF: ["CM", "GA", "CG"],
+};
+
+/** The YellowCard country for a currency: the one asked for when the currency is used there, else its default */
+export const ycCountryFor = (currency: string, country?: string | null): string => {
+    const cur = String(currency || "").toUpperCase();
+    const asked = String(country || "").toUpperCase();
+    if (asked && (MULTI_COUNTRY_CURRENCIES[cur] ?? [CURRENCY_COUNTRY[cur]]).includes(asked)) return asked;
+    return CURRENCY_COUNTRY[cur];
 };
 
 /** Characters in a link's public id (base62, ~71 bits) */

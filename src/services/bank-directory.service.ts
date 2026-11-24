@@ -2,7 +2,7 @@ import yellowCardService from "./yellowcard.service";
 import fincraService from "./fincra.service";
 import WalletService from "./wallet.service";
 import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
-import { CURRENCY_COUNTRY } from "../common/payment-link.constants";
+import { ycCountryFor } from "../common/payment-link.constants";
 import logger from "../utils/logger.utils";
 import { GHANA_BANKS } from "../common/ghana-banks.constants";
 
@@ -41,9 +41,12 @@ class BankDirectoryService {
     private cache = new Map<string, { at: number; value: BankDirectory }>();
     private walletService = new WalletService();
 
-    async list(rawCurrency: string): Promise<BankDirectory> {
+    /** `country` picks the market for a currency several countries share (XOF, XAF) */
+    async list(rawCurrency: string, rawCountry?: string): Promise<BankDirectory> {
         const currency = String(rawCurrency || "").toUpperCase();
-        const cached = this.cache.get(currency);
+        const country = ycCountryFor(currency, rawCountry);
+        const cacheKey = `${currency}:${country || ""}`;
+        const cached = this.cache.get(cacheKey);
         if (cached && Date.now() - cached.at < CACHE_MS) return cached.value;
 
         let value: BankDirectory;
@@ -69,10 +72,10 @@ class BankDirectoryService {
         } else if (YC_BANK_CURRENCIES.includes(currency)) {
             let networks: any[] = [];
             try {
-                const data: any = await yellowCardService.getNetworks(CURRENCY_COUNTRY[currency]);
+                const data: any = await yellowCardService.getNetworks(country);
                 networks = Array.isArray(data?.networks) ? data.networks : Array.isArray(data) ? data : [];
             } catch (error: any) {
-                logger.warn("YellowCard bank list unavailable", { currency, status: error?.response?.status, error: error?.response?.data?.message || error?.message });
+                logger.warn("YellowCard bank list unavailable", { currency, country, status: error?.response?.status, error: error?.response?.data?.message || error?.message });
                 throw errorResponseMessage.createError(422, "We couldn't load the list of banks. Try again shortly.", ErrorSeverity.MEDIUM);
             }
             value = {
@@ -86,12 +89,12 @@ class BankDirectoryService {
 
         value.banks = this.dedupeAndSort(value.banks);
         // Don't cache an empty list: it's more likely a provider hiccup than a country with no banks
-        if (value.banks.length || !value.canResolve) this.cache.set(currency, { at: Date.now(), value });
+        if (value.banks.length || !value.canResolve) this.cache.set(cacheKey, { at: Date.now(), value });
         return value;
     }
 
     /** The account holder's name for this bank and account number */
-    async resolve(rawCurrency: string, bankCode: string, accountNumber: string): Promise<{ accountName: string; accountNumber: string; bankCode: string }> {
+    async resolve(rawCurrency: string, bankCode: string, accountNumber: string, rawCountry?: string): Promise<{ accountName: string; accountNumber: string; bankCode: string }> {
         const currency = String(rawCurrency || "").toUpperCase();
         const number = String(accountNumber || "").replace(/\s+/g, "");
         if (!bankCode || !/^[0-9A-Za-z-]{4,40}$/.test(number)) {
@@ -109,7 +112,7 @@ class BankDirectoryService {
                 return { accountName: result.accountName, accountNumber: number, bankCode };
             }
             if (YC_BANK_CURRENCIES.includes(currency)) {
-                const result: any = await yellowCardService.resolveBankAccount(number, bankCode, CURRENCY_COUNTRY[currency]);
+                const result: any = await yellowCardService.resolveBankAccount(number, bankCode, ycCountryFor(currency, rawCountry));
                 const name = result?.accountName || result?.account_name || result?.name;
                 if (!name) throw notFound();
                 return { accountName: String(name), accountNumber: number, bankCode };

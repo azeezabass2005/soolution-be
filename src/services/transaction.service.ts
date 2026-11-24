@@ -90,7 +90,7 @@ import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
 import { pickYellowCardNetwork } from "../utils/momo-network.utils";
 import identityService from "./identity.service";
-import { CURRENCY_COUNTRY } from "../common/payment-link.constants";
+import { CURRENCY_COUNTRY, ycCountryFor } from "../common/payment-link.constants";
 
 
 
@@ -970,7 +970,9 @@ class TransactionService {
 
         // YellowCard routes by channel type: we say bank or momo plus the country
         // and currency, and it picks the best working channel itself
-        const destCountry = destination.country;
+        // A CFA send names its country (e.g. XOF to Côte d'Ivoire); anything else uses the currency's own
+        const destCountry = ycCountryFor(toCurrency, destination.country) || destination.country;
+        destination.country = destCountry;
         const targetType = destination.accountType === 'bank' ? 'bank' : 'momo';
 
         let countryConfig: YellowCardCountryConfig;
@@ -1451,7 +1453,7 @@ class TransactionService {
 
         // Where the payer pays from. YellowCard routes by channel type (bank or
         // momo) plus country and currency, picking the best working channel itself.
-        const senderCountry = params.sender?.country || CURRENCY_COUNTRY[fromCurrency];
+        const senderCountry = ycCountryFor(fromCurrency, params.sender?.country) || params.sender?.country || CURRENCY_COUNTRY[fromCurrency];
         const targetType = destination?.accountType === 'bank' ? 'bank' : 'momo';
 
         let countryConfig: YellowCardCountryConfig;

@@ -78,6 +78,13 @@
       "when": 1795111106635,
       "tag": "0010_transaction_purpose",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795523688370,
+      "tag": "0011_country_for_cfa",
+      "breakpoints": true
     }
   ]
 }

@@ -2,6 +2,7 @@ import transactionRepository from "../repositories/transaction.repository";
 import userRepository from "../repositories/user.repository";
 import { TRANSACTION_STATUS } from "../common/constant";
 import type { TransactionStatus } from "../types/enums";
+import type { DateRange } from "../utils/date-range.utils";
 
 /** Admin dashboard metrics */
 class DashboardService {
@@ -13,14 +14,19 @@ class DashboardService {
      * - pendingPayments: transactions awaiting admin confirmation
      * - recentTransactions: last 10 with basic owner info
      */
-    async getAdminDashboard() {
+    /**
+     * With a range, everything is for that window: users who signed up in it
+     * (and of those, how many are verified) and transactions created in it.
+     */
+    async getAdminDashboard(range: DateRange = {}) {
+        const created = { createdFrom: range.from, createdTo: range.to };
         const [totalUsers, totals, completed, totalKYCVerified, pendingPayments, recentTransactions] = await Promise.all([
-            userRepository.count(),
-            transactionRepository.dashboardTotals(),
-            transactionRepository.dashboardTotals([TRANSACTION_STATUS.COMPLETED, TRANSACTION_STATUS.SUCCESSFUL] as TransactionStatus[]),
-            userRepository.count({ isKYCDone: true }),
-            transactionRepository.count({ status: TRANSACTION_STATUS.AWAITING_CONFIRMATION as TransactionStatus }),
-            transactionRepository.recentWithOwner(10),
+            userRepository.count(created),
+            transactionRepository.dashboardTotals(undefined, range),
+            transactionRepository.dashboardTotals([TRANSACTION_STATUS.COMPLETED, TRANSACTION_STATUS.SUCCESSFUL] as TransactionStatus[], range),
+            userRepository.count({ isKYCDone: true, ...created }),
+            transactionRepository.count({ status: TRANSACTION_STATUS.AWAITING_CONFIRMATION as TransactionStatus, ...created }),
+            transactionRepository.recentWithOwner(10, range),
         ]);
 
         return {

@@ -135,6 +135,11 @@ describe("admin view of users", () => {
         // Profit ₦11,600 − ₦11,000 = ₦600; our fee part ₦100 − ₦111 (1% of ₦11,100) = −₦11; spread ₦611
         expect(receives.find((r) => r.profitNgn !== null)).toMatchObject({ profitNgn: 600, spreadNgn: 611 });
         expect(receives.find((r) => r.profitNgn === null)?.note).toBe("Not converted to naira");
+        // Rates in naira per cedi: the user paid ₦120 (₦12,000 / 100) and Fincra charged ₦115
+        expect(send).toMatchObject({ userRate: 120, providerRate: 115 });
+        // The payment was worth ₦111 per cedi to the user (before the fee); converting fetched ₦116
+        expect(receives.find((r) => r.profitNgn !== null)).toMatchObject({ userRate: 111, providerRate: 116 });
+        expect(receives.find((r) => r.profitNgn === null)).toMatchObject({ userRate: 111, providerRate: null });
         expect(rows.find((r) => r.kind === "fund")).toMatchObject({ profitNgn: 200, feeNgn: 200 });
 
         const flows = adminProfitService.flows(rows);

@@ -25,6 +25,8 @@ export const ZCreateBeneficiary = z
             errorMap: () => ({ message: "Choose how the beneficiary gets paid" }),
         }),
         nickname: optionalText(60),
+        /** For XOF / XAF: the country the recipient is in */
+        country: z.preprocess((v) => (typeof v === "string" ? v.trim().toUpperCase() : v), z.string().regex(/^[A-Z]{2}$/, "Choose a country").optional()),
         bankName: optionalText(),
         bankCode: optionalText(40),
         accountNumber: optionalText(40),

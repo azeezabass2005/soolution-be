@@ -1,4 +1,4 @@
-import { and, count, desc, eq, ilike, inArray, lt, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, gte, ilike, inArray, lt, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import { users, userTierHistory } from "../db/schema";
 import type { Executor } from "../db/client";
 import type { PublicUser, User, UserIdentity, UserTierHistoryEntry } from "../types/entities";
@@ -244,9 +244,13 @@ class UserRepository {
         return rows.map((row) => row.id);
     }
 
-    async count(filter: { isKYCDone?: boolean } = {}): Promise<number> {
-        const where = filter.isKYCDone !== undefined ? eq(users.isKYCDone, filter.isKYCDone) : undefined;
-        const [row] = await exec().select({ n: count() }).from(users).where(where);
+    /** `createdFrom` / `createdTo`: only users who signed up in that window */
+    async count(filter: { isKYCDone?: boolean; createdFrom?: Date; createdTo?: Date } = {}): Promise<number> {
+        const where: SQL[] = [];
+        if (filter.isKYCDone !== undefined) where.push(eq(users.isKYCDone, filter.isKYCDone));
+        if (filter.createdFrom) where.push(gte(users.createdAt, filter.createdFrom));
+        if (filter.createdTo) where.push(lte(users.createdAt, filter.createdTo));
+        const [row] = await exec().select({ n: count() }).from(users).where(where.length ? and(...where) : undefined);
         return Number(row?.n ?? 0);
     }
 

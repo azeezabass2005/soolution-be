@@ -15,7 +15,7 @@ class BankController extends BaseController {
 
     private async list(req: Request, res: Response, next: NextFunction) {
         try {
-            const directory = await bankDirectoryService.list(String(req.query.currency || "NGN"));
+            const directory = await bankDirectoryService.list(String(req.query.currency || "NGN"), req.query.country ? String(req.query.country) : undefined);
             this.sendSuccess(res, directory);
         } catch (error) {
             next(error);
@@ -24,8 +24,8 @@ class BankController extends BaseController {
 
     private async resolve(req: Request, res: Response, next: NextFunction) {
         try {
-            const { currency, bankCode, accountNumber } = req.body || {};
-            const account = await bankDirectoryService.resolve(String(currency || ""), String(bankCode || ""), String(accountNumber || ""));
+            const { currency, bankCode, accountNumber, country } = req.body || {};
+            const account = await bankDirectoryService.resolve(String(currency || ""), String(bankCode || ""), String(accountNumber || ""), country ? String(country) : undefined);
             this.sendSuccess(res, { account });
         } catch (error) {
             next(error);

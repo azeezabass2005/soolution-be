@@ -1,4 +1,5 @@
 import BaseController from "../base-controller";
+import { lagosDayRange } from "../../../utils/date-range.utils";
 import TransactionService, { type TransactionListFilter } from "../../../services/transaction.service";
 import beneficiaryService from "../../../services/beneficiary.service";
 import {Request, Response, NextFunction} from "express";
@@ -15,7 +16,6 @@ import receiptService from "../../../services/receipt.service";
 import transactionLimitService from "../../../services/transaction-limit.service";
 
 /** Lagos is UTC+1 all year */
-const WAT_OFFSET_MS = 60 * 60 * 1000;
 
 /** Currencies the bank transfer / mobile money list covers (RMB has its own list) */
 const LISTED_CURRENCIES = ['GHS', 'NGN', 'KES', 'XAF', 'ZAR', 'TZS', 'UGX', 'XOF', 'RWF', 'BWP', 'ZMW', 'MWK'] as const;
@@ -230,33 +230,7 @@ class TransactionController extends BaseController {
      * Returns undefined if no valid dates are provided.
      */
     private buildDateRangeFilter(startDate: unknown, endDate: unknown): { from?: Date; to?: Date } | undefined {
-        const dateFilter: { from?: Date; to?: Date } = {};
-
-        if (typeof startDate === 'string') {
-            const parts = startDate.split('-');
-            if (parts.length === 3) {
-                const year = parseInt(parts[0], 10);
-                const month = parseInt(parts[1], 10) - 1;
-                const day = parseInt(parts[2], 10);
-                if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
-                    dateFilter.from = new Date(Date.UTC(year, month, day, 0, 0, 0, 0) - WAT_OFFSET_MS);
-                }
-            }
-        }
-
-        if (typeof endDate === 'string') {
-            const parts = endDate.split('-');
-            if (parts.length === 3) {
-                const year = parseInt(parts[0], 10);
-                const month = parseInt(parts[1], 10) - 1;
-                const day = parseInt(parts[2], 10);
-                if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
-                    dateFilter.to = new Date(Date.UTC(year, month, day, 23, 59, 59, 999) - WAT_OFFSET_MS);
-                }
-            }
-        }
-
-        return Object.keys(dateFilter).length > 0 ? dateFilter : undefined;
+        return lagosDayRange(startDate, endDate);
     }
 
     /** The user id an admin filtered by, if it's a well-formed id */

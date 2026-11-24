@@ -2,6 +2,7 @@ import RoleMiddleware from "../../../middlewares/role.middleware";
 import BaseController from "../base-controller";
 import { Request, Response, NextFunction } from "express";
 import dashboardService from "../../../services/dashboard.service";
+import { lagosDayRange } from "../../../utils/date-range.utils";
 
 class DashboardController extends BaseController {
     constructor () {
@@ -24,7 +25,9 @@ class DashboardController extends BaseController {
      */
     private async getDashboardData(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            return this.sendSuccess(res, await dashboardService.getAdminDashboard());
+            // Optional YYYY-MM-DD startDate / endDate (Lagos days) narrow every figure to that window
+            const range = lagosDayRange(req.query.startDate, req.query.endDate);
+            return this.sendSuccess(res, await dashboardService.getAdminDashboard(range));
         } catch (error: any) {
             return next(error);
         }

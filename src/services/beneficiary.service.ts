@@ -1,3 +1,4 @@
+import { MULTI_COUNTRY_CURRENCIES } from "../common/payment-link.constants";
 import beneficiaryRepository from "../repositories/beneficiary.repository";
 import type { Beneficiary as IBeneficiary } from "../types/entities";
 import type { BeneficiaryKind } from "../types/enums";
@@ -45,7 +46,10 @@ class BeneficiaryService {
         const isRmb = RMB_KINDS.includes(data.kind as any);
 
         // Only the fields that belong to this kind are kept
-        const fields: Partial<IBeneficiary> = { currency: data.currency, kind: data.kind, nickname: data.nickname };
+        // A CFA franc recipient remembers their country (XOF in Senegal, Côte d'Ivoire, …)
+        const countries = MULTI_COUNTRY_CURRENCIES[String(data.currency)];
+        const country = countries ? (countries.includes(String(data.country || "")) ? String(data.country) : countries[0]) : undefined;
+        const fields: Partial<IBeneficiary> = { currency: data.currency, kind: data.kind, nickname: data.nickname, country };
         if (data.kind === BENEFICIARY_KIND.BANK) Object.assign(fields, { bankName: data.bankName, bankCode: (data as any).bankCode, accountNumber: data.accountNumber, accountName: data.accountName });
         if (data.kind === BENEFICIARY_KIND.MOMO) Object.assign(fields, { momoNetwork: data.momoNetwork, momoNumber: data.momoNumber, momoName: data.momoName });
         if (isRmb) Object.assign(fields, { alipayNo: data.alipayNo, alipayName: data.alipayName, ...(data.kind === BENEFICIARY_KIND.ALIPAY ? { alipayType: data.alipayType } : {}) });
@@ -58,7 +62,9 @@ class BeneficiaryService {
         }
 
         const existing = await beneficiaryRepository.listForUserOfKind(userId, fields.currency!, fields.kind as BeneficiaryKind);
-        const duplicate = existing.find((b) => identityOf(b) === identityOf(fields));
+        // Saved before countries were kept: those are in the currency's default country
+        const countryOf = (b: Partial<IBeneficiary>) => b.country ?? countries?.[0] ?? null;
+        const duplicate = existing.find((b) => identityOf(b) === identityOf(fields) && countryOf(b) === countryOf(fields));
         if (duplicate) {
             throw errorResponseMessage.createError(ErrorResponseCode.RESOURCE_ALREADY_EXISTS, "You've already saved this beneficiary.", ErrorSeverity.LOW, { beneficiaryId: duplicate.id });
         }
@@ -82,6 +88,7 @@ class BeneficiaryService {
         return beneficiaryRepository.create({
             user: userId,
             currency: fields.currency!,
+            country: fields.country,
             kind: fields.kind as BeneficiaryKind,
             nickname: fields.nickname?.trim(),
             bankName: fields.bankName?.trim(),

@@ -244,10 +244,12 @@ class TransactionRepository {
         return rows.map(toTransaction);
     }
 
-    async count(filter: { detailType?: DetailType; status?: TransactionStatus } = {}): Promise<number> {
+    async count(filter: { detailType?: DetailType; status?: TransactionStatus; createdFrom?: Date; createdTo?: Date } = {}): Promise<number> {
         const where: SQL[] = [];
         if (filter.detailType) where.push(eq(transactions.detailType, filter.detailType));
         if (filter.status) where.push(eq(transactions.status, filter.status));
+        if (filter.createdFrom) where.push(gte(transactions.createdAt, filter.createdFrom));
+        if (filter.createdTo) where.push(lte(transactions.createdAt, filter.createdTo));
         const [row] = await exec().select({ n: count() }).from(transactions).where(where.length ? and(...where) : undefined);
         return Number(row?.n ?? 0);
     }
@@ -470,11 +472,15 @@ class TransactionRepository {
     }
 
     /** Latest transactions with a few owner fields (admin dashboard) */
-    async recentWithOwner(limit: number) {
+    async recentWithOwner(limit: number, range: { from?: Date; to?: Date } = {}) {
+        const where: SQL[] = [];
+        if (range.from) where.push(gte(transactions.createdAt, range.from));
+        if (range.to) where.push(lte(transactions.createdAt, range.to));
         const rows = await exec()
             .select({ transaction: transactions, firstName: users.firstName, lastName: users.lastName, email: users.email })
             .from(transactions)
             .leftJoin(users, eq(users.id, transactions.user))
+            .where(where.length ? and(...where) : undefined)
             .orderBy(desc(transactions.createdAt))
             .limit(limit);
         return rows.map(({ transaction, firstName, lastName, email }) => ({
@@ -488,7 +494,11 @@ class TransactionRepository {
      * fromAmount (else amount) when it was paid from NGN/GHS, the amount when it
      * pays out in NGN/GHS, and 0 otherwise.
      */
-    async dashboardTotals(statuses?: TransactionStatus[]): Promise<{ count: number; total: number }> {
+    async dashboardTotals(statuses?: TransactionStatus[], range: { from?: Date; to?: Date } = {}): Promise<{ count: number; total: number }> {
+        const where: SQL[] = [];
+        if (statuses?.length) where.push(inArray(transactions.status, statuses));
+        if (range.from) where.push(gte(transactions.createdAt, range.from));
+        if (range.to) where.push(lte(transactions.createdAt, range.to));
         const normalised = sql<string>`coalesce(sum(case
             when ${transactions.fromCurrency} in ('NGN', 'GHS') then coalesce(${transactionDetails.fromAmount}, ${transactions.amount})
             when ${transactions.currency} in ('NGN', 'GHS') then ${transactions.amount}
@@ -497,7 +507,7 @@ class TransactionRepository {
             .select({ n: count(), total: normalised })
             .from(transactions)
             .leftJoin(transactionDetails, eq(transactionDetails.transactionId, transactions.id))
-            .where(statuses?.length ? inArray(transactions.status, statuses) : undefined);
+            .where(where.length ? and(...where) : undefined);
         return { count: Number(row?.n ?? 0), total: toNumber(row?.total) };
     }
 }

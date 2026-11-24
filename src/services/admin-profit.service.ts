@@ -4,6 +4,8 @@ import { exec } from "../repositories/utils";
 import platformSettingsService from "./platform-settings.service";
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
+/** Rates keep four places (naira per cedi is small enough that cents matter) */
+const rate = (v: number) => Math.round(v * 10_000) / 10_000;
 const n = (v: unknown) => Number(v) || 0;
 
 export type ProfitKind = "fund" | "send" | "receive" | "withdraw";
@@ -29,6 +31,15 @@ export interface ProfitRow {
     profitNgn: number | null;
     /** Why profit isn't known, when it isn't */
     note?: string;
+    /**
+     * Naira per unit of `currency`. userRate: what the user got (sends: what
+     * they paid, less the fee; receives: what the payment was worth before the
+     * fee). providerRate: what it cost or fetched us (sends: Fincra's charge;
+     * receives: the GHS→NGN conversion). Null where there's no exchange or it
+     * isn't known yet.
+     */
+    userRate?: number | null;
+    providerRate?: number | null;
 }
 
 export interface ProfitFilter {
@@ -81,27 +92,34 @@ class AdminProfitService {
                 if (t.fromCurrency === "NGN" && t.currency === "GHS" && kinds.includes("send")) {
                     const charged = n(d?.fromAmount);
                     const cost = n(d?.providerCost);
+                    const units = n(t.amount);
+                    const ngnAmount = charged - fee;
+                    const userRate = units > 0 && ngnAmount > 0 ? rate(ngnAmount / units) : null;
                     if (!(cost > 0)) {
-                        out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: null, profitNgn: null, note: "Paid by our team (manual): no provider cost recorded" });
+                        out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: null, profitNgn: null, userRate, providerRate: null, note: "Paid by our team (manual): no provider cost recorded" });
                         continue;
                     }
-                    const ngnAmount = charged - fee;
                     const providerFee = ngnAmount * n(d?.providerFeePercent) / 100;
                     const profit = r2(charged - cost);
                     const platformFee = r2(fee - providerFee);
-                    out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: r2(profit - platformFee), profitNgn: profit });
+                    out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: r2(profit - platformFee), profitNgn: profit, userRate, providerRate: units > 0 ? rate(cost / units) : null });
                 } else if (t.fromCurrency === "GHS" && t.currency === "NGN" && kinds.includes("receive")) {
                     const credited = n(d?.fromAmount);
                     const gross = credited + fee;
                     const providerFee = gross * n(d?.providerFeePercent) / 100;
                     const platformFee = r2(fee - providerFee);
                     const c = converted.get(t.id);
+                    const units = n(t.amount);
+                    const userRate = units > 0 && gross > 0 ? rate(gross / units) : null;
                     if (!c || c.status !== "successful" || !(n(c.amountReceived) > 0)) {
-                        out.push({ ...this.base(t, "receive"), feeNgn: fee, spreadNgn: null, profitNgn: null, note: c ? "Converting to naira" : "Not converted to naira" });
+                        out.push({ ...this.base(t, "receive"), feeNgn: fee, spreadNgn: null, profitNgn: null, userRate, providerRate: null, note: c ? "Converting to naira" : "Not converted to naira" });
                         continue;
                     }
                     const profit = r2(n(c.amountReceived) - credited);
-                    out.push({ ...this.base(t, "receive"), feeNgn: fee, spreadNgn: r2(profit - platformFee), profitNgn: profit });
+                    // What Fincra gave per cedi converted
+                    const converted_ = n(c.sourceAmount);
+                    const providerRate = converted_ > 0 ? rate(n(c.amountReceived) / converted_) : n(c.rate) > 0 ? rate(n(c.rate)) : null;
+                    out.push({ ...this.base(t, "receive"), feeNgn: fee, spreadNgn: r2(profit - platformFee), profitNgn: profit, userRate, providerRate });
                 }
             }
         }

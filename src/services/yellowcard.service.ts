@@ -3,10 +3,16 @@ import crypto from "crypto";
 import axios, { AxiosInstance } from "axios";
 import logger from "../utils/logger.utils";
 import errorResponseMessage, { ErrorResponseCode, ErrorSeverity } from "../common/messages/error-response-message";
-import { CURRENCY_COUNTRY, YELLOWCARD_FLOW_CURRENCIES } from "../common/payment-link.constants";
+import { CURRENCY_COUNTRY, MULTI_COUNTRY_CURRENCIES, YELLOWCARD_FLOW_CURRENCIES } from "../common/payment-link.constants";
 
 /** The KYC person on a payment (sender) or collection (recipient) */
 export type YellowCardChannelType = "bank" | "momo";
+
+/** A currency in one country, e.g. XOF in Côte d'Ivoire */
+export interface YellowCardMarket {
+    currency: string;
+    country: string;
+}
 
 export interface YellowCardCountryConfig {
     country: string;
@@ -341,7 +347,7 @@ class YellowCardService {
             const data = await this.get("/country/config", { country, currency });
             const raw = data?.data ?? data ?? {};
             const value: YellowCardCountryConfig = {
-                country: raw.country || country,
+                country: String(country).toUpperCase(),
                 currency: raw.currency || currency,
                 send: raw.send === "active",
                 receive: raw.receive === "active",
@@ -418,11 +424,34 @@ class YellowCardService {
         return { send: pick("withdraw"), receive: pick("deposit") };
     }
 
+    /** Extra CFA markets YellowCard turned down recently, so they aren't asked about on every page load */
+    private unavailableMarkets = new Map<string, number>();
+
+    /** The config for one of the extra countries sharing a currency, or null when YellowCard doesn't have it on */
+    private async extraMarketConfig(country: string, currency: string): Promise<YellowCardCountryConfig | null> {
+        const key = `${country}:${currency}`;
+        const at = this.unavailableMarkets.get(key);
+        if (at && Date.now() - at < COUNTRY_CONFIG_TTL_MS) return null;
+        const config = await this.getCountryConfig(country, currency).catch(() => null);
+        if (!config || !config.channelTypes.length || (!config.send && !config.receive)) {
+            this.unavailableMarkets.set(key, Date.now());
+            return null;
+        }
+        return config;
+    }
+
     /**
      * Which of our YellowCard currencies can be sent to and received in right
-     * now. A currency YellowCard can't be reached for is left out.
+     * now. A currency YellowCard can't be reached for is left out. `markets`
+     * says which countries: one per currency, except the CFA francs, which
+     * list each country sharing them that YellowCard has on.
      */
-    public async flowCurrencies(): Promise<{ send: string[]; receive: string[]; unavailable: Record<string, string> }> {
+    public async flowCurrencies(): Promise<{
+        send: string[];
+        receive: string[];
+        markets: { send: YellowCardMarket[]; receive: YellowCardMarket[] };
+        unavailable: Record<string, string>;
+    }> {
         const unavailable: Record<string, string> = {};
         const configs = await Promise.all(YELLOWCARD_FLOW_CURRENCIES.map((currency) =>
             this.getCountryConfig(CURRENCY_COUNTRY[currency], currency).catch((error: any) => {
@@ -437,9 +466,19 @@ class YellowCardService {
             return c.channelTypes.length > 0;
         });
         if (Object.keys(unavailable).length) logger.warn("YellowCard: some currencies are not on offer", { unavailable });
+
+        // The other countries sharing a CFA franc, each checked on its own
+        const extras = (await Promise.all(Object.entries(MULTI_COUNTRY_CURRENCIES).flatMap(([currency, countries]) =>
+            countries.slice(1).map((country) => this.extraMarketConfig(country, currency)))))
+            .filter((c): c is YellowCardCountryConfig => !!c);
+        const all = [...usable, ...extras];
+        const market = (c: YellowCardCountryConfig): YellowCardMarket => ({ currency: c.currency, country: String(c.country).toUpperCase() });
+        const send = all.filter((c) => c.send);
+        const receive = all.filter((c) => c.receive);
         return {
-            send: usable.filter((c) => c.send).map((c) => c.currency),
-            receive: usable.filter((c) => c.receive).map((c) => c.currency),
+            send: [...new Set(send.map((c) => c.currency))],
+            receive: [...new Set(receive.map((c) => c.currency))],
+            markets: { send: send.map(market), receive: receive.map(market) },
             unavailable,
         };
     }

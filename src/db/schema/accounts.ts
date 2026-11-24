@@ -179,6 +179,8 @@ export const beneficiaries = pgTable(
         id: id(),
         user: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
         currency: text("currency").notNull(),
+        /** For a currency several countries share (XOF, XAF): which one; null means the currency's default */
+        country: text("country"),
         kind: text("kind").$type<BeneficiaryKind>().notNull(),
         nickname: text("nickname"),
         bankName: text("bank_name"),

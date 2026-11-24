@@ -12,6 +12,8 @@ export const ZCreatePaymentLink = z.object({
     currency: z.preprocess((v) => (typeof v === "string" ? v.trim().toUpperCase() : v), z.enum(PAYMENT_LINK_CURRENCIES, {
         errorMap: () => ({ message: "Choose a supported currency" }),
     })),
+    /** For XOF / XAF: the country the payer pays from */
+    country: z.preprocess((v) => (typeof v === "string" ? v.trim().toUpperCase() || undefined : v ?? undefined), z.string().regex(/^[A-Z]{2}$/, "Choose a country").optional()),
     amount: optionalAmount,
     title: optionalText(PAYMENT_LINK_TITLE_MAX),
     description: optionalText(PAYMENT_LINK_DESCRIPTION_MAX),

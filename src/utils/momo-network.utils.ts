@@ -27,6 +27,11 @@ const PROVIDER_ALIASES: Record<string, string[]> = {
     "africell": ["africell"],
     "telebirr": ["telebirr", "ethio"],
     "mascom myzaka": ["mascom", "myzaka"],
+    // CFA franc countries
+    "moov money": ["moov", "flooz"],
+    "free money": ["free"],
+    "t-money": ["tmoney", "togocel", "yas"],
+    "airtel money": ["airtel"],
 };
 
 const squash = (value: unknown) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");

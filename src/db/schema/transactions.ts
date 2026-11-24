@@ -12,6 +12,8 @@ export const paymentLinks = pgTable(
         /** Public, unguessable id used in the link URL */
         slug: text("slug").notNull().unique("payment_links_slug_key"),
         currency: text("currency").notNull(),
+        /** For a currency several countries share (XOF, XAF): where the payer pays from; null means the default */
+        country: text("country"),
         toCurrency: text("to_currency").notNull().default("NGN"),
         amount: decimal("amount"),
         title: text("title"),

@@ -12,6 +12,8 @@ import { USER_TIER } from "../common/tier.constants";
 import {
     COUNTRY_DIAL_CODE,
     CURRENCY_COUNTRY,
+    MULTI_COUNTRY_CURRENCIES,
+    ycCountryFor,
     MAX_ACTIVE_PAYMENT_LINKS,
     MAX_PENDING_PAYMENTS_PER_LINK,
     PAYMENT_LINK_MOMO_ONLY,
@@ -119,7 +121,7 @@ class PaymentLinkService {
     async create(userId: string, body: unknown) {
         // Same rule as receiving directly: verify your BVN first
         await transactionLimitService.assertCanTransact(userId);
-        const data = parse<{ currency: string; amount?: number; title?: string; description?: string; usage: "single" | "reusable"; redirectUrl?: string; collect: PaymentLinkCollectField[] }>(ZCreatePaymentLink, body);
+        const data = parse<{ currency: string; country?: string; amount?: number; title?: string; description?: string; usage: "single" | "reusable"; redirectUrl?: string; collect: PaymentLinkCollectField[] }>(ZCreatePaymentLink, body);
         // YellowCard collects every currency except GHS and needs the owner's KYC details
         if (data.currency !== "GHS") await identityService.assertTransferDetails(userId);
         // Fincra's GHS checkout takes whole cedis
@@ -142,6 +144,8 @@ class PaymentLinkService {
                     user: userId,
                     slug: generateSlug(),
                     currency: data.currency,
+                    // Kept only for the CFA francs, and only a country that uses the currency
+                    country: MULTI_COUNTRY_CURRENCIES[data.currency] ? ycCountryFor(data.currency, data.country) : undefined,
                     toCurrency: PAYMENT_LINK_TO_CURRENCY,
                     amount: data.amount !== undefined ? round2(data.amount) : undefined,
                     // Older clients send the note as "description"; it becomes the title
@@ -195,6 +199,7 @@ class PaymentLinkService {
             id: link.id,
             slug: link.slug,
             currency: link.currency,
+            country: link.country ?? null,
             toCurrency: link.toCurrency,
             amount: link.amount ?? null,
             title: link.title || link.description || null,
@@ -231,7 +236,7 @@ class PaymentLinkService {
     async getPublic(slug: string) {
         const { link, owner } = await this.findPayable(slug);
         const used = await this.isUsedUp(link);
-        const methods = await this.payMethods(link.currency);
+        const methods = await this.payMethods(link.currency, link.country);
         // No way to pay in this currency right now (e.g. YellowCard has collections off)
         const paused = (await platformSettingsService.getOperations()).pause.payments;
         const payable = !paused && this.canTakePayments(link, owner) && methods.length > 0;
@@ -239,6 +244,8 @@ class PaymentLinkService {
             slug: link.slug,
             payee: (owner.tier >= USER_TIER.BUSINESS ? await approvedBusinessName(owner.id) : undefined) || ownerName(owner),
             currency: link.currency,
+            /** The payer's country (e.g. CI for XOF in Côte d'Ivoire) */
+            country: ycCountryFor(link.currency, link.country) ?? null,
             amount: link.amount ?? null,
             title: link.title || link.description || null,
             methods,
@@ -261,11 +268,11 @@ class PaymentLinkService {
      * GHS goes through Fincra's checkout, mobile money only. Falls back to our own list
      * if YellowCard can't be reached, so the page still loads.
      */
-    private async payMethods(currency: string): Promise<("momo" | "bank")[]> {
+    private async payMethods(currency: string, linkCountry?: string | null): Promise<("momo" | "bank")[]> {
         const fallback: ("momo" | "bank")[] = PAYMENT_LINK_MOMO_ONLY.includes(currency) ? ["momo"] : ["momo", "bank"];
         if (currency === "GHS" || !CURRENCY_COUNTRY[currency]) return fallback;
         try {
-            const config = await yellowCardService.getCountryConfig(CURRENCY_COUNTRY[currency], currency);
+            const config = await yellowCardService.getCountryConfig(ycCountryFor(currency, linkCountry), currency);
             if (!config.receive) return [];
             // Mobile money first, as payers mostly use it
             return (["momo", "bank"] as const).filter((type) => config.channelTypes.includes(type));
@@ -337,7 +344,7 @@ class PaymentLinkService {
     }
 
     private async startCollection(link: IPaymentLink, owner: IUser, input: PayPaymentLinkInput, amount: number) {
-        const country = CURRENCY_COUNTRY[link.currency];
+        const country = ycCountryFor(link.currency, link.country);
         const paymentLinkId = link.id;
         const payer = {
             name: input.payerName || (input.method === "momo" ? input.momoName : input.accountName),
