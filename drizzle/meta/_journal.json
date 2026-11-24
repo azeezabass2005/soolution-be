@@ -92,6 +92,13 @@
       "when": 1795545720191,
       "tag": "0012_payment_link_deleted_at",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1795546587858,
+      "tag": "0013_admin_roles",
+      "breakpoints": true
     }
   ]
 }

@@ -87,7 +87,8 @@ export const redactProviders = (body: any): { body: any; hits: string[] } => {
 const providerRedaction = (req: Request, res: Response, next: NextFunction) => {
     const json = res.json.bind(res);
     res.json = (body?: any) => {
-        if (res.locals.user?.role === ROLE_MAP.ADMIN) return json(body);
+        // Super admins see provider names (they run the Technical pages); staff and users don't
+        if (res.locals.user?.role === ROLE_MAP.ADMIN && !res.locals.user?.adminRoleId) return json(body);
         const { body: safe, hits } = redactProviders(body);
         if (hits.length) {
             logger.warn("Provider name removed from a response; fix the source", { method: req.method, path: req.originalUrl, fields: hits.slice(0, 10) });

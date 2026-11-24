@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import BaseController from '../../base-controller';
-import RoleMiddleware from '../../../../middlewares/role.middleware';
+import RoleMiddleware, { allowed } from '../../../../middlewares/role.middleware';
+import type { Permission } from '../../../../common/permissions';
 import platformSettingsService from '../../../../services/platform-settings.service';
 import errorResponseMessage, { ErrorSeverity } from '../../../../common/messages/error-response-message';
 import { PricingError, legacyNgnFeePairs } from '../../../../common/pricing';
@@ -19,7 +20,8 @@ class AdminPlatformSettingsController extends BaseController {
     }
 
     protected setupRoutes(): void {
-        this.router.use(RoleMiddleware.isAdmin);
+        // Anyone who manages a part of these settings can read them; saving checks each part (see put)
+        this.router.use(RoleMiddleware.can('pricing.api_currencies', 'pricing.manual_payments', 'pricing.daily_limits', 'platform_controls', 'dashboard.platform_controls'));
         this.router.get('/', this.get.bind(this));
         this.router.put('/', this.put.bind(this));
     }
@@ -41,6 +43,19 @@ class AdminPlatformSettingsController extends BaseController {
         try {
             const user = res.locals.user;
             const { rateMarkupPercent, additionalFeePercent, providerBaseFeePercent, tierDailyLimitNgn, pricing, operations } = req.body ?? {};
+
+            // Each part of the settings belongs to a permission; saving one you don't hold is refused
+            const needs: Array<[boolean, Permission[], string]> = [
+                [pricing !== undefined || rateMarkupPercent !== undefined || additionalFeePercent !== undefined || providerBaseFeePercent !== undefined, ['pricing.api_currencies'], 'currency pricing'],
+                [tierDailyLimitNgn !== undefined, ['pricing.daily_limits'], 'daily limits'],
+                [operations?.manual !== undefined, ['pricing.manual_payments'], 'manual payments'],
+                [operations?.pause !== undefined, ['platform_controls', 'dashboard.platform_controls'], 'platform controls'],
+            ];
+            for (const [touched, permissions, what] of needs) {
+                if (!touched) continue;
+                const ok = (await Promise.all(permissions.map((p) => allowed(res, p)))).some(Boolean);
+                if (!ok) return next(errorResponseMessage.createError(403, `You can't change ${what}`, ErrorSeverity.HIGH));
+            }
 
             const inRange = (v: any, min: number, max: number) =>
                 typeof v === 'number' && isFinite(v) && v >= min && v <= max;

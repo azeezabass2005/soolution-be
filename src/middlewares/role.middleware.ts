@@ -1,92 +1,67 @@
-import {NextFunction, Request, Response} from "express";
-import {ROLE_MAP} from "../common/constant";
-import errorResponseMessage, {ErrorResponse, ErrorSeverity} from "../common/messages/error-response-message";
+import { NextFunction, Request, Response } from "express";
+import { ROLE_MAP } from "../common/constant";
+import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
+import { hasPermission, type AdminAccess, type Permission } from "../common/permissions";
+import adminAccessService from "../services/admin-access.service";
 
-type RoleType = keyof typeof ROLE_MAP;
-type RoleNumber = typeof ROLE_MAP[RoleType];
+const forbidden = (message = "You don't have permission to perform this action") =>
+    errorResponseMessage.createError(403, message, ErrorSeverity.HIGH);
+
+/**
+ * The signed-in admin's access, worked out once per request and kept on
+ * res.locals.access for handlers that hide fields (see accessOf).
+ */
+export async function accessOf(res: Response): Promise<AdminAccess> {
+    if (res.locals.access) return res.locals.access as AdminAccess;
+    const access = await adminAccessService.accessFor(res.locals.user);
+    res.locals.access = access;
+    return access;
+}
+
+/** Whether the signed-in admin holds a permission (for hiding parts of a response) */
+export async function allowed(res: Response, permission: Permission): Promise<boolean> {
+    return hasPermission(await accessOf(res), permission);
+}
 
 class RoleMiddleware {
     /**
-     * Returns a middleware that allows the request only if the authenticated
-     * user's role is included in `allowedRoles`.
+     * Super admins only. Every route that hasn't been given a specific
+     * permission stays here, so staff never reach something by default.
      */
-    hasRole(allowedRoles: RoleNumber | RoleNumber[]) {
-        const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
-        return (_req: Request, res: Response, next: NextFunction) => {
-            const user = res.locals.user;
-            if (!user) {
-                return next(errorResponseMessage.unauthorized());
-            }
-            if (!roles.includes(user.role)) {
-                return next(errorResponseMessage.createError(
-                    403,
-                    "You don't have permission to perform this action",
-                    ErrorSeverity.HIGH
-                ));
-            }
+    isAdmin = async (_req: Request, res: Response, next: NextFunction) => {
+        try {
+            if (!res.locals.user) return next(errorResponseMessage.unauthorized());
+            const access = await accessOf(res);
+            if (!access.superAdmin) return next(forbidden(res.locals.user.role === ROLE_MAP.ADMIN ? "Only a super admin can do this" : "Admin access required"));
             return next();
-        };
-    }
-
-    /**
-     * Allows the request only if the authenticated user has the ADMIN role.
-     * Arrow-bound so it can be passed as a bare middleware reference
-     * (e.g. `RoleMiddleware.isAdmin`) without losing `this`.
-     */
-    isAdmin = (_req: Request, res: Response, next: NextFunction) => {
-        const user = res.locals.user;
-        if (!user) {
-            return next(errorResponseMessage.unauthorized());
+        } catch (error) {
+            return next(error);
         }
-        if (user.role !== ROLE_MAP.ADMIN) {
-            return next(errorResponseMessage.createError(
-                403,
-                "Admin access required",
-                ErrorSeverity.HIGH
-            ));
-        }
-        return next();
     };
 
-    /**
-     * Checks if user is the owner of the resource or an admin
-     * @param resourceUserId string of the user id or an error that occurred when getting it
-     * @param req
-     * @param res
-     * @param next
-    */
-    async isOwnerOrAdmin(resourceUserId: string | ErrorResponse, req: Request, res: Response, next: NextFunction) {
+    /** Anyone on the admin team (super admin or staff), whatever their permissions */
+    isStaff = async (_req: Request, res: Response, next: NextFunction) => {
         try {
-            const user = res.locals.user;
-
-            if (!user) {
-                return next(errorResponseMessage.unauthorized());
-            }
-
-            // If user is admin, allow access
-            if (user.role === ROLE_MAP.ADMIN) {
-                return next();
-            }
-
-            // Check if resource user id ror
-            if(typeof resourceUserId !== 'string') {
-                return next(resourceUserId)
-            }
-
-            // Check if user is the owner
-            if (String(user.id) !== resourceUserId) {
-                return next(errorResponseMessage.createError(
-                    403,
-                    "You don't have permission to perform this action",
-                    ErrorSeverity.HIGH
-                ));
-            }
-
-            next();
+            if (!res.locals.user) return next(errorResponseMessage.unauthorized());
+            if (res.locals.user.role !== ROLE_MAP.ADMIN) return next(forbidden("Admin access required"));
+            await accessOf(res);
+            return next();
         } catch (error) {
-            next(error);
+            return next(error);
         }
-    }
+    };
+
+    /** Admins holding at least one of these permissions (super admins hold all) */
+    can = (...permissions: Permission[]) => async (_req: Request, res: Response, next: NextFunction) => {
+        try {
+            if (!res.locals.user) return next(errorResponseMessage.unauthorized());
+            const access = await accessOf(res);
+            if (!permissions.some((p) => hasPermission(access, p))) return next(forbidden());
+            return next();
+        } catch (error) {
+            return next(error);
+        }
+    };
 }
 
 export default new RoleMiddleware();

@@ -11,6 +11,25 @@ export const USER_HEAR_ABOUT_US = [
     "friends", "ads", "search-engines", "social-media", "referrals", "events", "youtube",
     "instagram", "x-twitter", "facebook", "tiktok", "google", "others",
 ] as const;
+/**
+ * Staff roles a super admin creates (e.g. "Customer support"), each with the
+ * permissions it grants (see common/permissions.ts). An ADMIN account with a
+ * role is staff and gets only those; an ADMIN account without one is a super
+ * admin.
+ */
+export const adminRoles = pgTable(
+    "admin_roles",
+    {
+        id: id(),
+        name: text("name").notNull(),
+        description: text("description"),
+        permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
+        createdBy: uuid("created_by"),
+        ...timestamps(),
+    },
+    (t) => [uniqueIndex("admin_roles_name_key").on(sql`lower(${t.name})`)]
+);
+
 export const USER_ACCOUNT_STATUSES = ["active", "inactive", "suspended", "pending", "deactivated"] as const;
 
 /**
@@ -62,6 +81,12 @@ export const users = pgTable(
         kycRejectionReason: text("kyc_rejection_reason"),
         isCompleted: boolean("is_completed").notNull().default(false),
         role: integer("role").notNull().default(ROLE_MAP.USER),
+        /**
+         * For ADMIN accounts: their staff role. None means super admin. Deleting a
+         * role is refused while anyone has it (restrict), so nobody becomes a
+         * super admin by accident.
+         */
+        adminRoleId: uuid("admin_role_id").references(() => adminRoles.id, { onDelete: "restrict" }),
         status: text("status").$type<(typeof USER_ACCOUNT_STATUSES)[number]>().notNull().default("active"),
         freeze: text("freeze").$type<UserFreeze>().notNull().default("none"),
         freezeReason: text("freeze_reason"),
@@ -92,6 +117,28 @@ export const users = pgTable(
         uniqueIndex("users_identity_bvn_hash_key").on(t.identityBvnHash).where(sql`${t.identityBvnHash} is not null`),
         uniqueIndex("users_identity_nin_hash_key").on(t.identityNinHash).where(sql`${t.identityNinHash} is not null`),
     ]
+);
+
+/**
+ * Invitations to join the admin team. The link carries a random token; only
+ * its hash is stored. Accepting needs the person signed in with the invited
+ * email. No role means they're invited as a super admin.
+ */
+export const adminInvites = pgTable(
+    "admin_invites",
+    {
+        id: id(),
+        email: text("email").notNull(),
+        roleId: uuid("role_id").references(() => adminRoles.id, { onDelete: "cascade" }),
+        tokenHash: text("token_hash").notNull().unique("admin_invites_token_hash_key"),
+        invitedBy: uuid("invited_by").notNull(),
+        expiresAt: timestamptz("expires_at").notNull(),
+        acceptedAt: timestamptz("accepted_at"),
+        acceptedBy: uuid("accepted_by"),
+        revokedAt: timestamptz("revoked_at"),
+        ...timestamps(),
+    },
+    (t) => [index("admin_invites_email_idx").on(sql`lower(${t.email})`, t.createdAt)]
 );
 
 /** Tier changes (approvals, BVN verification, admin overrides). Was `user.tierHistory`. */

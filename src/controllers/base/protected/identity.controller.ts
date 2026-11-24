@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import RoleMiddleware from "../../../middlewares/role.middleware";
 import BaseController from "../base-controller";
 import { MulterMiddleware } from "../../../middlewares/multer.middleware";
 import identityService from "../../../services/identity.service";
@@ -34,11 +35,10 @@ class IdentityController extends BaseController {
         this.router.post("/users/:userId/reset-verification", this.requireAdmin, this.resetVerification.bind(this));
     }
 
-    private requireAdmin(_req: Request, res: Response, next: NextFunction): void {
-        if (res.locals.user?.role !== ROLE_MAP.ADMIN) {
-            return next(errorResponseMessage.createError(403, "You don't have permission to perform this action", ErrorSeverity.HIGH));
-        }
-        next();
+    /** Identity verification inside user management (the "users.identity" permission) */
+    // A method, not a field: the base controller registers routes before fields exist
+    private requireAdmin(req: Request, res: Response, next: NextFunction) {
+        return RoleMiddleware.can("users.identity")(req, res, next);
     }
 
     private async getStatus(_req: Request, res: Response, next: NextFunction): Promise<void> {

@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import RoleMiddleware, { allowed } from "../../../middlewares/role.middleware";
 import BaseController from "../base-controller";
 import KycApplicationService from "../../../services/kyc-application.service";
 import transactionLimitService from "../../../services/transaction-limit.service";
@@ -48,11 +49,10 @@ class KycController extends BaseController {
         this.router.patch("/:id/status", this.requireAdmin, this.reviewApplication.bind(this));
     }
 
-    private requireAdmin(_req: Request, res: Response, next: NextFunction): void {
-        if (res.locals.user?.role !== ROLE_MAP.ADMIN) {
-            return next(errorResponseMessage.createError(403, "You don't have permission to perform this action", ErrorSeverity.HIGH));
-        }
-        next();
+    /** KYC/KYB reviewers (the "kyc" permission) */
+    // A method, not a field: the base controller registers routes before fields exist
+    private requireAdmin(req: Request, res: Response, next: NextFunction) {
+        return RoleMiddleware.can("kyc")(req, res, next);
     }
 
     private async getMyApplication(_req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -208,7 +208,23 @@ class KycController extends BaseController {
 
     private async getApplication(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            this.sendSuccess(res, { application: await this.kycService.adminGet(req.params.id) });
+            const application = await this.kycService.adminGet(req.params.id);
+            // Company details and documents, and personal identity details, each need their own permission
+            const hidden: string[] = [];
+            if (!(await allowed(res, "kyc.company"))) {
+                if (application.type === "business") application.general = {};
+                application.ubos = [];
+                application.directors = [];
+                application.documents = [];
+                // Earlier approved applications keep their details and documents too: only say what they were
+                application.archive = (application.archive || []).map((entry: any) => ({ type: entry.type, tier: entry.tier, displayName: entry.displayName, reviewedAt: entry.reviewedAt, archivedAt: entry.archivedAt }));
+                hidden.push("company");
+            }
+            if (!(await allowed(res, "users.identity"))) {
+                application.personal = {};
+                hidden.push("identity");
+            }
+            this.sendSuccess(res, { application: { ...application, hidden } });
         } catch (error) {
             next(error);
         }

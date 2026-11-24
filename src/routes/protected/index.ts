@@ -28,6 +28,8 @@ import kycController from "../../controllers/base/protected/kyc.controller";
 import beneficiaryController from "../../controllers/base/protected/beneficiary.controller";
 import paymentLinkController from "../../controllers/base/protected/payment-link.controller";
 import bankController from "../../controllers/base/protected/bank.controller";
+import adminTeamController from "../../controllers/base/protected/admin/team.controller";
+import adminInviteController from "../../controllers/base/protected/admin-invite.controller";
 
 const path = "/protected";
 const protectedRouter = Router();
@@ -61,7 +63,7 @@ protectedRouter.use(`${path}/beneficiaries`, beneficiaryController);
 protectedRouter.use(`${path}/payment-links`, paymentLinkController);
 protectedRouter.use(`${path}/banks`, bankController);
 
-// Admin-only routes (each controller applies RoleMiddleware.isAdmin internally)
+// Admin routes: each controller checks the permission it needs (RoleMiddleware.can / isAdmin = super admin)
 protectedRouter.use(`${path}/admin/ledger`, adminLedgerController);
 protectedRouter.use(`${path}/admin/reconciliation`, adminReconciliationController);
 protectedRouter.use(`${path}/admin/webhooks`, adminWebhooksController);
@@ -73,6 +75,9 @@ protectedRouter.use(`${path}/admin/spotflow`, adminSpotflowController);
 protectedRouter.use(`${path}/admin/daya`, adminDayaController);
 protectedRouter.use(`${path}/admin/hyperrails`, adminHyperRailsController);
 protectedRouter.use(`${path}/admin/insights`, adminInsightsController);
+protectedRouter.use(`${path}/admin/team`, adminTeamController);
+// Any signed-in account: accept an invitation to the admin team
+protectedRouter.use(`${path}/admin-invites`, adminInviteController);
 protectedRouter.use(`${path}/kyc`, kycController);
 
 export default protectedRouter;

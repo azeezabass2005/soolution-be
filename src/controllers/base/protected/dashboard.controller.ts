@@ -1,4 +1,4 @@
-import RoleMiddleware from "../../../middlewares/role.middleware";
+import RoleMiddleware, { allowed } from "../../../middlewares/role.middleware";
 import BaseController from "../base-controller";
 import { Request, Response, NextFunction } from "express";
 import dashboardService from "../../../services/dashboard.service";
@@ -12,7 +12,7 @@ class DashboardController extends BaseController {
 
     protected setupRoutes(): void {
         // Routes to get the dashboard data
-        this.router.get("/", RoleMiddleware.isAdmin, this.getDashboardData.bind(this));
+        this.router.get("/", RoleMiddleware.can("dashboard"), this.getDashboardData.bind(this));
     }
 
     /**
@@ -27,7 +27,15 @@ class DashboardController extends BaseController {
         try {
             // Optional YYYY-MM-DD startDate / endDate (Lagos days) narrow every figure to that window
             const range = lagosDayRange(req.query.startDate, req.query.endDate);
-            return this.sendSuccess(res, await dashboardService.getAdminDashboard(range));
+            const data: Record<string, unknown> = await dashboardService.getAdminDashboard(range);
+            // Money amounts are the "transaction volume" cards; without them only counts are sent
+            if (!(await allowed(res, "dashboard.volume"))) {
+                delete data.totalAmountInitiated;
+                delete data.totalAmountCompleted;
+            }
+            // The recent list is transaction history
+            if (!(await allowed(res, "transactions"))) data.recentTransactions = [];
+            return this.sendSuccess(res, data);
         } catch (error: any) {
             return next(error);
         }

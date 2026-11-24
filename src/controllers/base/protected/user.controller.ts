@@ -2,7 +2,8 @@ import BaseController from "../base-controller";
 import {Request, Response, NextFunction} from "express";
 import errorResponseMessage from "../../../common/messages/error-response-message";
 import {ROLE_MAP} from "../../../common/constant";
-import RoleMiddleware from "../../../middlewares/role.middleware";
+import RoleMiddleware, { accessOf, allowed } from "../../../middlewares/role.middleware";
+import { hasPermission, type Permission } from "../../../common/permissions";
 import {userUpdateValidate} from "../../../validators";
 import VerificationService from "../../../services/verification.service";
 import { approvedBusinessName } from "../../../services/business-name.service";
@@ -52,13 +53,13 @@ class UserController extends BaseController {
         });
         this.router.post("/change-password", changeLimiter, this.changePassword.bind(this));
         // Get All Users route
-        this.router.get("/", RoleMiddleware.isAdmin, this.getAllUsers.bind(this));
+        this.router.get("/", RoleMiddleware.can("users.directory", "users.stats"), this.getAllUsers.bind(this));
         // Update user route
-        this.router.patch("/:id", RoleMiddleware.isAdmin, userUpdateValidate,  this.updateUser.bind(this));
+        this.router.patch("/:id", RoleMiddleware.can("users.account_controls"), userUpdateValidate,  this.updateUser.bind(this));
         // One user's money, wallets, activity and possible repeat sign-ups
-        this.router.get("/:id/overview", RoleMiddleware.isAdmin, this.getOverview.bind(this));
+        this.router.get("/:id/overview", RoleMiddleware.can("users.directory"), this.getOverview.bind(this));
         // Suspend, freeze, or set a personal daily limit
-        this.router.patch("/:id/controls", RoleMiddleware.isAdmin, this.updateControls.bind(this));
+        this.router.patch("/:id/controls", RoleMiddleware.can("users.account_controls", "users.daily_limit"), this.updateControls.bind(this));
     }
 
     private async changePassword(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -126,6 +127,8 @@ class UserController extends BaseController {
             const sanitizedUser = {
                 ...otherUserData,
                 role: this.getRoleString(user.role),
+                /** Admins: super admin or staff, and what they can see and do (null for users) */
+                access: user.role === ROLE_MAP.ADMIN ? await accessOf(res) : null,
                 verificationData: verificationData ?? null,
                 /** Shown instead of the person's name once a business account is approved */
                 businessName: (user.tier >= USER_TIER.BUSINESS ? await approvedBusinessName(user.id) : undefined) ?? null,
@@ -146,9 +149,13 @@ class UserController extends BaseController {
      */
     private async getAllUsers(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
+            const access = await accessOf(res);
+            const can = (p: Permission) => hasPermission(access, p);
             const users = await this.userService.listAll();
             // Money totals, latest KYC and possible repeat sign-ups, for the admin's columns
             const [stats, kyc] = await Promise.all([adminUsersService.moneyStats(), adminUsersService.kycStatuses()]);
+            const seesIdentity = can("users.identity") || can("kyc");
+            const heldNgn = Math.round([...stats.values()].reduce((sum, s) => sum + (s.balanceNgn || 0), 0) * 100) / 100;
             const duplicates = adminUsersService.duplicateIndex(users);
             const cleanUsers: any = []
             users.forEach(user => {
@@ -187,9 +194,28 @@ class UserController extends BaseController {
                 });
             });
 
+            // Each admin gets only the columns their role covers
+            const visible = cleanUsers.map((u: any) => {
+                const row = { ...u };
+                if (!seesIdentity) { delete row.identityStatus; delete row.hasProofOfAddress; row.kyc = null; delete row.kycRejectionReason; }
+                if (!can("users.cards") && !can("users.balances")) row.stats = null;
+                else if (row.stats && !can("users.balances")) row.stats = { ...row.stats, balanceNgn: null };
+                else if (row.stats && !can("users.cards")) row.stats = { balanceNgn: row.stats.balanceNgn };
+                if (!can("users.repeat_signups")) delete row.duplicateCount;
+                if (!can("users.account_controls")) { delete row.freeze; }
+                return row;
+            });
+
             return this.sendSuccess(res, {
                 message: "All users retrieved successfully",
-                users: cleanUsers
+                // Without the directory, only the totals below
+                users: can("users.directory") ? visible : [],
+                summary: {
+                    signedUp: cleanUsers.length,
+                    identityVerified: cleanUsers.filter((u: any) => (u.tier ?? 0) >= 1 || u.isKYCDone).length,
+                    awaitingUpgradeReview: [...kyc.values()].filter((k) => k.status === "submitted" || k.status === "under_review").length,
+                    ...(can("users.stats") ? { heldNgn } : {}),
+                },
             })
         } catch (error) {
             return next(error)
@@ -198,10 +224,33 @@ class UserController extends BaseController {
 
     private async getOverview(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            return this.sendSuccess(res, await adminUsersService.overview(String(req.params.id)));
+            const overview = await adminUsersService.overview(String(req.params.id));
+            return this.sendSuccess(res, await this.visibleOverview(overview, res));
         } catch (error) {
             return next(error);
         }
+    }
+
+    /** A user's overview with only the parts this admin may see (the rest are null) */
+    private async visibleOverview(overview: Awaited<ReturnType<typeof adminUsersService.overview>>, res: Response) {
+        const access = await accessOf(res);
+        const can = (p: Permission) => hasPermission(access, p);
+        const seesIdentity = can("users.identity") || can("kyc");
+        const { identityStatus, hasProofOfAddress, freeze, freezeReason, dailyLimitOverrideNgn, ...user } = overview.user;
+        return {
+            user: {
+                ...user,
+                ...(seesIdentity ? { identityStatus, hasProofOfAddress } : {}),
+                ...(can("users.account_controls") ? { freeze, freezeReason } : {}),
+                ...(can("users.daily_limit") ? { dailyLimitOverrideNgn } : {}),
+            },
+            kyc: seesIdentity ? overview.kyc : null,
+            stats: can("users.cards") ? (can("users.balances") ? overview.stats : { ...overview.stats, balanceNgn: null }) : null,
+            wallets: can("users.balances") ? overview.wallets : null,
+            duplicates: can("users.repeat_signups") ? overview.duplicates : null,
+            transactions: can("users.transactions") ? overview.transactions : null,
+            walletEntries: can("users.wallet_activity") ? overview.walletEntries : null,
+        };
     }
 
     private async updateControls(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -209,8 +258,16 @@ class UserController extends BaseController {
             if (String(req.params.id) === String(res.locals.user?.id) && req.body?.status === "suspended") {
                 return next(errorResponseMessage.createError(400, "You can't suspend your own account.", ErrorSeverity.LOW));
             }
-            await adminUsersService.updateControls(String(req.params.id), req.body, res.locals.user?.id);
-            return this.sendSuccess(res, await adminUsersService.overview(String(req.params.id)));
+            // Suspend and freeze are account controls; a personal daily limit is its own permission
+            const body = req.body ?? {};
+            if ((body.status !== undefined || body.freeze !== undefined) && !(await allowed(res, "users.account_controls"))) {
+                return next(errorResponseMessage.createError(403, "You can't change account controls", ErrorSeverity.HIGH));
+            }
+            if (body.dailyLimitOverrideNgn !== undefined && !(await allowed(res, "users.daily_limit"))) {
+                return next(errorResponseMessage.createError(403, "You can't change daily limits", ErrorSeverity.HIGH));
+            }
+            await adminUsersService.updateControls(String(req.params.id), body, res.locals.user?.id);
+            return this.sendSuccess(res, await this.visibleOverview(await adminUsersService.overview(String(req.params.id)), res));
         } catch (error) {
             return next(error);
         }
@@ -223,9 +280,17 @@ class UserController extends BaseController {
     private async updateUser(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const { status, role } = req.body;
+            // Who's on the admin team is managed under Roles & staff (super admins only)
+            if (role !== undefined && !(await accessOf(res)).superAdmin) {
+                return next(errorResponseMessage.createError(403, "Only a super admin can change someone's role", ErrorSeverity.HIGH));
+            }
+            if (role !== undefined && String(req.params.id) === String(res.locals.user?.id)) {
+                return next(errorResponseMessage.createError(400, "You can't change your own role", ErrorSeverity.LOW));
+            }
             const user = await this.userService.update(req.params.id, {
                 status,
-                ...((role && role === "ADMIN") ? { role: ROLE_MAP.ADMIN } : (role && role === "USER") ? { role: ROLE_MAP.USER } : {}),
+                // Made an admin here = super admin; back to a user drops any staff role
+                ...((role && role === "ADMIN") ? { role: ROLE_MAP.ADMIN, adminRoleId: null } : (role && role === "USER") ? { role: ROLE_MAP.USER, adminRoleId: null } : {}),
             });
             if(!user) {
                 return next(errorResponseMessage.resourceNotFound("User not found"))

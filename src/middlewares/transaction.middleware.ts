@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import errorResponseMessage, { ErrorResponse, ErrorSeverity } from "../common/messages/error-response-message";
 import { ROLE_MAP } from "../common/constant";
 import transactionRepository from "../repositories/transaction.repository";
+import { allowed } from "./role.middleware";
 
 class TransactionMiddleware {
 
@@ -20,8 +21,8 @@ class TransactionMiddleware {
                 return next(errorResponseMessage.unauthorized());
             }
 
-            // If user is admin, allow access
-            if (user.role === ROLE_MAP.ADMIN) {
+            // Admins who handle transactions can act on anyone's
+            if (user.role === ROLE_MAP.ADMIN && (await allowed(res, "transactions"))) {
                 return next();
             }
 

@@ -6,7 +6,7 @@ import {Request, Response, NextFunction} from "express";
 import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/error-response-message";
 import {validateCreateAlipayTransaction, validateCreateBankTransferTransaction} from "../../../validators/z-transaction";
 import {ROLE_MAP, TRANSACTION_STATUS} from "../../../common/constant";
-import RoleMiddleware from "../../../middlewares/role.middleware";
+import RoleMiddleware, { allowed } from "../../../middlewares/role.middleware";
 import TransactionMiddleware from "../../../middlewares/transaction.middleware";
 import TransactionRateLimitMiddleware from "../../../middlewares/transaction-rate-limit.middleware";
 import ReceiptFileValidationMiddleware from "../../../middlewares/receipt-file-validation.middleware";
@@ -36,7 +36,7 @@ class TransactionController extends BaseController {
         this.router.post("/:id/receipt-token", this.getReceiptToken.bind(this));
 
         // Admin: reject a manual payment that hasn't been paid out (wallet payments are refunded)
-        this.router.patch("/:id/reject", RoleMiddleware.isAdmin, this.rejectTransaction.bind(this));
+        this.router.patch("/:id/reject", RoleMiddleware.can("transactions"), this.rejectTransaction.bind(this));
 
         // Route to create alipay transaction
         this.router.post("/alipay", MulterMiddleware.single('alipayQrCode'), MulterMiddleware.handleError, TransactionRateLimitMiddleware.checkTransactionRateLimit, validateCreateAlipayTransaction, this.createAlipayTransaction.bind(this));
@@ -48,7 +48,7 @@ class TransactionController extends BaseController {
         this.router.get("/history", this.getHistory.bind(this));
 
         // Admin: every transaction and wallet deposit, newest first, in one paged list
-        this.router.get("/history-admin", RoleMiddleware.isAdmin, this.getAdminHistory.bind(this));
+        this.router.get("/history-admin", RoleMiddleware.can("transactions", "users.transactions"), this.getAdminHistory.bind(this));
 
         // Route for user to get alipay transactions
         this.router.get("/alipay", (req: Request, res: Response, next: NextFunction) => this.getAlipayTransactions(req, res, next, false));
@@ -57,10 +57,10 @@ class TransactionController extends BaseController {
         this.router.get("/bank-transfer", (req: Request, res: Response, next: NextFunction) => this.getBankTransferTransactions(req, res, next, false));
 
         // Route for user to get alipay transactions
-        this.router.get("/alipay-admin", RoleMiddleware.isAdmin, (req: Request, res: Response, next: NextFunction) => this.getAlipayTransactions(req, res, next, true));
+        this.router.get("/alipay-admin", RoleMiddleware.can("transactions"), (req: Request, res: Response, next: NextFunction) => this.getAlipayTransactions(req, res, next, true));
 
         // Route for admin to get bank transfer transactions
-        this.router.get("/bank-transfer-admin", RoleMiddleware.isAdmin, (req: Request, res: Response, next: NextFunction) => this.getBankTransferTransactions(req, res, next, true));
+        this.router.get("/bank-transfer-admin", RoleMiddleware.can("transactions"), (req: Request, res: Response, next: NextFunction) => this.getBankTransferTransactions(req, res, next, true));
 
         // Route for user to upload payment receipt
         this.router.patch("/alipay/user-receipt/:id", MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, TransactionMiddleware.verifyOwnership, this.uploadUserPaymentReceipt.bind(this));
@@ -69,10 +69,10 @@ class TransactionController extends BaseController {
         this.router.patch("/bank-transfer/user-receipt/:id", MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, TransactionMiddleware.verifyOwnership, this.uploadUserPaymentReceipt.bind(this));
 
         // Route for admin to upload payment receipt
-        this.router.patch("/alipay/admin-receipt/:id", RoleMiddleware.isAdmin, MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, this.uploadAdminPaymentReceipt.bind(this));
+        this.router.patch("/alipay/admin-receipt/:id", RoleMiddleware.can("transactions"), MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, this.uploadAdminPaymentReceipt.bind(this));
 
         // Route for admin to upload payment receipt for bank transfer
-        this.router.patch("/bank-transfer/admin-receipt/:id", RoleMiddleware.isAdmin, MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, this.uploadAdminPaymentReceipt.bind(this));
+        this.router.patch("/bank-transfer/admin-receipt/:id", RoleMiddleware.can("transactions"), MulterMiddleware.receipt('receipt'), MulterMiddleware.handleError, ReceiptFileValidationMiddleware.validateReceiptFile, this.uploadAdminPaymentReceipt.bind(this));
     }
 
     /**
@@ -253,13 +253,18 @@ class TransactionController extends BaseController {
         try {
             const { page, limit, searchTerm, status, startDate, endDate } = req.query;
             const filter: TransactionListFilter = { user: this.adminUserFilter(req.query.user) };
+            // Without transaction history, only one user's transactions (inside user management)
+            if (!filter.user && !(await allowed(res, "transactions"))) {
+                return next(errorResponseMessage.createError(403, "You can only see a user's transactions from their profile", ErrorSeverity.HIGH));
+            }
             if (typeof status === 'string' && status && status !== 'all') filter.status = status;
             const createdAt = this.buildDateRangeFilter(startDate, endDate);
             filter.createdFrom = createdAt?.from;
             filter.createdTo = createdAt?.to;
             const history = await this.transactionService.listHistory(
                 filter,
-                { page: parseInt(page as string) || 1, limit: Math.min(parseInt(limit as string) || 20, 100) },
+                // One user's list (their profile) can be long; everyone's is paged
+                { page: parseInt(page as string) || 1, limit: Math.min(parseInt(limit as string) || 20, filter.user ? 500 : 100) },
                 typeof searchTerm === 'string' ? searchTerm : undefined
             );
             return this.sendSuccess(res, history);

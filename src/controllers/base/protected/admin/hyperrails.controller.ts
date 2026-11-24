@@ -62,7 +62,7 @@ class AdminHyperRailsController extends BaseController {
     protected setupRoutes(): void {
         this.router.use((_req: Request, _res: Response, next: NextFunction) =>
             config.HYPERRAILS_LAB_ENABLED ? next() : next(errorResponseMessage.createError(404, 'Not found', ErrorSeverity.LOW)));
-        this.router.use(RoleMiddleware.isAdmin);
+        this.router.use(RoleMiddleware.can('labs'));
         this.router.get('/', this.overview.bind(this));
         this.router.get('/coverage/:currency', this.coverage.bind(this));
         this.router.post('/quotes', this.quote.bind(this));
