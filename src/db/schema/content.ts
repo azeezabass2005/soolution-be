@@ -112,3 +112,46 @@ export const notifications = pgTable(
         index("notifications_unread_idx").on(t.user).where(sql`${t.readAt} is null`),
     ]
 );
+
+/**
+ * Conversations between a user and the team: support tickets, and disputes
+ * about one of the user's transactions.
+ *   support: open (waiting on us) → answered (waiting on the user) → resolved
+ *   dispute: open → investigating → resolved | rejected
+ */
+export const supportTickets = pgTable(
+    "support_tickets",
+    {
+        id: id(),
+        user: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+        kind: text("kind").$type<"support" | "dispute">().notNull().default("support"),
+        subject: text("subject").notNull(),
+        status: text("status").$type<"open" | "answered" | "investigating" | "resolved" | "rejected">().notNull().default("open"),
+        /** Disputes: the transaction it's about */
+        transactionId: uuid("transaction_id"),
+        /** Who on the team is handling it */
+        assignedTo: uuid("assigned_to"),
+        /** How it ended, shown to the user (disputes) */
+        resolution: text("resolution"),
+        lastMessageAt: timestamptz("last_message_at").notNull().defaultNow(),
+        ...timestamps(),
+    },
+    (t) => [
+        index("support_tickets_user_idx").on(t.user, t.lastMessageAt),
+        index("support_tickets_status_idx").on(t.kind, t.status, t.lastMessageAt),
+    ]
+);
+
+export const supportMessages = pgTable(
+    "support_messages",
+    {
+        id: id(),
+        ticket: uuid("ticket_id").notNull().references(() => supportTickets.id, { onDelete: "cascade" }),
+        author: uuid("author_id").notNull(),
+        /** Written by the team (shown as "Solution Pay"), not the user */
+        fromTeam: boolean("from_team").notNull().default(false),
+        body: text("body").notNull(),
+        ...timestamps(),
+    },
+    (t) => [index("support_messages_ticket_idx").on(t.ticket, t.createdAt)]
+);
