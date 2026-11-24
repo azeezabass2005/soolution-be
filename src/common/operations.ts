@@ -1,3 +1,4 @@
+import { FEATURE_KEYS, FEATURE_MODES, type FeatureMode } from "./features";
 /**
  * Operational controls the admin sets: when manual payments run and at what
  * rate, and the switches that pause the platform. Stored on the platform
@@ -47,12 +48,16 @@ export interface LiquidityConfig {
     fincraNgnMin: number;
 }
 
+/** Each feature's mode (missing = on) */
+export type FeaturesConfig = Record<string, FeatureMode>;
+
 export interface OperationsConfig {
     manual: ManualConfig;
     pause: PauseConfig;
     currencies: CurrenciesConfig;
     approvals: ApprovalsConfig;
     liquidity: LiquidityConfig;
+    features: FeaturesConfig;
 }
 
 export const DEFAULT_OPERATIONS: OperationsConfig = {
@@ -61,6 +66,7 @@ export const DEFAULT_OPERATIONS: OperationsConfig = {
     currencies: { off: [] },
     approvals: { thresholdNgn: 500_000 },
     liquidity: { yellowcardUsdMin: 0, fincraNgnMin: 0 },
+    features: {},
 };
 
 export class OperationsError extends Error {}
@@ -91,14 +97,23 @@ export function withOperationDefaults(stored: unknown): OperationsConfig {
         currencies: { off: Array.isArray(s.currencies?.off) ? [...s.currencies!.off] : [] },
         approvals: { ...DEFAULT_OPERATIONS.approvals, ...(s.approvals ?? {}) },
         liquidity: { ...DEFAULT_OPERATIONS.liquidity, ...(s.liquidity ?? {}) },
+        features: { ...(s.features ?? {}) },
     };
 }
 
 /** Checks an admin's change and merges it into the current config (throws OperationsError) */
 export function mergeOperations(current: OperationsConfig, patch: unknown): OperationsConfig {
     if (!patch || typeof patch !== "object") throw new OperationsError("Operations settings must be an object");
-    const p = patch as { manual?: Partial<ManualConfig>; pause?: Partial<PauseConfig>; currencies?: Partial<CurrenciesConfig>; approvals?: Partial<ApprovalsConfig>; liquidity?: Partial<LiquidityConfig> };
-    const next: OperationsConfig = { manual: { ...current.manual }, pause: { ...current.pause }, currencies: { off: [...current.currencies.off] }, approvals: { ...current.approvals }, liquidity: { ...current.liquidity } };
+    const p = patch as { manual?: Partial<ManualConfig>; pause?: Partial<PauseConfig>; currencies?: Partial<CurrenciesConfig>; approvals?: Partial<ApprovalsConfig>; liquidity?: Partial<LiquidityConfig>; features?: Record<string, unknown> };
+    const next: OperationsConfig = { manual: { ...current.manual }, pause: { ...current.pause }, currencies: { off: [...current.currencies.off] }, approvals: { ...current.approvals }, liquidity: { ...current.liquidity }, features: { ...current.features } };
+
+    if (p.features) {
+        for (const [key, mode] of Object.entries(p.features)) {
+            if (!FEATURE_KEYS.includes(key)) throw new OperationsError(`Unknown feature: ${key}`);
+            if (!FEATURE_MODES.includes(mode as FeatureMode)) throw new OperationsError("A feature is on, beta or off");
+            next.features[key] = mode as FeatureMode;
+        }
+    }
 
     if (p.liquidity) {
         for (const key of ["yellowcardUsdMin", "fincraNgnMin"] as const) {

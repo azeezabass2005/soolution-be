@@ -1,6 +1,8 @@
 import { Router, Request, Response, NextFunction } from "express";
 import authMiddleware from "../../middlewares/auth.middleware";
 import { moneyGuard } from "../../middlewares/operations.middleware";
+import { featureGuard } from "../../middlewares/features.middleware";
+import featuresController from "../../controllers/base/protected/features.controller";
 import exchangeRateController from "../../controllers/base/protected/exchange-rate-controller";
 import logsController from "../../controllers/base/protected/logs.controller";
 import userController from "../../controllers/base/protected/user.controller";
@@ -49,6 +51,8 @@ protectedRouter.use(path, async (req: Request, res: Response, next: NextFunction
 
 // Pause switch and per-user freezes, in front of every route that moves money
 protectedRouter.use(path, moneyGuard);
+// Features an admin has turned off or kept to beta users
+protectedRouter.use(path, featureGuard);
 
 protectedRouter.use(`${path}/exchange-rates`, exchangeRateController);
 protectedRouter.use(`${path}/logs`, logsController);
@@ -68,6 +72,7 @@ protectedRouter.use(`${path}/payment-links`, paymentLinkController);
 protectedRouter.use(`${path}/banks`, bankController);
 protectedRouter.use(`${path}/notifications`, notificationsController);
 protectedRouter.use(`${path}/support`, supportController);
+protectedRouter.use(`${path}/features`, featuresController);
 
 // Admin routes: each controller checks the permission it needs (RoleMiddleware.can / isAdmin = super admin)
 protectedRouter.use(`${path}/admin/ledger`, adminLedgerController);

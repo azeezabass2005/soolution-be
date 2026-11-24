@@ -92,6 +92,8 @@ export const users = pgTable(
         freezeReason: text("freeze_reason"),
         /** Never needs approval for large payouts */
         approvalExempt: boolean("approval_exempt").notNull().default(false),
+        /** Sees features an admin has kept to beta users */
+        betaTester: boolean("beta_tester").notNull().default(false),
         /** This user's own approval limit in NGN (null = the platform's) */
         approvalThresholdNgn: decimal("approval_threshold_ngn"),
         /** Currencies a super admin turned off for this user (on top of any turned off for everyone) */

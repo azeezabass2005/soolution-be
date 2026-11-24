@@ -67,6 +67,7 @@ class AdminPlatformSettingsController extends BaseController {
                 [operations?.currencies !== undefined, ['platform_controls'], 'which currencies are on'],
                 [operations?.approvals !== undefined, ['platform_controls'], 'the approval limit'],
                 [operations?.liquidity !== undefined, ['profit_balances'], 'low-balance alerts'],
+                [operations?.features !== undefined, ['platform_controls'], 'beta features'],
             ];
             for (const [touched, permissions, what] of needs) {
                 if (!touched) continue;
