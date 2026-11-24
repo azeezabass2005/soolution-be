@@ -50,6 +50,9 @@ import transactionRepository from "../src/repositories/transaction.repository";
 import { resetTestDatabase, startTestDatabase, stopTestDatabase } from "./helpers/db";
 import { TEST_PIN, accountBalance, bootstrapLedger, createUser, fundWallet, walletBalance } from "./helpers/fixtures";
 import reconciliationService from "../src/services/reconciliation.service";
+import { eq } from "drizzle-orm";
+import { exec } from "../src/repositories/utils";
+import { transactions } from "../src/db/schema";
 import { SYSTEM_ACCOUNT_CODES, fincraCashCode, fincraPayoutInflightCode } from "../src/common/constant";
 
 const fincra = fincraService as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -327,6 +330,24 @@ describe("GHS through Fincra", () => {
             });
             return { owner, link, payment };
         };
+
+        it("deletes a link: gone from the owner's list and for payers, but not while someone is paying", async () => {
+            const { owner, link, payment } = await pay();
+            // A payment is in flight: deleting would pull the payer's status page from under them
+            await expect(paymentLinkService.remove(owner.id, link.id)).rejects.toMatchObject({ response_code: 409 });
+            await exec().update(transactions).set({ status: "failed" as any }).where(eq(transactions.reference, payment.reference));
+
+            // Someone else can't delete it
+            await expect(paymentLinkService.remove((await createUser()).id, link.id)).rejects.toMatchObject({ response_code: 404 });
+
+            expect(await paymentLinkService.remove(owner.id, link.id)).toEqual({ id: link.id });
+            expect(await paymentLinkService.list(owner.id)).toEqual([]);
+            await expect(paymentLinkService.getPublic(link.slug)).rejects.toMatchObject({ response_code: 404 });
+            // Already gone; and the payment made through it is still there
+            await expect(paymentLinkService.remove(owner.id, link.id)).rejects.toMatchObject({ response_code: 404 });
+            const [kept] = await exec().select().from(transactions).where(eq(transactions.reference, payment.reference));
+            expect(kept.paymentLink).toBe(link.id);
+        });
 
         it("tops up the user's own wallet: a checkout in their name, priced like a receive, marked as a top-up", async () => {
             const user = await createUser();

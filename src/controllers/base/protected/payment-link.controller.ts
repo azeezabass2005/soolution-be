@@ -16,6 +16,7 @@ class PaymentLinkController extends BaseController {
         this.router.get("/", this.list.bind(this));
         this.router.post("/", this.create.bind(this));
         this.router.patch("/:id", this.update.bind(this));
+        this.router.delete("/:id", this.remove.bind(this));
     }
 
     private async list(_req: Request, res: Response, next: NextFunction) {
@@ -31,6 +32,16 @@ class PaymentLinkController extends BaseController {
         try {
             const link = await paymentLinkService.create(res.locals.userId, req.body);
             this.sendSuccess(res, { link, message: "Payment link created" }, 201);
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    /** Delete a link: payers can no longer open it; its past payments stay in history */
+    private async remove(req: Request, res: Response, next: NextFunction) {
+        try {
+            const result = await paymentLinkService.remove(res.locals.userId, req.params.id);
+            this.sendSuccess(res, { ...result, message: "Link deleted" });
         } catch (error) {
             next(error);
         }

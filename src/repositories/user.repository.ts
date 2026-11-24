@@ -245,9 +245,11 @@ class UserRepository {
     }
 
     /** `createdFrom` / `createdTo`: only users who signed up in that window */
-    async count(filter: { isKYCDone?: boolean; createdFrom?: Date; createdTo?: Date } = {}): Promise<number> {
+    /** `verified`: identity verified, i.e. on Tier 1 or above (BVN checks set the tier, not isKYCDone) */
+    async count(filter: { isKYCDone?: boolean; verified?: boolean; createdFrom?: Date; createdTo?: Date } = {}): Promise<number> {
         const where: SQL[] = [];
         if (filter.isKYCDone !== undefined) where.push(eq(users.isKYCDone, filter.isKYCDone));
+        if (filter.verified !== undefined) where.push(filter.verified ? gte(users.tier, 1) : lt(users.tier, 1));
         if (filter.createdFrom) where.push(gte(users.createdAt, filter.createdFrom));
         if (filter.createdTo) where.push(lte(users.createdAt, filter.createdTo));
         const [row] = await exec().select({ n: count() }).from(users).where(where.length ? and(...where) : undefined);

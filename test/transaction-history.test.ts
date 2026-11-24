@@ -75,6 +75,19 @@ describe("transaction history with wallet fundings", () => {
         expect(admin.data).toHaveLength(3);
     });
 
+    it("lists everyone's transactions and deposits for admins, each with its owner", async () => {
+        const all = await transactionRepository.paginateHistory({ createdFrom: at(0), createdTo: at(59) }, { page: 1, limit: 20 });
+        // Every currency (RMB too) and the other user's transaction, plus both standalone deposits
+        expect(all.data.map((r: any) => r.reference)).toEqual(["T8", "T7", "W6", "T5", "T3", "W2", "T1"]);
+        expect(all.paginator.itemsCount).toBe(7);
+        const deposit: any = all.data.find((r: any) => r.reference === "W2");
+        expect(deposit.user).toMatchObject({ id: user });
+        const other: any = all.data[0];
+        expect(typeof other.user).toBe("object");
+        // A user id that isn't one gives nothing rather than everyone's
+        expect((await transactionRepository.paginateHistory({ user: "nope" }, { page: 1, limit: 5 })).data).toHaveLength(0);
+    });
+
     it("applies the status filter and search to fundings too", async () => {
         const done = await transactionRepository.paginateHistory({ user, status: "completed" }, { page: 1, limit: 20 });
         expect(done.data.map((r: any) => r.reference)).toEqual(["T7", "T5", "W2", "T1"]);

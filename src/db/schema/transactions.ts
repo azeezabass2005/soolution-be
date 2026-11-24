@@ -24,6 +24,12 @@ export const paymentLinks = pgTable(
         redirectUrl: text("redirect_url"),
         /** Details the payer must give: "name", "email", "phone" */
         collectFields: jsonb("collect_fields").$type<PaymentLinkCollectField[]>().notNull().default([]),
+        /**
+         * When the owner deleted it. Deleted links are hidden from the owner and
+         * 404 for payers, but kept so the payments made through them still point
+         * at a real link.
+         */
+        deletedAt: timestamptz("deleted_at"),
         ...timestamps(),
     },
     (t) => [

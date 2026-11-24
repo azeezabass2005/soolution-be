@@ -10,7 +10,7 @@ class DashboardService {
      * - totalUsers: count of users
      * - totalTransactions / totalAmountInitiated: every transaction, valued in its NGN/GHS equivalent
      * - totalTransactionsCompleted / totalAmountCompleted: completed or successful ones
-     * - totalKYCVerified: users with an approved KYC
+     * - totalKYCVerified: users whose identity is verified (Tier 1 or above)
      * - pendingPayments: transactions awaiting admin confirmation
      * - recentTransactions: last 10 with basic owner info
      */
@@ -24,7 +24,8 @@ class DashboardService {
             userRepository.count(created),
             transactionRepository.dashboardTotals(undefined, range),
             transactionRepository.dashboardTotals([TRANSACTION_STATUS.COMPLETED, TRANSACTION_STATUS.SUCCESSFUL] as TransactionStatus[], range),
-            userRepository.count({ isKYCDone: true, ...created }),
+            // Verified identity (Tier 1+): a BVN check verifies without an application, so isKYCDone misses them
+            userRepository.count({ verified: true, ...created }),
             transactionRepository.count({ status: TRANSACTION_STATUS.AWAITING_CONFIRMATION as TransactionStatus, ...created }),
             transactionRepository.recentWithOwner(10, range),
         ]);

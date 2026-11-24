@@ -47,6 +47,9 @@ class TransactionController extends BaseController {
         // Route for user to get every transaction and wallet funding in one paged list
         this.router.get("/history", this.getHistory.bind(this));
 
+        // Admin: every transaction and wallet deposit, newest first, in one paged list
+        this.router.get("/history-admin", RoleMiddleware.isAdmin, this.getAdminHistory.bind(this));
+
         // Route for user to get alipay transactions
         this.router.get("/alipay", (req: Request, res: Response, next: NextFunction) => this.getAlipayTransactions(req, res, next, false));
 
@@ -240,6 +243,29 @@ class TransactionController extends BaseController {
             throw errorResponseMessage.createError(400, "user must be a user id", ErrorSeverity.LOW);
         }
         return value;
+    }
+
+    /**
+     * Admins: everyone's transactions and wallet deposits in one list (failed
+     * receives included), optionally for one user (?user=<id>)
+     */
+    private async getAdminHistory(req: Request, res: Response, next: NextFunction) {
+        try {
+            const { page, limit, searchTerm, status, startDate, endDate } = req.query;
+            const filter: TransactionListFilter = { user: this.adminUserFilter(req.query.user) };
+            if (typeof status === 'string' && status && status !== 'all') filter.status = status;
+            const createdAt = this.buildDateRangeFilter(startDate, endDate);
+            filter.createdFrom = createdAt?.from;
+            filter.createdTo = createdAt?.to;
+            const history = await this.transactionService.listHistory(
+                filter,
+                { page: parseInt(page as string) || 1, limit: Math.min(parseInt(limit as string) || 20, 100) },
+                typeof searchTerm === 'string' ? searchTerm : undefined
+            );
+            return this.sendSuccess(res, history);
+        } catch (error: any) {
+            return next(error);
+        }
     }
 
     /** The signed-in user's history: sends, receives (any currency) and bank transfers into their wallet */

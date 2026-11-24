@@ -373,15 +373,20 @@ class TransactionRepository {
      * transaction; a GHS top-up's funding is already its transaction). Both are
      * paged together in the database, so every page is complete and in order.
      */
-    async paginateHistory(filter: TransactionListFilter & { user: string }, request: PageRequest): Promise<Paginated<HistoryRow>> {
+    /**
+     * Transactions and bank deposits into wallets, newest first, in one list.
+     * With `user`, only theirs; without it (admins), everyone's, each row
+     * carrying its owner.
+     */
+    async paginateHistory(filter: TransactionListFilter, request: PageRequest): Promise<Paginated<HistoryRow>> {
         const window = pageWindow(request);
-        if (!isUuid(filter.user)) return toPage([], 0, window);
+        if (filter.user !== undefined && !isUuid(filter.user)) return toPage([], 0, window);
 
         const fundingWhere: SQL[] = [
-            eq(walletTransactions.user, filter.user),
             eq(walletTransactions.type, "funding"),
             isNull(walletTransactions.transactionId),
         ];
+        if (filter.user) fundingWhere.push(eq(walletTransactions.user, filter.user));
         const statuses = fundingStatuses(filter.status);
         if (statuses) fundingWhere.push(statuses.length ? inArray(walletTransactions.status, statuses) : sql`false`);
         if (filter.createdFrom) fundingWhere.push(gte(walletTransactions.createdAt, filter.createdFrom));
@@ -413,7 +418,14 @@ class TransactionRepository {
             fundingIds.length ? exec().select().from(walletTransactions).where(inArray(walletTransactions.id, fundingIds)) : Promise.resolve([]),
         ]);
         const views = new Map((await this.toViews(transactionRows.map(toTransaction))).map((v) => [v.id, v as HistoryRow]));
-        const funded = new Map(fundingRows.map((row) => [row.id, fundingAsRow(stripNulls(row) as WalletTransaction)]));
+        // Everyone's list: say whose deposit each one is
+        const fundingOwners = !filter.user && fundingRows.length
+            ? new Map((await exec().select().from(users).where(inArray(users.id, [...new Set(fundingRows.map((r) => r.user))]))).map((row) => [row.id, toPublicUser(toUser(row))]))
+            : null;
+        const funded = new Map(fundingRows.map((row) => {
+            const view = fundingAsRow(stripNulls(row) as WalletTransaction);
+            return [row.id, fundingOwners ? { ...view, user: fundingOwners.get(row.user) ?? row.user } as HistoryRow : view];
+        }));
         const rows = page
             .map((r) => (r.kind === "transaction" ? views.get(r.id) : funded.get(r.id)))
             .filter((row): row is HistoryRow => !!row);

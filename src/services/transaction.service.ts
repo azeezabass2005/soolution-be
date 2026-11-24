@@ -2922,7 +2922,8 @@ class TransactionService {
     }
 
     /** The user's transactions and wallet fundings, paged together */
-    public async listHistory(filter: TransactionListFilter & { user: string }, page: PageRequest, searchTerm?: string) {
+    /** One user's history, or (no user: admins) everyone's */
+    public async listHistory(filter: TransactionListFilter, page: PageRequest, searchTerm?: string) {
         const search = searchTerm?.trim();
         return transactionRepository.paginateHistory({ ...filter, ...(search ? { search } : {}) }, page);
     }

@@ -188,6 +188,26 @@ class PaymentLinkService {
         return this.toOwnerView(link, { paid: stats?.paid || 0, totalPaid: round2(stats?.totalPaid || 0) });
     }
 
+    /**
+     * Deletes the owner's link: payers get "not found" from then on, and it
+     * leaves the owner's list. Payments already made through it keep their
+     * history. Refused while a payer is in the middle of paying, so their
+     * status page doesn't vanish under them.
+     */
+    async remove(userId: string, id: string) {
+        const link = await paymentLinkRepository.findOwned(id, userId);
+        if (!link) throw errorResponseMessage.resourceNotFound("Payment link");
+        return transactionLimitService.withUserLock(userId, async () => {
+            const inFlight = await transactionRepository.countForLink(link.id, IN_FLIGHT, new Date(Date.now() - PENDING_PAYMENT_WINDOW_MS));
+            if (inFlight > 0) {
+                throw errorResponseMessage.createError(409, "Someone is paying through this link right now. Turn it off, then delete it once their payment finishes.", ErrorSeverity.LOW, { code: "PAYMENT_LINK_IN_PROGRESS" });
+            }
+            const deleted = await paymentLinkRepository.softDelete(link.id, userId);
+            if (!deleted) throw errorResponseMessage.resourceNotFound("Payment link");
+            return { id: deleted.id };
+        });
+    }
+
     /** A single-use link that has a completed payment */
     private async isUsedUp(link: Pick<IPaymentLink, "usage" | "id">) {
         if (link.usage !== PAYMENT_LINK_USAGE.SINGLE) return false;
