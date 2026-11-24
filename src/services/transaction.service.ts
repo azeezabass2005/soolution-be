@@ -93,6 +93,7 @@ import identityService from "./identity.service";
 import { CURRENCY_COUNTRY, ycCountryFor } from "../common/payment-link.constants";
 import ycRateService, { type YcPrice } from "./yc-rate.service";
 import currencyAccessService from "./currency-access.service";
+import inboxService from "./inbox.service";
 import { limitProblem } from "../common/pricing";
 
 
@@ -360,6 +361,15 @@ class TransactionService {
             await this.holdManualPayoutFromWallet(transaction, user, `Payment to ${institutionType === 'bank' ? accountName : momoName || 'recipient'}`);
         }
 
+        // The team sees every new manual payment straight away (in the app); the email follows once the user sends their receipt
+        await inboxService.toTeam('transactions', {
+            type: 'transaction.manual',
+            title: `New manual ${transaction.currency} payment`,
+            body: `${transaction.reference}: ${transaction.currency} ${Number(transaction.amount).toLocaleString('en-US')}${fromWallet ? ', paid from the customer\'s wallet' : ', waiting for the customer\'s receipt'}.`,
+            link: '/dashboard/admin/transactions?status=in_progress',
+            data: { transactionId: transaction.id },
+        });
+
         // Send transaction initiated email to user
         try {
             const userObj = await userRepository.findById(transaction.user);
@@ -564,6 +574,15 @@ class TransactionService {
         if (fromWallet) {
             await this.holdManualPayoutFromWallet(transaction, user, `Alipay payment to ${alipayName || 'recipient'}`);
         }
+
+        // The team sees every new manual payment straight away (in the app); the email follows once the user sends their receipt
+        await inboxService.toTeam('transactions', {
+            type: 'transaction.manual',
+            title: `New manual ${transaction.currency} payment`,
+            body: `${transaction.reference}: ${transaction.currency} ${Number(transaction.amount).toLocaleString('en-US')}${fromWallet ? ', paid from the customer\'s wallet' : ', waiting for the customer\'s receipt'}.`,
+            link: '/dashboard/admin/transactions?status=in_progress',
+            data: { transactionId: transaction.id },
+        });
 
         // Send transaction initiated email to user
         try {
@@ -2226,6 +2245,7 @@ class TransactionService {
             : `${accountName} · ${destination.bank} ${accountNumber}`;
         Promise.resolve().then(() => this.notificationService.notifyAdmins(config.ADMIN_EMAILS, {
             title: 'New manual GHS payment',
+            type: 'transaction.manual',
             message: `${transaction.reference}: pay GHS ${amount.toLocaleString('en-US')} to ${recipient}. ₦${ngnAmount.toLocaleString('en-US')} is held from the customer's wallet.`,
             actionUrl: `${config.FRONTEND_URL}/dashboard/admin/transactions`,
             buttonText: 'Open transactions',
@@ -2657,6 +2677,9 @@ class TransactionService {
             await transactionDetailRepository.update(detail.id, { providerStatus: 'amount_mismatch', providerPayload: payload });
             Promise.resolve().then(() => this.notificationService.notifyAdmins(config.ADMIN_EMAILS, {
                 title: 'GHS account paid the wrong amount',
+                type: 'reconciliation.alert',
+                permission: 'technical',
+                actionUrl: `${config.FRONTEND_URL}/dashboard/admin/reconciliation`,
                 message: `Transaction ${transaction.reference} expected GHS ${transaction.amount} but Spotflow reports ${currency} ${paid} (${spotflowReference}). Nothing was credited; please reconcile it by hand.`,
             } as any, config.ADMIN_PHONE_NUMBERS)).catch(() => undefined);
             return { outcome: 'ignored', note: 'amount mismatch' };
@@ -2666,6 +2689,9 @@ class TransactionService {
             await transactionDetailRepository.update(detail.id, { providerStatus: 'paid_after_close', providerPayload: payload });
             Promise.resolve().then(() => this.notificationService.notifyAdmins(config.ADMIN_EMAILS, {
                 title: 'GHS account paid after it closed',
+                type: 'reconciliation.alert',
+                permission: 'technical',
+                actionUrl: `${config.FRONTEND_URL}/dashboard/admin/reconciliation`,
                 message: `Transaction ${transaction.reference} was paid (GHS ${paid}, ${spotflowReference}) after it was closed. Nothing was credited; please reconcile it by hand.`,
             } as any, config.ADMIN_PHONE_NUMBERS)).catch(() => undefined);
             return { outcome: 'ignored', note: 'paid after close' };

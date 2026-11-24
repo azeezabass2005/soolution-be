@@ -1,4 +1,5 @@
 import z from "zod";
+import inboxService from "./inbox.service";
 import kycApplicationRepository, { type KycAdminFilter } from "../repositories/kyc-application.repository";
 import userRepository from "../repositories/user.repository";
 import transactionRepository from "../repositories/transaction.repository";
@@ -539,6 +540,15 @@ class KycApplicationService {
         const label = application.type === "business" ? "KYB" : "KYC";
         const name = application.displayName || `${user.firstName} ${user.lastName}`;
 
+        // In the app for everyone who reviews KYC/KYB, with business and institution submissions called out
+        const kind = application.type === "business" ? (applicationTier(application) >= 3 ? "Institution (KYB)" : "Business (KYB)") : "KYC";
+        await inboxService.toTeam("kyc", {
+            type: application.type === "business" ? "kyb.submitted" : "kyc.submitted",
+            title: `New ${kind} ${wasResubmission ? "resubmission" : "submission"}`,
+            body: `${name} (${user.email}) ${wasResubmission ? "resubmitted" : "submitted"} for Tier ${applicationTier(application)} (${TIER_NAME[applicationTier(application)]}) with ${application.documents.length} document(s).`,
+            link: `/dashboard/admin/kyc/${application.id}`,
+        });
+
         const adminEmails = config.ADMIN_EMAILS.split(",").map((email) => email.trim()).filter(Boolean);
         await Promise.all(adminEmails.map(async (email) => {
             try {
@@ -690,6 +700,12 @@ class KycApplicationService {
         const tier = applicationTier(application);
         const limit = await platformSettingsService.getTierDailyLimitNgn(tier).catch(() => undefined);
         const limitText = limit === null ? "with no daily limit" : limit ? `with a daily limit of ${formatNgn(limit)}` : "with a higher daily limit";
+        await inboxService.toUser(user.id, {
+            type: approved ? "kyc.approved" : "kyc.rejected",
+            title: approved ? `Your ${label} has been approved` : `Your ${label} needs changes`,
+            body: approved ? `Your account is now on Tier ${tier} (${TIER_NAME[tier]}), ${limitText}.` : note ? `Reason: ${note}` : "Update your details and resubmit.",
+            link: approved ? "/dashboard/user" : "/kyc",
+        });
         try {
             await this.notificationService.emailService.sendNotificationEmail(user.email, {
                 title: approved ? `🎉 Your ${label} has been approved` : `Action needed on your ${label} application`,

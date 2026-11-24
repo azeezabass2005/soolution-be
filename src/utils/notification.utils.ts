@@ -1,4 +1,6 @@
 import { scrubNotification } from './provider-names.utils';
+import inboxService from "../services/inbox.service";
+import type { Permission } from "../common/permissions";
 import WhatsAppService from '../utils/whatsapp.utils';
 import EmailService from '../utils/email.utils';
 /** What a notification needs to know about its recipient */
@@ -58,6 +60,14 @@ class NotificationService {
             caption?: string;
         }>
     ): Promise<{ email: boolean; whatsapp: boolean }> {
+        // Always in the user's in-app inbox (also on localhost, where email and WhatsApp are skipped)
+        await inboxService.toUser(user.id, {
+            type: String(config.type ?? "notice"),
+            title: scrubNotification(config).title,
+            body: scrubNotification(config).message,
+            link: config.actionUrl,
+        });
+
         // Skip notifications on localhost/development
         if (process.env.NODE_ENV === 'development' || 
             process.env.FRONTEND_URL?.includes('localhost') || 
@@ -146,6 +156,14 @@ class NotificationService {
             caption?: string;
         }>
     ): Promise<void> {
+        // In-app too, for every admin whose role covers it (config.permission; transactions by default)
+        await inboxService.toTeam((config.permission as Permission | undefined) ?? "transactions", {
+            type: String(config.type ?? "admin.notice"),
+            title: config.title,
+            body: config.message,
+            link: config.actionUrl,
+        });
+
         // Skip notifications on localhost/development
         if (process.env.NODE_ENV === 'development' || 
             process.env.FRONTEND_URL?.includes('localhost') || 
@@ -325,18 +343,21 @@ class NotificationService {
     ): NotificationConfig {
         const messages: Record<string, NotificationConfig> = {
             payment_completed: {
+                type: 'transaction.completed',
                 title: '✅ Payment Completed',
                 message: `Your payment of ${details.amount} to ${details.recipient} has been successfully completed (Ref: ${details.reference})`,
                 actionUrl: details.actionUrl,
                 buttonText: 'View Details',
             },
             payment_initiated: {
+                type: 'transaction.initiated',
                 title: '📋 Payment Request Created',
                 message: `Your payment request of ${details.amount} to ${details.recipient} has been created (Ref: ${details.reference}). Please upload your payment receipt to confirm your request and allow us to process it.`,
                 actionUrl: details.actionUrl,
                 buttonText: 'Upload Receipt',
             },
             payment_failed: {
+                type: 'transaction.failed',
                 title: '❌ Payment Failed',
                 message: `Your payment of ${details.amount} could not be processed. Please try again or contact support.`,
                 actionUrl: details.actionUrl,

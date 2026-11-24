@@ -84,3 +84,31 @@ export const partners = pgTable(
         index("partners_rating_idx").on(t.rating),
     ]
 );
+
+/**
+ * In-app notifications: one row per person who should see it (a user's own
+ * news, or an alert for each admin whose role covers it). Unread until
+ * read_at is set.
+ */
+export const notifications = pgTable(
+    "notifications",
+    {
+        id: id(),
+        user: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+        /** "user" for a customer's own news, "admin" for team alerts */
+        audience: text("audience").$type<"user" | "admin">().notNull().default("user"),
+        /** What happened, e.g. "transaction.completed", "kyc.submitted" */
+        type: text("type").notNull(),
+        title: text("title").notNull(),
+        body: text("body").notNull().default(""),
+        /** Where clicking it goes, an app path like /dashboard/user/transactions */
+        link: text("link"),
+        data: jsonb("data").$type<Record<string, unknown>>(),
+        readAt: timestamptz("read_at"),
+        ...timestamps(),
+    },
+    (t) => [
+        index("notifications_user_idx").on(t.user, t.createdAt),
+        index("notifications_unread_idx").on(t.user).where(sql`${t.readAt} is null`),
+    ]
+);

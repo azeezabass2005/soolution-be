@@ -29,6 +29,7 @@ import beneficiaryController from "../../controllers/base/protected/beneficiary.
 import paymentLinkController from "../../controllers/base/protected/payment-link.controller";
 import bankController from "../../controllers/base/protected/bank.controller";
 import adminTeamController from "../../controllers/base/protected/admin/team.controller";
+import notificationsController from "../../controllers/base/protected/notifications.controller";
 import adminInviteController from "../../controllers/base/protected/admin-invite.controller";
 
 const path = "/protected";
@@ -62,6 +63,7 @@ protectedRouter.use(`${path}/pin`, pinController);
 protectedRouter.use(`${path}/beneficiaries`, beneficiaryController);
 protectedRouter.use(`${path}/payment-links`, paymentLinkController);
 protectedRouter.use(`${path}/banks`, bankController);
+protectedRouter.use(`${path}/notifications`, notificationsController);
 
 // Admin routes: each controller checks the permission it needs (RoleMiddleware.can / isAdmin = super admin)
 protectedRouter.use(`${path}/admin/ledger`, adminLedgerController);

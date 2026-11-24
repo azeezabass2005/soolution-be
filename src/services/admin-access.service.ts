@@ -89,6 +89,19 @@ class AdminAccessService {
         return { superAdmin: false, permissions: cleanPermissions(role.permissions), role: { id: role.id, name: role.name } };
     }
 
+    /**
+     * Ids of everyone on the team who holds a permission (all super admins,
+     * and staff whose role includes it), active accounts only.
+     */
+    async teamWith(permission: Permission): Promise<string[]> {
+        const rows = await exec()
+            .select({ id: users.id, roleId: users.adminRoleId, permissions: adminRoles.permissions })
+            .from(users)
+            .leftJoin(adminRoles, eq(adminRoles.id, users.adminRoleId))
+            .where(and(eq(users.role, ROLE_MAP.ADMIN), eq(users.status, "active")));
+        return rows.filter((r) => !r.roleId || cleanPermissions(r.permissions).includes(permission)).map((r) => r.id);
+    }
+
     // ─────────────── Roles ───────────────
 
     /** Every role with how many staff have it */

@@ -320,6 +320,9 @@ class GhsConversionService {
     private alert(conversion: FxConversion, message: string) {
         Promise.resolve().then(() => this.notifications.notifyAdmins(config.ADMIN_EMAILS, {
             title: "GHS conversion needs attention",
+            type: "conversion.alert",
+            permission: "technical",
+            actionUrl: `${config.FRONTEND_URL}/dashboard/admin/conversions`,
             message: `${message} (transaction ${conversion.transactionId})`,
         } as any, config.ADMIN_PHONE_NUMBERS)).catch(() => undefined);
     }

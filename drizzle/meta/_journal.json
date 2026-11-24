@@ -106,6 +106,13 @@
       "when": 1795548115155,
       "tag": "0014_yc_pricing",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1795561338940,
+      "tag": "0015_notifications",
+      "breakpoints": true
     }
   ]
 }
