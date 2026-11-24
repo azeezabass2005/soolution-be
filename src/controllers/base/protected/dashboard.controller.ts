@@ -30,8 +30,10 @@ class DashboardController extends BaseController {
             const data: Record<string, unknown> = await dashboardService.getAdminDashboard(range);
             // Money amounts are the "transaction volume" cards; without them only counts are sent
             if (!(await allowed(res, "dashboard.volume"))) {
-                delete data.totalAmountInitiated;
+                delete data.flows;
+                delete data.amountTransactedNgn;
                 delete data.totalAmountCompleted;
+                data.manual = { count: (data.manual as { count: number }).count };
             }
             // The recent list is transaction history
             if (!(await allowed(res, "transactions"))) data.recentTransactions = [];

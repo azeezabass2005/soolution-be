@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from "express";
+import dashboardService from "../../../../services/dashboard.service";
 import BaseController from "../../base-controller";
 import RoleMiddleware from "../../../../middlewares/role.middleware";
 import adminProfitService, { PROFIT_KINDS, type ProfitKind } from "../../../../services/admin-profit.service";
@@ -39,7 +40,10 @@ class AdminInsightsController extends BaseController {
                 userId: userId && isUuid(userId) ? userId : undefined,
                 kinds: wanted,
             });
+            // Naira through user wallets in the same window: funded, received, sent, paid out
+            const walletFlows = await dashboardService.walletFlows({ from: from ? lagosDay(from, false) : undefined, to: to ? lagosDay(to, true) : undefined });
             return this.sendSuccess(res, {
+                walletFlows,
                 totals: adminProfitService.totals(rows),
                 flows: adminProfitService.flows(rows),
                 rows: rows.slice(0, 1000),

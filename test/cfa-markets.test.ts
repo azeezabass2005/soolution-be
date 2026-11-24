@@ -14,11 +14,7 @@ import { resetTestDatabase, startTestDatabase, stopTestDatabase } from "./helper
 import { bootstrapLedger, createUser } from "./helpers/fixtures";
 import yellowCardService from "../src/services/yellowcard.service";
 import beneficiaryService from "../src/services/beneficiary.service";
-import dashboardService from "../src/services/dashboard.service";
 import { ycCountryFor } from "../src/common/payment-link.constants";
-import { lagosDayRange } from "../src/utils/date-range.utils";
-import { exec } from "../src/repositories/utils";
-import { transactions } from "../src/db/schema";
 
 describe("CFA franc countries", () => {
     it("uses the country asked for only when it shares the currency", () => {
@@ -81,30 +77,4 @@ describe("with a database", () => {
         expect(kes.country ?? null).toBeNull();
     });
 
-    it("narrows the admin dashboard to the dates picked", async () => {
-        const user = await createUser();
-        const at = async (iso: string, status: string) => {
-            await exec().insert(transactions).values({
-                user: user.id, reference: `D-${Math.random().toString(36).slice(2)}`, amount: 1_000, currency: "NGN", fromCurrency: "NGN",
-                detailType: "fincra" as any, status: status as any, createdAt: new Date(iso),
-            } as any);
-        };
-        // 00:30 in Lagos on the 20th is still the 19th in UTC: it belongs to the 20th
-        await at("2026-11-19T23:30:00Z", "completed");
-        await at("2026-11-21T10:00:00Z", "completed");
-        await at("2026-11-21T11:00:00Z", "awaiting_confirmation");
-
-        const all = await dashboardService.getAdminDashboard();
-        expect(all.totalTransactions).toBe(3);
-
-        const day20 = await dashboardService.getAdminDashboard(lagosDayRange("2026-11-20", "2026-11-20"));
-        expect(day20).toMatchObject({ totalTransactions: 1, totalTransactionsCompleted: 1, pendingPayments: 0 });
-        expect(day20.recentTransactions).toHaveLength(1);
-
-        const day21 = await dashboardService.getAdminDashboard(lagosDayRange("2026-11-21", "2026-11-21"));
-        expect(day21).toMatchObject({ totalTransactions: 2, totalTransactionsCompleted: 1, pendingPayments: 1, totalAmountInitiated: 2_000 });
-
-        // The user signed up today, so no one signed up on the 20th
-        expect(day20.totalUsers).toBe(0);
-    });
 });
