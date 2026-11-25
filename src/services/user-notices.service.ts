@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import { transactionDetails, transactions, walletTransactions } from "../db/schema";
+import { paymentLinks, transactionDetails, transactions, walletTransactions } from "../db/schema";
 import { exec } from "../repositories/utils";
 import userRepository from "../repositories/user.repository";
 import NotificationService from "../utils/notification.utils";
@@ -37,7 +37,7 @@ class UserNoticesService {
     private running = false;
 
     /** What to tell the user about a transaction in its current status, or null for nothing */
-    transactionNotice(t: Tx, d: Partial<Detail> | null): Notice | null {
+    transactionNotice(t: Tx, d: Partial<Detail> | null, linkTitle?: string | null): Notice | null {
         const ref = t.reference;
         const link = "/dashboard/user/transactions";
         const reason = t.cancelReason ? ` Reason: ${t.cancelReason}.` : "";
@@ -45,8 +45,13 @@ class UserNoticesService {
         if (t.currency === "NGN" && t.fromCurrency !== "NGN") {
             if (t.status !== "completed" && t.status !== "successful") return null; // the payer not finishing isn't news
             const credited = Number(d?.fromAmount) > 0 ? ` ${amount("NGN", d!.fromAmount)} has been added to your NGN wallet.` : " It's been added to your NGN wallet.";
+            // A top-up: money the user paid in themselves
+            if (t.purpose === "top_up") {
+                return { type: "transaction.top_up", title: "Your top-up arrived", message: `The ${amount(t.fromCurrency, t.amount)} you paid in has arrived.${credited} Reference: ${ref}.`, link };
+            }
             const from = t.payerName ? ` from ${t.payerName}` : "";
-            return { type: "transaction.received", title: "Payment received", message: `You received ${amount(t.fromCurrency, t.amount)}${from}.${credited} Reference: ${ref}.`, link };
+            const forWhat = linkTitle ? ` for "${linkTitle}"` : t.paymentLink ? " through your payment link" : "";
+            return { type: "transaction.received", title: "Payment received", message: `You received ${amount(t.fromCurrency, t.amount)}${from}${forWhat}.${credited} Reference: ${ref}.`, link };
         }
         const recipient = d?.accountName || d?.momoName || d?.alipayName || null;
         const to = recipient ? ` to ${recipient}` : "";
@@ -67,6 +72,8 @@ class UserNoticesService {
     walletNotice(w: WalletTx): Notice | null {
         const cur = w.currency || "NGN";
         const link = "/dashboard/user/wallet";
+        // Money from a transaction (a receive, a top-up) is told once, by the transaction's own notice
+        if (w.type === "funding" && w.transactionId) return null;
         if (w.type === "funding" && w.status === "successful") {
             return { type: "wallet.funded", title: "Your wallet has been funded", message: `${amount(cur, w.amount)} has been added to your ${cur} wallet. Your balance is now ${amount(cur, w.balanceAfter)}. Reference: ${w.reference}.`, link };
         }
@@ -103,7 +110,8 @@ class UserNoticesService {
                     .where(and(eq(transactions.id, id), or(isNull(transactions.notifiedStatus), ne(transactions.notifiedStatus, transactions.status)))).returning();
                 if (!t) continue;
                 const [d] = await exec().select().from(transactionDetails).where(eq(transactionDetails.transactionId, id)).limit(1);
-                if (await this.send(t.user, this.transactionNotice(t, d ?? null), { transactionId: id, status: t.status })) sent += 1;
+                const [link] = t.paymentLink ? await exec().select({ title: paymentLinks.title }).from(paymentLinks).where(eq(paymentLinks.id, t.paymentLink)).limit(1) : [];
+                if (await this.send(t.user, this.transactionNotice(t, d ?? null, link?.title ?? null), { transactionId: id, status: t.status })) sent += 1;
             }
 
             const dueWallet = await exec().select({ id: walletTransactions.id, told: walletTransactions.notifiedStatus }).from(walletTransactions)

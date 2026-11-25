@@ -139,4 +139,23 @@ describe("user notices and the inbox", () => {
         expect((await call("POST", "/protected/notifications/read", user, { all: true })).body.data.unread).toBe(0);
         expect((await call("GET", "/protected/notifications", user)).body.data.items.every((n: any) => n.read)).toBe(true);
     });
+
+    it("tells a top-up as a top-up, names the payment link a payment came through, and doesn't repeat it as a wallet funding", async () => {
+        const user = await createUser();
+        const { paymentLinks } = await import("../src/db/schema");
+        const [link] = await exec().insert(paymentLinks).values({ user: user.id, slug: "notice01link", currency: "GHS", title: "Ankara fabric order" } as any).returning();
+        const [topUp] = await exec().insert(transactions).values({ user: user.id, reference: "TOPUP-1", amount: 100, currency: "NGN", fromCurrency: "GHS", detailType: "fincra" as any, status: "completed" as any, purpose: "top_up" }).returning();
+        await exec().insert(transactionDetails).values({ transactionId: topUp.id, type: "fincra" as any, fromAmount: 9_700 } as any);
+        const [viaLink] = await exec().insert(transactions).values({ user: user.id, reference: "LINK-1", amount: 40, currency: "NGN", fromCurrency: "GHS", detailType: "fincra" as any, status: "completed" as any, paymentLink: link.id, payerName: "Kofi" }).returning();
+        await exec().insert(transactionDetails).values({ transactionId: viaLink.id, type: "fincra" as any, fromAmount: 3_880 } as any);
+        // The wallet credit for the top-up, tied to its transaction
+        const [wallet] = await exec().select().from(wallets).where(eq(wallets.user, user.id));
+        await exec().insert(walletTransactions).values({ wallet: wallet.id, user: user.id, type: "funding" as any, status: "successful" as any, amount: 9_700, currency: "NGN", reference: "FUND-TOPUP-1", balanceBefore: 0, balanceAfter: 9_700, transactionId: topUp.id } as any);
+
+        expect(await run()).toBe(2);
+        expect(sent.find((s) => s.type === "transaction.top_up")).toMatchObject({ title: "Your top-up arrived" });
+        expect(sent.find((s) => s.type === "transaction.top_up")!.message).toContain("The GHS 100.00 you paid in has arrived. NGN 9,700.00 has been added");
+        expect(sent.find((s) => s.type === "transaction.received")!.message).toContain('from Kofi for "Ankara fabric order"');
+        expect(sent.some((s) => s.type === "wallet.funded")).toBe(false);
+    });
 });

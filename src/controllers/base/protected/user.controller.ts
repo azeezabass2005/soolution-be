@@ -1,7 +1,9 @@
 import inboxService from "../../../services/inbox.service";
+import paymentLinkService from "../../../services/payment-link.service";
 import BaseController from "../base-controller";
 import {Request, Response, NextFunction} from "express";
 import errorResponseMessage from "../../../common/messages/error-response-message";
+import { isUuid } from "../../../utils/id.utils";
 import {ROLE_MAP} from "../../../common/constant";
 import RoleMiddleware, { accessOf, allowed } from "../../../middlewares/role.middleware";
 import { hasPermission, type Permission } from "../../../common/permissions";
@@ -61,6 +63,15 @@ class UserController extends BaseController {
         this.router.patch("/:id", RoleMiddleware.can("users.account_controls"), userUpdateValidate,  this.updateUser.bind(this));
         // One user's money, wallets, activity and possible repeat sign-ups
         this.router.get("/:id/overview", RoleMiddleware.can("users.directory"), this.getOverview.bind(this));
+        // The payment links a user has made (admins)
+        this.router.get("/:id/payment-links", RoleMiddleware.can("users.payment_links"), async (req: Request, res: Response, next: NextFunction) => {
+            try {
+                if (!isUuid(String(req.params.id))) return next(errorResponseMessage.resourceNotFound("User"));
+                return this.sendSuccess(res, { links: await paymentLinkService.list(String(req.params.id)) });
+            } catch (error) {
+                return next(error);
+            }
+        });
         // Suspend, freeze, or set a personal daily limit
         this.router.patch("/:id/controls", RoleMiddleware.can("users.account_controls", "users.daily_limit"), this.updateControls.bind(this));
         // Currencies turned off for one user (super admins: platform controls)

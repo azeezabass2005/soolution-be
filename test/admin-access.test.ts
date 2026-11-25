@@ -251,6 +251,21 @@ describe("admin roles and permissions", () => {
         expect(after.sessions).toEqual([]);
     });
 
+    it("shows a user's payment links to staff whose role includes them, and nobody else", async () => {
+        const { exec } = await import("../src/repositories/utils");
+        const { paymentLinks, transactions } = await import("../src/db/schema");
+        const owner = await createUser({ email: "links.owner@example.test" });
+        const [link] = await exec().insert(paymentLinks).values({ user: owner.id, slug: "adminView001", currency: "KES", title: "Shoes", amount: 1500 } as any).returning();
+        await exec().insert(transactions).values({ user: owner.id, reference: "LINKPAY-1", amount: 1500, currency: "NGN", fromCurrency: "KES", detailType: "yellowcard" as any, status: "completed" as any, paymentLink: link.id });
+
+        const { user: viewer } = await staffWith("Links viewer", ["users.directory", "users.payment_links"]);
+        const { user: other } = await staffWith("No links", ["users.directory"]);
+        const seen = await call("GET", `/protected/users/${owner.id}/payment-links`, viewer);
+        expect(seen.status).toBe(200);
+        expect(seen.body.data.links).toMatchObject([{ slug: "adminView001", title: "Shoes", currency: "KES", status: "active", paymentsCount: 1, totalPaid: 1500 }]);
+        expect((await call("GET", `/protected/users/${owner.id}/payment-links`, other)).status).toBe(403);
+    });
+
     it("tells the app what an admin can do on /users/current", async () => {
         const { user: staff } = await staffWith("Ops", ["dashboard", "transactions"]);
         const me = (await call("GET", "/protected/users/current", staff)).body.data.user;

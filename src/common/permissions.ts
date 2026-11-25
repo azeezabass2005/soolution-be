@@ -44,6 +44,7 @@ export const PERMISSIONS = [
     { key: "users.identity", group: "User management · inside a user", label: "Identity verification", description: "BVN/NIN details, and resetting a verification. Also hides them inside KYC." },
     { key: "users.daily_limit", group: "User management · inside a user", label: "Daily limit", description: "A user's own daily limit." },
     { key: "users.transactions", group: "User management · inside a user", label: "Transactions", description: "A user's transactions." },
+    { key: "users.payment_links", group: "User management · inside a user", label: "Payment links", description: "The payment links a user has made, and what they've collected." },
     { key: "kyc", group: "User management", label: "KYC / KYB", description: "Reviewing KYC and KYB applications, and tier changes." },
     { key: "kyc.company", group: "User management", label: "Company information and all documents", description: "Business details and the documents uploaded with KYB." },
 

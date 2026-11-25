@@ -170,7 +170,17 @@ class WalletTransactionRepository {
             exec().select().from(walletTransactions).where(condition).orderBy(desc(walletTransactions.createdAt), desc(walletTransactions.id)).limit(window.limit).offset(window.offset),
             exec().select({ n: count() }).from(walletTransactions).where(condition),
         ]);
-        return toPage(rows.map(stripNulls), Number(n), window);
+        // A row tied to a transaction (e.g. a GHS top-up) carries its other side, so both amounts can show
+        const linkedIds = [...new Set(rows.map((r) => r.transactionId).filter((v): v is string => !!v))];
+        const linked = linkedIds.length
+            ? new Map((await exec().select({ id: transactions.id, amount: transactions.amount, fromCurrency: transactions.fromCurrency, currency: transactions.currency, reference: transactions.reference })
+                .from(transactions).where(inArray(transactions.id, linkedIds))).map((t) => [t.id, t]))
+            : new Map();
+        return toPage(rows.map((r) => {
+            const t = r.transactionId ? linked.get(r.transactionId) : undefined;
+            const foreign = t ? (t.fromCurrency !== (r.currency || "NGN") ? { amount: Number(t.amount), currency: t.fromCurrency } : t.currency !== (r.currency || "NGN") ? { amount: Number(t.amount), currency: t.currency } : null) : null;
+            return { ...stripNulls(r), ...(t ? { linkedReference: t.reference } : {}), ...(foreign ? { otherSide: foreign } : {}) };
+        }), Number(n), window);
     }
 }
 
