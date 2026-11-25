@@ -2,6 +2,7 @@ import { and, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { fxConversions, fxQuotes, transactionDetails, transactions, users, walletTransactions } from "../db/schema";
 import { exec } from "../repositories/utils";
 import platformSettingsService from "./platform-settings.service";
+import { applyFeeRule } from "../common/pricing";
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 /** Rates keep four places (naira per cedi is small enough that cents matter) */
@@ -62,6 +63,17 @@ export interface ProfitFilter {
  *   withdraw   NGN to a bank: the fee less the provider's part
  * Fund + Send and Receive + Withdraw are summed per user as flows.
  */
+/**
+ * YellowCard's own fee on a payment or collection, in the transaction's local
+ * currency (service + network fee), when its record reports it; null if not.
+ */
+export const ycFeeUnits = (raw: unknown): number | null => {
+    if (!raw || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const parts = [r.serviceFeeAmountLocal, r.networkFeeAmountLocal].map((v) => Number(v)).filter((v) => isFinite(v) && v >= 0);
+    return parts.length ? parts.reduce((a, b) => a + b, 0) : null;
+};
+
 class AdminProfitService {
     async rows(filter: ProfitFilter = {}): Promise<ProfitRow[]> {
         const kinds = filter.kinds?.length ? filter.kinds : PROFIT_KINDS;
@@ -91,6 +103,7 @@ class AdminProfitService {
                 ? await exec().select().from(fxConversions).where(inArray(fxConversions.transactionId, receiveIds))
                 : [];
             const converted = new Map(conversions.map((c) => [c.transactionId, c]));
+            const pricing = await platformSettingsService.getPricing();
 
             for (const { t, d } of rows) {
                 const fee = n(d?.feeAmount);
@@ -116,7 +129,10 @@ class AdminProfitService {
                             out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: null, profitNgn: null, userRate: userRate || null, providerRate: null, note: "Rate not recorded" });
                             continue;
                         }
-                        const providerFee = subtotal * n(d?.providerFeePercent) / 100;
+                        // YellowCard's own fee, in the payout currency, when it reported one: it is charged
+                        // on top, so we paid for (amount + fee) units, not just the amount
+                        const ycFee = ycFeeUnits(d?.ycRawPayload);
+                        const providerFee = ycFee !== null ? ycFee * providerRate : subtotal * n(d?.providerFeePercent) / 100;
                         const profit = r2(charged - (units * providerRate + providerFee));
                         out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: r2(profit - r2(fee - providerFee)), profitNgn: profit, userRate: rate(userRate), providerRate: rate(providerRate), volumeNgn: r2(charged) });
                     } else if (t.currency === "NGN" && t.fromCurrency !== "NGN" && kinds.includes("receive")) {
@@ -128,7 +144,10 @@ class AdminProfitService {
                             out.push({ ...this.base(t, "receive"), feeNgn: fee, spreadNgn: null, profitNgn: null, userRate: userRate || null, providerRate: null, note: "Rate not recorded" });
                             continue;
                         }
-                        const providerFee = gross * n(d?.providerFeePercent) / 100;
+                        // YellowCard's fee comes out of what was collected before it's converted: only
+                        // (amount − fee) units were turned into money for us
+                        const ycFee = ycFeeUnits(d?.ycRawPayload);
+                        const providerFee = ycFee !== null ? ycFee * providerRate : gross * n(d?.providerFeePercent) / 100;
                         const profit = r2(units * providerRate - providerFee - credited);
                         out.push({ ...this.base(t, "receive"), feeNgn: fee, spreadNgn: r2(profit - r2(fee - providerFee)), profitNgn: profit, userRate: rate(userRate), providerRate: rate(providerRate), volumeNgn: r2(gross) });
                     }
@@ -147,7 +166,16 @@ class AdminProfitService {
                     const providerFee = ngnAmount * n(d?.providerFeePercent) / 100;
                     const profit = r2(charged - cost);
                     const platformFee = r2(fee - providerFee);
-                    out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: r2(profit - platformFee), profitNgn: profit, userRate, providerRate: units > 0 ? rate(cost / units) : null, volumeNgn: r2(charged) });
+                    // Fincra's charge (cost) is the GHS sent PLUS its own fee (e.g. GHS 15), so cost ÷ amount
+                    // overstates the rate. Use the quote's own rate; older sends without it spread the cost
+                    // over amount + Fincra's fee from the pricing rules.
+                    let unitRate = n(d?.providerRate);
+                    if (!(unitRate > 0) && units > 0) {
+                        const rules = pricing.send["NGN-GHS"];
+                        const feeGhs = rules?.feeCurrency === "GHS" ? applyFeeRule(rules.providerFee, units) : 0;
+                        unitRate = cost / (units + feeGhs);
+                    }
+                    out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: r2(profit - platformFee), profitNgn: profit, userRate, providerRate: unitRate > 0 ? rate(unitRate) : null, volumeNgn: r2(charged) });
                 } else if (t.fromCurrency === "GHS" && t.currency === "NGN" && kinds.includes("receive")) {
                     const credited = n(d?.fromAmount);
                     const gross = credited + fee;

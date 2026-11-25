@@ -23,12 +23,15 @@ const BACKFILL_GRACE_MS = 3 * MINUTE;
  * What Fincra settled to our GHS balance for a checkout: its amountReceived,
  * else the amount less its fee, else what was asked. That's what gets converted.
  */
-export function settledGhsFromCheckout(checkout: any, askedGhs: number): number {
+export function settledGhsFromCheckout(checkout: any, askedGhs: number, providerFeePercent = 0): number {
     const paid = Number(checkout?.amount ?? checkout?.amountReceived ?? 0);
     const reportedReceived = Number(checkout?.amountReceived);
     const reportedFee = Number(checkout?.fee);
     if (reportedReceived > 0 && reportedReceived <= paid + 0.001) return reportedReceived;
     if (reportedFee > 0 && reportedFee < paid) return paid - reportedFee;
+    // Fincra takes its fee (e.g. 2.3%) out of the cedis before they reach our balance,
+    // so what can be converted is the amount less that fee, not the full amount paid
+    if (providerFeePercent > 0 && providerFeePercent < 50) return Math.round(askedGhs * (1 - providerFeePercent / 100) * 100) / 100;
     return askedGhs;
 }
 
@@ -131,6 +134,8 @@ class GhsConversionService {
             });
             await fxConversionRepository.update(conversion.id, {
                 status: "processing",
+                // What was really converted (the balance, when it was a little short), so the rate is per cedi converted
+                sourceAmount: amount,
                 providerReference: started.reference,
                 quoteReference: started.quote.reference,
                 lastError: null,
@@ -203,7 +208,7 @@ class GhsConversionService {
         if (!transaction || transaction.status !== "completed" || transaction.fromCurrency !== "GHS") return false;
         const detail = await transactionDetailRepository.findByTransactionId(transactionId);
         if (!detail) return false;
-        const ghsAmount = round2(settledGhsFromCheckout(detail.providerPayload, Number(transaction.amount)));
+        const ghsAmount = round2(settledGhsFromCheckout(detail.providerPayload, Number(transaction.amount), Number(detail.providerFeePercent) || 0));
         if (!(ghsAmount > 0)) return false;
         const row = await fxConversionRepository.queue({
             transactionId,

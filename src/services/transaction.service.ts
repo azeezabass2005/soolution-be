@@ -2098,6 +2098,8 @@ class TransactionService {
                 feePercent,
                 providerQuoteReference: quote.reference,
                 providerCost,
+                // Fincra's own NGN per GHS for this quote (its fee, in amountToCharge, is not in it)
+                providerRate: Math.round((quoteSourceNgn / amount) * 1_000_000) / 1_000_000,
                 fundingCurrency: walletCurrency,
                 fundingAmount: walletDebit,
                 fundingFee: walletFee,
@@ -2175,7 +2177,11 @@ class TransactionService {
                 const cost = Math.round(Number(fresh.amountToCharge ?? fresh.sourceAmount) * 100) / 100;
                 if (!(Number(fresh.sourceAmount) > 0) || !(cost > 0)) return failAndRefund("We couldn't get a rate for this payout");
                 if (cost > totalDebit) return failAndRefund("The exchange rate moved past what was paid");
-                await transactionDetailRepository.updateByTransactionId(transaction.id, { providerQuoteReference: fresh.reference, providerCost: cost });
+                await transactionDetailRepository.updateByTransactionId(transaction.id, {
+                    providerQuoteReference: fresh.reference,
+                    providerCost: cost,
+                    providerRate: Math.round((Number(fresh.sourceAmount) / amount) * 1_000_000) / 1_000_000,
+                });
                 quote = { reference: fresh.reference, sourceNgn: Number(fresh.sourceAmount) };
             } catch (error: any) {
                 if (error?.response_code) throw error;
@@ -2980,7 +2986,7 @@ class TransactionService {
             }
             const wallet = await this.walletService.getOrCreateWallet(transaction.user);
             // What Fincra settled to our GHS balance (it keeps its fee, which we bear): that's what gets converted
-            const settledGhs = settledGhsFromCheckout(checkout, transaction.amount);
+            const settledGhs = settledGhsFromCheckout(checkout, transaction.amount, Number(detail.providerFeePercent) || 0);
             const credited = await withTransaction(async (tx) => {
                 if (!(await this.claimStatus(transaction, TRANSACTION_STATUS.COMPLETED as TransactionStatus, { completedAt: new Date() }, tx))) return false;
                 await this.creditWalletFromGhsCollection(transaction, detail, wallet.id, tx);

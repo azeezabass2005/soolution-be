@@ -108,6 +108,39 @@ describe("YellowCard currencies priced like GHS", () => {
         expect(row).toMatchObject({ profitNgn: 0, volumeNgn: 1000, profitPercent: 0, userRate: 10, providerRate: 10 });
     });
 
+    it("counts YellowCard's own fee: on top of a send, and out of a collection before it's converted", async () => {
+        const { ycFeeUnits } = await import("../src/services/admin-profit.service");
+        expect(ycFeeUnits({ serviceFeeAmountLocal: 2, networkFeeAmountLocal: "0.5" })).toBe(2.5);
+        expect(ycFeeUnits({ rate: 10 })).toBeNull();
+        expect(ycFeeUnits(null)).toBeNull();
+
+        const service = new TransactionService();
+        const user = await createUser();
+        await fundWallet(user.id, 50_000);
+        const yc: any = (await import("../src/services/yellowcard.service")).default;
+        yc.submitPaymentRequest.mockResolvedValue({ id: "pay-fee", status: "processing" });
+        const tx: any = await service.createYellowCardTransaction({
+            amount: 100, fromCurrency: "NGN", toCurrency: "KES", pin: TEST_PIN, reason: "gift",
+            destination: { accountName: "Wanjiru", accountNumber: "+254712345678", accountType: "momo", country: "KE", network: "Mpesa" },
+        } as any, user.id);
+        const id = tx.id ?? tx._id;
+        // YellowCard reports KES 3 of fees: we paid for 103 KES at ₦10, the user paid ₦1000
+        await exec().update(transactionDetails).set({ ycRawPayload: { serviceFeeAmountLocal: 3, networkFeeAmountLocal: 0 } }).where(eq(transactionDetails.transactionId, id));
+        await exec().update(transactions).set({ status: "completed" as any }).where(eq(transactions.id, id));
+        const [row] = await adminProfitService.rows({ userId: user.id, kinds: ["send"] });
+        expect(row).toMatchObject({ profitNgn: -30, providerRate: 10 });
+    });
+
+    it("converts only the cedis Fincra settled (its fee taken first), so the rate is per cedi converted", async () => {
+        const { settledGhsFromCheckout } = await import("../src/services/ghs-conversion.service");
+        // Fincra says what it kept or settled: that wins
+        expect(settledGhsFromCheckout({ amount: 10, amountReceived: 9.77 }, 10, 2.3)).toBe(9.77);
+        expect(settledGhsFromCheckout({ amount: 10, fee: 0.23 }, 10, 2.3)).toBeCloseTo(9.77, 2);
+        // Silent payload: the amount less Fincra's fee, not the full 10
+        expect(settledGhsFromCheckout({ amount: 10 }, 10, 2.3)).toBe(9.77);
+        expect(settledGhsFromCheckout({ amount: 10 }, 10)).toBe(10);
+    });
+
     it("holds a YellowCard send over the approval limit and only asks YellowCard once approved", async () => {
         const { default: approvalService } = await import("../src/services/approval.service");
         await platformSettingsService.updateSettings({ operations: { approvals: { thresholdNgn: 500 } } }, ADMIN);
