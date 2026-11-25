@@ -459,13 +459,14 @@ class TransactionService {
      * (no bank transfer or receipt). If the hold fails (e.g. the balance was
      * spent meanwhile) the transaction is cancelled and the error rethrown.
      */
-    private holdManualPayoutFromWallet = async (transaction: Transaction, userId: string, description: string) => {
+    private holdManualPayoutFromWallet = async (transaction: Transaction, userId: string, description: string, from?: { currency: string; amount: number }) => {
         try {
             await withTransaction(async (tx) => {
                 await walletSendService.holdForManualPayout({
                     userId,
-                    currency: transaction.currency,
-                    amount: transaction.amount,
+                    // The payout's own wallet by default; RMB is paid from the NGN wallet at the manual rate
+                    currency: from?.currency ?? transaction.currency,
+                    amount: from?.amount ?? transaction.amount,
                     transactionId: transaction.id,
                     reference: transaction.reference,
                     description,
@@ -514,8 +515,9 @@ class TransactionService {
     public createAlipayTransaction = async (transactionData: ManualTransactionInput, alipayQrCode: Express.Multer.File | { qrCodeUrl: string }, user: string, ipAddress?: string, userAgent?: string) =>  {
         await currencyAccessService.assertOn(user, 'RMB');
         const { amount, platform, alipayNo, alipayName, fromCurrency, paymentMethod, idempotencyKey, pin } = transactionData;
-        // Paid from the RMB wallet: no bank transfer or receipt, ops pays out directly
-        const fromWallet = this.resolveManualWallet(transactionData.walletCurrency, "RMB");
+        // Paid from the user's wallet, never by transfer to us: the NGN wallet (at the admin's
+        // manual RMB rate) unless they hold RMB and chose that wallet. Ops then pays out.
+        const fromWallet: "NGN" | "RMB" = String(transactionData.walletCurrency || "").toUpperCase() === "RMB" ? "RMB" : "NGN";
 
         if (!fromCurrency) {
             throw errorResponseMessage.payloadIncorrect("Source currency (fromCurrency) is required");
@@ -532,7 +534,7 @@ class TransactionService {
         await this.pinService.verifyPin(user, pin);
 
         // The admin's manual RMB rate (naira per yuan) and hours; paid from the RMB wallet needs no rate
-        const manual = await manualSendTerms("RMB", { needsRate: !fromWallet });
+        const manual = await manualSendTerms("RMB", { needsRate: fromWallet === "NGN" });
         const ngnEquivalent = manual.rate > 0
             ? Math.round(amount * manual.rate * 100) / 100
             : await new RateUtils(fromCurrency, "RMB").convertAmountReverse(amount);
@@ -549,7 +551,9 @@ class TransactionService {
 
         // Daily tier limit, valued from the source side (RMB isn't quoted in USD)
         const { ngnValue: txNgnValue } = await transactionLimitService.assertAllowed(user, [{ amount: ngnEquivalent, currency: fromCurrency }]);
-        if (fromWallet) await walletSendService.assertCanPay(user, "RMB", Math.round(amount * 100) / 100);
+        // What leaves the wallet: naira at the manual rate, or the yuan themselves
+        const holdAmount = fromWallet === "NGN" ? ngnEquivalent : Math.round(amount * 100) / 100;
+        await walletSendService.assertCanPay(user, fromWallet, holdAmount);
 
         // Handle idempotency key if provided
         if (idempotencyKey) {
@@ -557,11 +561,7 @@ class TransactionService {
             if (duplicate) return duplicate;
         }
 
-        // Bank details are only shown when the user pays by bank transfer
-        const bankAccountDetails = fromWallet ? null : await this.bankAccountDetailsService.getCompanyDefault(fromCurrency);
-        if(!fromWallet && !bankAccountDetails) {
-            throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
-        }
+        // No bank transfer to us: the money comes from the wallet
         // A saved beneficiary's QR code is reused; a new one is uploaded
         let qrCodeUrl: string;
         if ("qrCodeUrl" in alipayQrCode) {
@@ -603,58 +603,38 @@ class TransactionService {
             alipayNo,
             alipayName,
             qrCodeUrl,
-            ...(bankAccountDetails ? { bankAccountDetails: { ...bankAccountDetails } } : {}),
-            ...(fromWallet ? { fundingCurrency: "RMB", fundingAmount: transaction.amount, fundingFee: 0 } : {}),
+            fundingCurrency: fromWallet, fundingAmount: holdAmount, fundingFee: 0,
             ...(paymentMethod === 'alipay' ? { platform: platform as any } : {}),
         })
 
-        if (fromWallet) {
-            await this.holdManualPayoutFromWallet(transaction, user, `Alipay payment to ${alipayName || 'recipient'}`);
-        }
+        await this.holdManualPayoutFromWallet(transaction, user, `${paymentMethod === 'wechat' ? 'WeChat' : 'Alipay'} payment to ${alipayName || 'recipient'}`, { currency: fromWallet, amount: holdAmount });
 
-        // The team sees every new manual payment straight away (in the app); the email follows once the user sends their receipt
+        // The team sees every new manual payment straight away (in the app)
         await inboxService.toTeam('transactions', {
             type: 'transaction.manual',
             title: `New manual ${transaction.currency} payment`,
-            body: `${transaction.reference}: ${transaction.currency} ${Number(transaction.amount).toLocaleString('en-US')}${fromWallet ? ', paid from the customer\'s wallet' : ', waiting for the customer\'s receipt'}.`,
+            body: `${transaction.reference}: ${transaction.currency} ${Number(transaction.amount).toLocaleString('en-US')}, paid from the customer's ${fromWallet} wallet.`,
             link: '/dashboard/admin/transactions?status=in_progress',
             data: { transactionId: transaction.id },
         });
 
-        // Send transaction initiated email to user
+        // The user hears it's in hand: the money is held from their wallet and our team pays it out
         try {
-            const user = await userRepository.findById(transaction.user);
-            if (user) {
-                await this.notificationService.sendTransactionNotification(
-                    user,
-                    'payment_initiated',
-                    {
-                        amount: `${transaction.amount} ${transaction.currency}`,
-                        reference: transaction.reference,
-                        recipient: transactionDetails.alipayName || 'Recipient',
-                        actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
-                    }
-                );
-                logger.info('Transaction initiated email sent successfully', {
-                    transactionId: transaction.id,
-                    userId: user.id,
-                    email: user.email,
-                    reference: transaction.reference,
-                    amount: `${transaction.amount} ${transaction.fromCurrency}`,
-                    currency: transaction.currency
-                });
+            const owner = await userRepository.findById(transaction.user);
+            if (owner) {
+                await this.notificationService.sendNotification(owner as any, {
+                    type: 'transaction.manual_started',
+                    title: 'Your RMB payment is on its way',
+                    message: `CNY ${Number(transaction.amount).toLocaleString('en-US')} to ${transactionDetails.alipayName || 'your recipient'} has been taken from your ${fromWallet} wallet and is being paid out. We'll tell you when it's done. Reference: ${transaction.reference}.`,
+                    actionUrl: `${config.FRONTEND_URL}/dashboard/user/transactions`,
+                    buttonText: 'View details',
+                } as any);
             }
         } catch (error) {
-            logger.error('Failed to send transaction initiated email', {
-                transactionId: transaction.id,
-                reference: transaction.reference,
-                error: error instanceof Error ? error.message : String(error),
-                stack: error instanceof Error ? error.stack : undefined
-            });
-            // Don't fail transaction creation if email fails
+            logger.warn('RMB payment notice failed', { transactionId: transaction.id, error: error instanceof Error ? error.message : String(error) });
         }
 
-        const created = fromWallet ? await transactionRepository.findById(transaction.id) : transaction;
+        const created = await transactionRepository.findById(transaction.id);
         return { ...(created ?? transaction), details: { ...transactionDetails } }
     }
 

@@ -1,5 +1,5 @@
 import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, lte, notInArray, sql, type SQL } from "drizzle-orm";
-import { fxConversions, transactionDetails, transactions, users, walletTransactions } from "../db/schema";
+import { fxConversions, paymentLinks, transactionDetails, transactions, users, walletTransactions } from "../db/schema";
 import type { Executor } from "../db/client";
 import type { PublicUser, Transaction, TransactionDetail, TransactionView, WalletTransaction } from "../types/entities";
 import type { DetailType, TransactionStatus, WalletTransactionStatus } from "../types/enums";
@@ -340,13 +340,22 @@ class TransactionRepository {
         if (!rows.length) return [];
         const ids = rows.map((row) => row.id);
         const ownerIds = [...new Set(rows.map((row) => row.user))];
-        const [detailRows, ownerRows] = await Promise.all([
+        const linkIds = [...new Set(rows.map((row) => row.paymentLink).filter((v): v is string => !!v))];
+        const [detailRows, ownerRows, linkRows] = await Promise.all([
             exec(tx).select().from(transactionDetails).where(inArray(transactionDetails.transactionId, ids)),
             exec(tx).select().from(users).where(inArray(users.id, ownerIds)),
+            linkIds.length ? exec(tx).select({ id: paymentLinks.id, title: paymentLinks.title }).from(paymentLinks).where(inArray(paymentLinks.id, linkIds)) : Promise.resolve([] as Array<{ id: string; title: string | null }>),
         ]);
         const details = new Map(detailRows.map((row) => [row.transactionId, stripNulls(row) as TransactionDetail]));
         const owners = new Map<string, PublicUser>(ownerRows.map((row) => [row.id, toPublicUser(toUser(row))]));
-        return rows.map((row) => ({ ...row, user: owners.get(row.user) ?? row.user, details: details.get(row.id) }));
+        // What a payment link was for, so receipts and details can say it
+        const linkTitles = new Map(linkRows.map((l) => [l.id, l.title]));
+        return rows.map((row) => ({
+            ...row,
+            user: owners.get(row.user) ?? row.user,
+            details: details.get(row.id),
+            ...(row.paymentLink && linkTitles.get(row.paymentLink) ? { paymentLinkTitle: linkTitles.get(row.paymentLink) } : {}),
+        }));
     }
 
     async findViewById(id: string, tx?: Executor): Promise<TransactionView | undefined> {

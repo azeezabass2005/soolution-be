@@ -470,6 +470,9 @@ class PaymentLinkService {
         const account = String(detail?.momoNumber || detail?.accountNumber || "");
         return {
             payerName: transaction.payer?.name || detail?.momoName || detail?.accountName || null,
+            // The payer's own contact details, so whoever they forward it to can tell it's them
+            payerEmail: transaction.payer?.email || null,
+            payerPhone: transaction.payer?.phone || null,
             method: detail?.institutionType === "bank" ? "bank" : "momo",
             provider: detail?.bankName || detail?.momoNetwork || detail?.ogNetwork || null,
             account: account.length > 5 ? `${account.slice(0, 3)}${"*".repeat(Math.max(3, account.length - 6))}${account.slice(-3)}` : null,

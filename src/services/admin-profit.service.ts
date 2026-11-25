@@ -141,7 +141,7 @@ class AdminProfitService {
                     const ngnAmount = charged - fee;
                     const userRate = units > 0 && ngnAmount > 0 ? rate(ngnAmount / units) : null;
                     if (!(cost > 0)) {
-                        out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: null, profitNgn: null, userRate, providerRate: null, note: "Paid by our team (manual): no provider cost recorded" });
+                        out.push({ ...this.base(t, "send"), feeNgn: fee, spreadNgn: null, profitNgn: null, userRate, providerRate: null, note: "Sent manually: no provider cost recorded" });
                         continue;
                     }
                     const providerFee = ngnAmount * n(d?.providerFeePercent) / 100;
