@@ -195,6 +195,29 @@ describe("admin roles and permissions", () => {
         expect((await call("GET", `/public/admin-invites/not-a-real-token-at-all-xxxxxxxx`)).status).toBe(404);
     });
 
+    it("lets someone without an account create a team account from the invitation, with no customer onboarding", async () => {
+        const { role } = await staffWith("Invited treasury", ["dashboard", "profit_balances"]);
+        const invite = await adminAccessService.invite({ email: "fresh.staff@example.test", role: role.id }, superAdmin.id);
+        const token = invite.link.split("/admin-invite/")[1];
+
+        const weak = await call("POST", `/public/admin-invites/${token}/register`, undefined, { firstName: "Tobi", lastName: "Ade", password: "password" });
+        expect(weak.status).toBe(400);
+        const created = await call("POST", `/public/admin-invites/${token}/register`, undefined, { firstName: "Tobi", lastName: "Ade", password: "Gr33n-Plantain!77" });
+        expect(created.status).toBe(201);
+        expect(created.body.data).toMatchObject({ email: "fresh.staff@example.test", superAdmin: false });
+        const account = await userRepository.findByEmail("fresh.staff@example.test");
+        expect(account).toMatchObject({ role: ROLE_MAP.ADMIN, adminRoleId: role.id, isVerified: true, isCompleted: true, firstName: "Tobi" });
+        // Used up
+        expect((await call("POST", `/public/admin-invites/${token}/register`, undefined, { firstName: "Tobi", lastName: "Ade", password: "Gr33n-Plantain!77" })).status).toBe(409);
+
+        // Already has an account: told to sign in and accept instead
+        await createUser({ email: "has.account@example.test" });
+        const second = await adminAccessService.invite({ email: "has.account@example.test", role: role.id }, superAdmin.id);
+        const other = await call("POST", `/public/admin-invites/${second.link.split("/admin-invite/")[1]}/register`, undefined, { firstName: "Has", lastName: "Account", password: "Gr33n-Plantain!77" });
+        expect(other.status).toBe(409);
+        expect(other.body.message).toContain("Sign in to accept");
+    });
+
     it("tells the app what an admin can do on /users/current", async () => {
         const { user: staff } = await staffWith("Ops", ["dashboard", "transactions"]);
         const me = (await call("GET", "/protected/users/current", staff)).body.data.user;

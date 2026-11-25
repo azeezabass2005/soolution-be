@@ -14,6 +14,8 @@ import NotificationService from "../utils/notification.utils";
 import config from "../config/env.config";
 import logger from "../utils/logger.utils";
 import AuditLogService from "./audit-log.service";
+import HashService from "../utils/hash.utils";
+import { passwordProblem } from "../common/password-policy";
 
 const auditLog = new AuditLogService();
 /** Who changed which access, kept in the audit log */
@@ -263,7 +265,7 @@ class AdminAccessService {
             name: existing?.firstName || "there",
             eyebrow: "Team invitation",
             title: "You're invited to the Solution Pay admin team",
-            message: `${inviter ? `${inviter.firstName} ${inviter.lastName}`.trim() : "A super admin"} invited you to join as ${as}. ${existing ? "Sign in with this email, then accept." : "Create an account with this email, then accept."} The invitation expires in 7 days. If you didn't expect this, ignore this email.`,
+            message: `${inviter ? `${inviter.firstName} ${inviter.lastName}`.trim() : "A super admin"} invited you to join as ${as}. ${existing ? "Open the link, sign in with this email, then accept." : "Open the link to set your name and password; your team account is ready straight away."} The invitation expires in 7 days. If you didn't expect this, ignore this email.`,
             actionUrl: link,
             buttonText: "Accept invitation",
         }).catch((error: any) => logger.warn("Admin invite email failed", { error: error?.message }));
@@ -304,6 +306,47 @@ class AdminAccessService {
             roleName: roleName ?? null,
             expiresAt: invite.expiresAt,
         };
+    }
+
+    /**
+     * Someone invited with no account creates one from the invitation: the link
+     * reached their inbox, so the email is proven and there's no customer
+     * onboarding. The account is a team account with the invited role, and the
+     * invitation is used up. They sign in next (with the usual email code).
+     */
+    async registerFromInvite(token: string, body: unknown) {
+        const { invite } = await this.openInvite(token);
+        const data = parse(z.object({
+            firstName: z.string().trim().min(2, "Enter your first name").max(60),
+            lastName: z.string().trim().min(2, "Enter your last name").max(60),
+            password: z.string({ required_error: "Choose a password" }).max(200),
+        }), body);
+        const problem = passwordProblem(data.password, { ...data, email: invite.email });
+        if (problem) throw errorResponseMessage.createError(400, problem, ErrorSeverity.LOW, { issues: [{ path: "password", message: problem }] });
+        if (await userRepository.findByEmail(invite.email)) throw conflict("An account already uses this email. Sign in to accept the invitation.");
+        if (invite.roleId) await this.findRole(invite.roleId);
+
+        const hashed = await HashService.hashPassword(data.password);
+        const user = await exec().transaction(async (tx) => {
+            const [claimed] = await exec(tx).update(adminInvites).set({ acceptedAt: new Date() })
+                .where(and(eq(adminInvites.id, invite.id), isNull(adminInvites.acceptedAt), isNull(adminInvites.revokedAt))).returning();
+            if (!claimed) throw conflict("This invitation has already been used.");
+            const created = await userRepository.create({
+                email: invite.email,
+                firstName: data.firstName,
+                lastName: data.lastName,
+                password: hashed.password,
+                isVerified: true,
+                isCompleted: true,
+                role: ROLE_MAP.ADMIN,
+                adminRoleId: invite.roleId ?? null,
+            } as any, tx);
+            await exec(tx).update(adminInvites).set({ acceptedBy: created.id }).where(eq(adminInvites.id, invite.id));
+            return created;
+        });
+        await record({ action: "admin_invite.accepted", userId: user.id, afterValue: { inviteId: invite.id, adminRoleId: invite.roleId ?? null, newAccount: true } });
+        logger.info("Team account created from an invitation", { userId: user.id, inviteId: invite.id });
+        return { email: invite.email, superAdmin: !invite.roleId };
     }
 
     /** The signed-in account joins the team, if it's the invited email */
