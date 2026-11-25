@@ -136,7 +136,9 @@ describe("admin view of users", () => {
         expect(receives.find((r) => r.profitNgn !== null)).toMatchObject({ profitNgn: 600, spreadNgn: 611 });
         expect(receives.find((r) => r.profitNgn === null)?.note).toBe("Not converted to naira");
         // Rates in naira per cedi: the user paid ₦120 (₦12,000 / 100) and Fincra charged ₦115
-        expect(send).toMatchObject({ userRate: 120, providerRate: 115 });
+        // No quote rate stored (an older send): Fincra's ₦11,500 covered the 100 GHS plus its own fee
+        // (1.5% = GHS 1.5 under the default rules), so the rate is ₦11,500 ÷ 101.5, not ÷ 100
+        expect(send).toMatchObject({ userRate: 120, providerRate: Math.round((11_500 / 101.5) * 10_000) / 10_000 });
         // The payment was worth ₦111 per cedi to the user (before the fee); converting fetched ₦116
         expect(receives.find((r) => r.profitNgn !== null)).toMatchObject({ userRate: 111, providerRate: 116 });
         expect(receives.find((r) => r.profitNgn === null)).toMatchObject({ userRate: 111, providerRate: null });
