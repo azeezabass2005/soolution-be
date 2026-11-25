@@ -12,7 +12,18 @@ export type YellowCardChannelType = "bank" | "momo";
 export interface YellowCardMarket {
     currency: string;
     country: string;
+    /** The ways money moves there in this direction (bank, momo) */
+    channels?: YellowCardChannelType[];
 }
+
+const NETWORK_CACHE_MS = 30 * 60 * 1000;
+
+/** Live channel types per direction (withdraw = send, deposit = receive) */
+const directionalTypes = (rows: any[]): { send: YellowCardChannelType[]; receive: YellowCardChannelType[] } => {
+    const of = (rampType: string) => [...new Set(rows.filter((c) => c.rampType === rampType).map((c) => c.channelType as YellowCardChannelType))]
+        .sort((a, b) => (a === "momo" ? -1 : 1) - (b === "momo" ? -1 : 1));
+    return { send: of("withdraw"), receive: of("deposit") };
+};
 
 export interface YellowCardCountryConfig {
     country: string;
@@ -25,7 +36,14 @@ export interface YellowCardCountryConfig {
     receiveMin: number;
     /** 0 means no maximum */
     receiveMax: number;
+    /** Every channel type on in either direction (kept for older callers; prefer `channels`) */
     channelTypes: YellowCardChannelType[];
+    /**
+     * Which ways money moves, per direction: e.g. South Africa receives by bank
+     * but can't send at all; Benin is mobile money only. From YellowCard's live
+     * channel list; the combined summary is used when the list can't be read.
+     */
+    channels: { send: YellowCardChannelType[]; receive: YellowCardChannelType[] };
     /**
      * When money arrives, per direction and channel type, from YellowCard's
      * channel settlement times. Missing when the channel list can't be read.
@@ -346,19 +364,24 @@ class YellowCardService {
         try {
             const data = await this.get("/country/config", { country, currency });
             const raw = data?.data ?? data ?? {};
+            const types = (Array.isArray(raw.channelTypes) ? raw.channelTypes : [])
+                .filter((t: unknown): t is YellowCardChannelType => t === "bank" || t === "momo");
+            const rows = await this.activeChannels(country, currency).catch(() => null);
+            const channels = this.usable(rows ? directionalTypes(rows) : { send: types, receive: types }, await this.networkTypes(country));
             const value: YellowCardCountryConfig = {
                 country: String(country).toUpperCase(),
                 currency: raw.currency || currency,
-                send: raw.send === "active",
-                receive: raw.receive === "active",
+                // On only when YellowCard says so and at least one way to pay is live that way
+                send: raw.send === "active" && channels.send.length > 0,
+                receive: raw.receive === "active" && channels.receive.length > 0,
+                channels,
                 sendMin: Number(raw.sendMin) || 0,
                 sendMax: Number(raw.sendMax) || 0,
                 receiveMin: Number(raw.receiveMin) || 0,
                 receiveMax: Number(raw.receiveMax) || 0,
-                channelTypes: (Array.isArray(raw.channelTypes) ? raw.channelTypes : [])
-                    .filter((t: unknown): t is YellowCardChannelType => t === "bank" || t === "momo"),
+                channelTypes: types,
             };
-            value.arrival = await this.arrivalTimes(country, currency).catch(() => undefined);
+            value.arrival = rows ? this.arrivalFromRows(rows) : undefined;
             this.countryConfigCache.set(key, { at: Date.now(), value });
             return value;
         } catch (error: any) {
@@ -385,15 +408,52 @@ class YellowCardService {
         });
         const send = side("withdraw");
         const receive = side("deposit");
+        const channels = this.usable(directionalTypes(rows), await this.networkTypes(country));
         return {
             country, currency,
-            send: send.length > 0,
-            receive: receive.length > 0,
+            send: channels.send.length > 0,
+            receive: channels.receive.length > 0,
             sendMin: limits(send).min, sendMax: limits(send).max,
             receiveMin: limits(receive).min, receiveMax: limits(receive).max,
             channelTypes: [...new Set(rows.map((c) => c.channelType as YellowCardChannelType))],
+            channels,
             arrival: this.arrivalFromRows(rows),
         };
+    }
+
+    /** Network kinds per country (banks, mobile money providers), kept for a while: they rarely change */
+    private networkCache = new Map<string, { at: number; value: Set<YellowCardChannelType> }>();
+
+    /**
+     * Which kinds of network YellowCard lists as active in a country. A channel
+     * can be "on" with nothing to pay into (Malawi lists no banks; Congo lists
+     * nothing yet), so a way to pay counts only when both exist. Null when the
+     * list can't be read, so nothing is taken away on a hiccup.
+     */
+    private async networkTypes(country: string): Promise<Set<YellowCardChannelType> | null> {
+        const key = String(country).toUpperCase();
+        const cached = this.networkCache.get(key);
+        if (cached && Date.now() - cached.at < NETWORK_CACHE_MS) return cached.value;
+        try {
+            const data: any = await this.getNetworks(key);
+            const list: any[] = Array.isArray(data?.networks) ? data.networks : Array.isArray(data) ? data : [];
+            const value = new Set<YellowCardChannelType>();
+            for (const n of list) {
+                if (String(n?.status || "active").toLowerCase() !== "active") continue;
+                const kind = String(n?.channelType || "").toLowerCase() || (String(n?.accountNumberType || "").toLowerCase() === "phone" ? "momo" : String(n?.accountNumberType || "").toLowerCase());
+                if (kind === "bank" || kind === "momo") value.add(kind);
+            }
+            this.networkCache.set(key, { at: Date.now(), value });
+            return value;
+        } catch {
+            return null;
+        }
+    }
+
+    /** Channel types that also have an active network to pay into */
+    private usable(channels: { send: YellowCardChannelType[]; receive: YellowCardChannelType[] }, networks: Set<YellowCardChannelType> | null) {
+        if (!networks) return channels;
+        return { send: channels.send.filter((t) => networks.has(t)), receive: channels.receive.filter((t) => networks.has(t)) };
     }
 
     /** Active channels for a currency, from YellowCard's channel list */
@@ -433,7 +493,7 @@ class YellowCardService {
         const at = this.unavailableMarkets.get(key);
         if (at && Date.now() - at < COUNTRY_CONFIG_TTL_MS) return null;
         const config = await this.getCountryConfig(country, currency).catch(() => null);
-        if (!config || !config.channelTypes.length || (!config.send && !config.receive)) {
+        if (!config || (!config.send && !config.receive)) {
             this.unavailableMarkets.set(key, Date.now());
             return null;
         }
@@ -461,9 +521,8 @@ class YellowCardService {
             })));
         const usable = configs.filter((c): c is YellowCardCountryConfig => {
             if (!c) return false;
-            if (!c.channelTypes.length) unavailable[c.currency] = "no bank or mobile money channel is on";
-            else if (!c.send && !c.receive) unavailable[c.currency] = "send and receive are both off on this YellowCard account";
-            return c.channelTypes.length > 0;
+            if (!c.send && !c.receive) unavailable[c.currency] = "no bank or mobile money channel is on either way";
+            return c.send || c.receive;
         });
         if (Object.keys(unavailable).length) logger.warn("YellowCard: some currencies are not on offer", { unavailable });
 
@@ -472,13 +531,13 @@ class YellowCardService {
             countries.slice(1).map((country) => this.extraMarketConfig(country, currency)))))
             .filter((c): c is YellowCardCountryConfig => !!c);
         const all = [...usable, ...extras];
-        const market = (c: YellowCardCountryConfig): YellowCardMarket => ({ currency: c.currency, country: String(c.country).toUpperCase() });
+        const market = (c: YellowCardCountryConfig, flow: "send" | "receive"): YellowCardMarket => ({ currency: c.currency, country: String(c.country).toUpperCase(), channels: c.channels?.[flow] ?? c.channelTypes });
         const send = all.filter((c) => c.send);
         const receive = all.filter((c) => c.receive);
         return {
             send: [...new Set(send.map((c) => c.currency))],
             receive: [...new Set(receive.map((c) => c.currency))],
-            markets: { send: send.map(market), receive: receive.map(market) },
+            markets: { send: send.map((c) => market(c, "send")), receive: receive.map((c) => market(c, "receive")) },
             unavailable,
         };
     }

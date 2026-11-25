@@ -108,15 +108,16 @@ import { limitProblem } from "../common/pricing";
  */
 const assertYellowCardRoute = (config: YellowCardCountryConfig, flow: "send" | "receive", channelType: YellowCardChannelType, amount: number) => {
     const where = `${config.currency} payments`;
-    if (!(flow === "send" ? config.send : config.receive) || !config.channelTypes.includes(channelType)) {
-        const other = config.channelTypes.find((t) => t !== channelType);
+    const ways = config.channels?.[flow] ?? config.channelTypes;
+    if (!(flow === "send" ? config.send : config.receive) || !ways.includes(channelType)) {
+        const other = ways.find((t) => t !== channelType);
         throw errorResponseMessage.createError(
             400,
             other
                 ? `${channelType === "bank" ? "Bank" : "Mobile money"} isn't available for ${where} right now. Try ${other === "bank" ? "a bank account" : "mobile money"} instead.`
                 : `Automatic ${flow === "send" ? "payments" : "collections"} aren't available for ${where} right now.`,
             ErrorSeverity.MEDIUM,
-            { code: "CHANNEL_UNAVAILABLE", channelTypes: config.channelTypes }
+            { code: "CHANNEL_UNAVAILABLE", channelTypes: ways }
         );
     }
     const min = flow === "send" ? config.sendMin : config.receiveMin;

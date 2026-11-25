@@ -5,7 +5,7 @@
  */
 
 /** Currencies a payer can pay a link in. GHS goes through Fincra's checkout, the rest through YellowCard. */
-export const PAYMENT_LINK_CURRENCIES = ["GHS", "KES", "XAF", "ZAR", "TZS", "UGX", "XOF", "RWF", "BWP", "ZMW", "MWK"] as const;
+export const PAYMENT_LINK_CURRENCIES = ["GHS", "KES", "XAF", "ZAR", "TZS", "UGX", "XOF", "RWF", "BWP", "ZMW", "MWK", "CDF"] as const;
 export type PaymentLinkCurrency = (typeof PAYMENT_LINK_CURRENCIES)[number];
 
 /** Single-use links stop after one completed payment; reusable ones keep going until turned off */
@@ -19,25 +19,25 @@ export const PAYMENT_LINK_REDIRECT_MAX = 500;
 /** Links always credit the owner's NGN wallet */
 export const PAYMENT_LINK_TO_CURRENCY = "NGN";
 
-/** Payers in these currencies can only pay by mobile money */
-export const PAYMENT_LINK_MOMO_ONLY = ["GHS", "XAF", "RWF", "MWK"];
+/** Payers in these currencies can only pay by mobile money (used only when YellowCard cannot be asked) */
+export const PAYMENT_LINK_MOMO_ONLY = ["GHS"];
 
 /**
  * Currencies YellowCard sends to and collects in for our users. Sends are paid
  * from the NGN wallet and receipts credit it in naira (no wallet in these
  * currencies). Each is offered only while YellowCard has that direction on.
  */
-export const YELLOWCARD_FLOW_CURRENCIES = ["KES", "XAF", "ZAR", "TZS", "UGX", "XOF", "RWF", "BWP", "ZMW", "MWK"] as const;
+export const YELLOWCARD_FLOW_CURRENCIES = ["KES", "XAF", "ZAR", "TZS", "UGX", "XOF", "RWF", "BWP", "ZMW", "MWK", "CDF"] as const;
 
 export const CURRENCY_COUNTRY: Record<string, string> = {
     NGN: "NG", GHS: "GH", KES: "KE", XAF: "CM", ZAR: "ZA", TZS: "TZ", UGX: "UG",
-    XOF: "SN", RWF: "RW", BWP: "BW", ZMW: "ZM", MWK: "MW",
+    XOF: "SN", RWF: "RW", BWP: "BW", ZMW: "ZM", MWK: "MW", CDF: "CD",
 };
 
 export const COUNTRY_DIAL_CODE: Record<string, string> = {
     NG: "+234", GH: "+233", KE: "+254", CM: "+237", ZA: "+27", TZ: "+255", UG: "+256",
     SN: "+221", RW: "+250", BW: "+267", ZM: "+260", MW: "+265",
-    CI: "+225", BJ: "+229", ML: "+223", BF: "+226", TG: "+228", GA: "+241", CG: "+242",
+    CI: "+225", BJ: "+229", ML: "+223", BF: "+226", TG: "+228", GA: "+241", CG: "+242", CD: "+243",
 };
 
 /**

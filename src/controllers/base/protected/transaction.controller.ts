@@ -1,3 +1,4 @@
+import { YELLOWCARD_FLOW_CURRENCIES } from "../../../common/payment-link.constants";
 import BaseController from "../base-controller";
 import { lagosDayRange } from "../../../utils/date-range.utils";
 import TransactionService, { type TransactionListFilter } from "../../../services/transaction.service";
@@ -18,7 +19,8 @@ import transactionLimitService from "../../../services/transaction-limit.service
 /** Lagos is UTC+1 all year */
 
 /** Currencies the bank transfer / mobile money list covers (RMB has its own list) */
-const LISTED_CURRENCIES = ['GHS', 'NGN', 'KES', 'XAF', 'ZAR', 'TZS', 'UGX', 'XOF', 'RWF', 'BWP', 'ZMW', 'MWK'] as const;
+// Every currency we move through a provider (GHS, NGN and the YellowCard ones)
+const LISTED_CURRENCIES = ['GHS', 'NGN', ...YELLOWCARD_FLOW_CURRENCIES] as const;
 
 class TransactionController extends BaseController {
 

@@ -317,7 +317,8 @@ class PaymentLinkService {
             const config = await yellowCardService.getCountryConfig(ycCountryFor(currency, linkCountry), currency);
             if (!config.receive) return [];
             // Mobile money first, as payers mostly use it
-            return (["momo", "bank"] as const).filter((type) => config.channelTypes.includes(type));
+            const ways = config.channels?.receive ?? config.channelTypes;
+            return (["momo", "bank"] as const).filter((type) => ways.includes(type));
         } catch {
             return fallback;
         }

@@ -24,6 +24,19 @@ vi.mock("../src/services/fincra.service", async (importOriginal) => {
         },
     };
 });
+// YellowCard isn't part of these tests: no live calls (the rates feed also prices its currencies)
+vi.mock("../src/services/yellowcard.service", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("../src/services/yellowcard.service")>();
+    return {
+        ...actual,
+        default: {
+            ...(actual as any).default,
+            getRates: vi.fn(async () => ({ rates: [] })),
+            getImpliedRate: vi.fn(async () => { throw new Error("YellowCard isn't used here"); }),
+        },
+    };
+});
+
 vi.mock("../src/services/transaction-limit.service", () => ({
     default: {
         assertAllowed: vi.fn(async () => ({ ngnValue: 10_000 })),

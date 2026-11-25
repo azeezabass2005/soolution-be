@@ -92,7 +92,7 @@ export const SYSTEM_ACCOUNT_CODES = {
 // accounts are derived from this list at bootstrap time.
 export const YC_CURRENCIES = [
     'NGN', 'GHS', 'KES', 'ZAR', 'TZS', 'UGX',
-    'XOF', 'XAF', 'RWF', 'BWP', 'ZMW', 'MWK',
+    'XOF', 'XAF', 'RWF', 'BWP', 'ZMW', 'MWK', 'CDF',
 ] as const;
 
 export const userWalletAccountCode = (userId: string, currency: string = 'NGN'): string =>

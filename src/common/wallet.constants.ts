@@ -3,7 +3,7 @@ export const BASE_WALLET_CURRENCY = "NGN" as const;
 
 /** Currencies a user can hold a wallet in: the ones we can pay out */
 export const WALLET_CURRENCIES = [
-    "NGN", "RMB", "GHS", "KES", "XAF", "ZAR", "TZS", "UGX", "XOF", "RWF", "BWP", "ZMW", "MWK",
+    "NGN", "RMB", "GHS", "KES", "XAF", "ZAR", "TZS", "UGX", "XOF", "RWF", "BWP", "ZMW", "MWK", "CDF",
 ] as const;
 export type WalletCurrency = (typeof WALLET_CURRENCIES)[number];
 

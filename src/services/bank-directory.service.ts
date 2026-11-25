@@ -1,3 +1,4 @@
+import { YELLOWCARD_FLOW_CURRENCIES } from "../common/payment-link.constants";
 import yellowCardService from "./yellowcard.service";
 import fincraService from "./fincra.service";
 import WalletService from "./wallet.service";
@@ -28,7 +29,7 @@ export interface BankDirectory {
     canResolve: boolean;
 }
 
-const YC_BANK_CURRENCIES = ["KES", "XAF", "ZAR", "TZS", "UGX", "XOF", "RWF", "BWP", "ZMW", "MWK"];
+const YC_BANK_CURRENCIES: readonly string[] = YELLOWCARD_FLOW_CURRENCIES;
 const CACHE_MS = 60 * 60 * 1000;
 
 /** An active bank (not a mobile wallet), however YellowCard labels it */
