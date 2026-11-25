@@ -667,6 +667,11 @@ describe("GHS through Fincra", () => {
             const { default: ExchangeRateService } = await import("../src/services/exchange-rate.service");
             return new ExchangeRateService().create({ from: from as any, to: to as any, rate, isActive });
         };
+        /** A manual row from before live pricing (the service no longer allows them for GHS) */
+        const addLegacyRow = async (from: string, to: string, rate: number) => {
+            const { exchangeRates } = await import("../src/db/schema");
+            await exec().insert(exchangeRates).values({ from: from as any, to: to as any, rate, isActive: true });
+        };
 
         it("serves NGN↔GHS from Fincra with each direction's buffer, not the admin's manual rate", async () => {
             const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
@@ -674,9 +679,11 @@ describe("GHS through Fincra", () => {
                 send: { "NGN-GHS": { rate: { percent: 2, fixed: 1 }, providerFee: { percent: 0, fixed: 0, min: 0, cap: 0 }, platformFee: { percent: 0, fixed: 0, min: 0, cap: 0 } } },
                 receive: { "GHS-NGN": { rate: { percent: 3, fixed: 0 }, providerFee: { percent: 0, fixed: 0, min: 0, cap: 0 }, platformFee: { percent: 0, fixed: 0, min: 0, cap: 0 } } },
             } }, ADMIN);
-            await addAdminRate("NGN", "GHS", 121);
-            await addAdminRate("GHS", "NGN", 113);
+            await addLegacyRow("NGN", "GHS", 121);
+            await addLegacyRow("GHS", "NGN", 113);
             await addAdminRate("NGN", "RMB", 0.005);
+            // Manual rates can't be added for a live currency any more
+            await expect(addAdminRate("NGN", "KES", 0.09)).rejects.toMatchObject({ response_code: 400 });
 
             const rates = await listForUsers();
             const pair = (from: string, to: string) => rates.find((r) => r.from === from && r.to === to);
@@ -689,18 +696,21 @@ describe("GHS through Fincra", () => {
             expect(pair("NGN", "RMB")).toMatchObject({ rate: 0.005, source: "admin" });
         });
 
-        it("shows live GHS rates even with no admin row, and hides a pair the admin switched off", async () => {
-            await addAdminRate("GHS", "NGN", 113, false);
-            const rates = await listForUsers();
+        it("shows live GHS rates with no admin row, and hides a currency the admin turned off", async () => {
+            let rates = await listForUsers();
             expect(rates.find((r) => r.from === "NGN" && r.to === "GHS")?.source).toBe("live");
-            expect(rates.find((r) => r.from === "GHS" && r.to === "NGN")).toBeUndefined();
+            const { default: platformSettingsService } = await import("../src/services/platform-settings.service");
+            await platformSettingsService.updateSettings({ operations: { currencies: { off: ["GHS"] } } }, "00000000-0000-4000-8000-000000000001");
+            rates = await listForUsers();
+            expect(rates.some((r) => r.from === "GHS" || r.to === "GHS")).toBe(false);
+            await platformSettingsService.updateSettings({ operations: { currencies: { off: [] } } }, "00000000-0000-4000-8000-000000000001");
         });
 
-        it("falls back to the admin's rate when Fincra can't be reached", async () => {
+        it("leaves a pair out when Fincra can't be reached, rather than showing an old manual rate", async () => {
             fincra.ngnPerGhs.mockRejectedValueOnce(new Error("Fincra is down")).mockRejectedValueOnce(new Error("Fincra is down"));
-            await addAdminRate("NGN", "GHS", 121);
+            await addLegacyRow("NGN", "GHS", 121);
             const rates = await listForUsers();
-            expect(rates.find((r) => r.from === "NGN" && r.to === "GHS")).toMatchObject({ rate: 121, source: "admin" });
+            expect(rates.find((r) => r.from === "NGN" && r.to === "GHS")).toBeUndefined();
             expect(rates.find((r) => r.from === "GHS" && r.to === "NGN")).toBeUndefined();
         });
     });

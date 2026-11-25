@@ -1,7 +1,7 @@
 import exchangeRateRepository, { type ExchangeRateUpdate } from "../repositories/exchange-rate.repository";
 import type { ExchangeRate } from "../types/entities";
 import type { CurrencyCode } from "../types/enums";
-import errorResponseMessage from "../common/messages/error-response-message";
+import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-response-message";
 import { isUniqueViolation } from "../db/errors";
 import fxRateService from "./fx-rate.service";
 import platformSettingsService from "./platform-settings.service";
@@ -24,6 +24,13 @@ const LIVE_PAIRS: Array<{ from: CurrencyCode; to: CurrencyCode; side: "buy" | "s
     { from: c as CurrencyCode, to: "NGN" as CurrencyCode, side: "sell" as const, currency: c },
 ]);
 
+/** GHS and YellowCard currencies are priced live (Pricing sets the buffer); manual rates are for the rest, such as RMB */
+const isLiveCurrency = (code: string) => (LIVE_CURRENCIES as readonly string[]).includes(String(code).toUpperCase());
+const assertNotLive = (pair: { from: string; to: string }) => {
+    const live = [pair.from, pair.to].find(isLiveCurrency);
+    if (live) throw errorResponseMessage.createError(400, `${live} is priced live with your buffer (Pricing). Manual rates are only for currencies without a provider, such as RMB.`, ErrorSeverity.LOW);
+};
+
 /** Admin-managed exchange rates (units of `to` per 1 `from`) */
 class ExchangeRateService {
     /** Whether a rate exists for the pair (active or not) */
@@ -44,27 +51,27 @@ class ExchangeRateService {
     /**
      * The rates users see. NGN↔GHS come live from Fincra with the admin's
      * buffer (the same rate sends and payment links are charged at); other
-     * pairs, such as RMB, come from the admin's table. A pair the admin has
-     * switched off stays hidden; if Fincra can't be reached, the admin's
-     * rate for that pair is shown instead.
+     * pairs, such as RMB, come from the admin's table. Live currencies never
+     * show a manual rate: if the provider can't be reached the pair is left
+     * out (the calculator says so) rather than showing an old number. A
+     * currency the admin turned off (Platform controls) isn't offered.
      */
     public async listForUsers(): Promise<PublicExchangeRate[]> {
         const rows = await exchangeRateRepository.list({});
         const isLive = (r: { from: string; to: string }) => LIVE_PAIRS.some((p) => p.from === r.from && p.to === r.to);
-        const result: PublicExchangeRate[] = rows.filter((r) => r.isActive && !isLive(r)).map((r) => ({ ...r, source: "admin" as const }));
+        // Manual rows only for currencies without a live price (old rows for live currencies are ignored)
+        const result: PublicExchangeRate[] = rows.filter((r) => r.isActive && !isLive(r) && !isLiveCurrency(r.from) && !isLiveCurrency(r.to)).map((r) => ({ ...r, source: "admin" as const }));
 
         // Currencies the admin turned off for everyone aren't offered
         const { currencies } = await platformSettingsService.getOperations();
         const live = await Promise.all(LIVE_PAIRS.filter((p) => !currencies.off.includes(p.currency)).map(async (pair) => {
-            const row = rows.find((r) => r.from === pair.from && r.to === pair.to);
-            if (row && !row.isActive) return null;
             try {
                 const { rate: ngnPerUnit, source } = await fxRateService.ngnPerUnit(pair.currency, pair.side);
                 if (!(ngnPerUnit > 0)) throw new Error("no rate");
                 const rate = pair.from === "NGN" ? 1 / ngnPerUnit : ngnPerUnit;
                 const now = new Date();
                 return {
-                    ...(row ?? { id: `live-${pair.from}-${pair.to}`, isActive: true, createdAt: now }),
+                    id: `live-${pair.from}-${pair.to}`, isActive: true, createdAt: now,
                     from: pair.from,
                     to: pair.to,
                     rate: Number(rate.toPrecision(8)),
@@ -73,14 +80,15 @@ class ExchangeRateService {
                     source: source === "admin" ? "admin" : "live",
                 } as PublicExchangeRate;
             } catch (error: any) {
-                logger.warn("Live rate unavailable; showing the admin rate", { pair: `${pair.from}-${pair.to}`, error: error?.message });
-                return row ? { ...row, source: "admin" as const } : null;
+                logger.warn("Live rate unavailable; pair left out", { pair: `${pair.from}-${pair.to}`, error: error?.message });
+                return null;
             }
         }));
         return [...live.filter((r): r is PublicExchangeRate => !!r), ...result];
     }
 
     public async create(data: { from: CurrencyCode; to: CurrencyCode; rate: number; isActive?: boolean }): Promise<ExchangeRate> {
+        assertNotLive(data);
         if (typeof data.isActive !== "boolean") {
             throw errorResponseMessage.payloadIncorrect("isActive is required");
         }
@@ -96,6 +104,7 @@ class ExchangeRateService {
 
     /** Only the rate fields can change */
     public async update(id: string, patch: Record<string, unknown>): Promise<ExchangeRate | undefined> {
+        if (typeof patch.from === "string" || typeof patch.to === "string") assertNotLive({ from: String(patch.from ?? ""), to: String(patch.to ?? "") });
         const allowed: ExchangeRateUpdate = {};
         if (typeof patch.from === "string") allowed.from = patch.from as CurrencyCode;
         if (typeof patch.to === "string") allowed.to = patch.to as CurrencyCode;
