@@ -254,4 +254,5 @@ export function manualWindow(manual: ManualConfig, at: Date = new Date()): Manua
 }
 
 /** Where users are pointed when something is paused or on hold */
-export const SUPPORT_CONTACT = { whatsapp: "+234 816 003 0330", email: "support@solutionpay.co" };
+/** How customers reach us: the in-app Support chat, or email (no WhatsApp) */
+export const SUPPORT_CONTACT = { email: "support@solutionpay.co" };

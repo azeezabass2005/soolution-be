@@ -25,7 +25,7 @@ const MONEY_ROUTES: Array<{ method: string; path: RegExp; kind: Kind }> = [
 export const moneyRouteKind = (method: string, path: string): Kind | null =>
     MONEY_ROUTES.find((r) => r.method === method && r.path.test(path))?.kind ?? null;
 
-const contact = `Please contact support on WhatsApp ${SUPPORT_CONTACT.whatsapp} or at ${SUPPORT_CONTACT.email}.`;
+const contact = `Please contact support in the app (Support) or at ${SUPPORT_CONTACT.email}.`;
 
 /** The error a user sees while payments are paused */
 export const pausedError = (note?: string) =>

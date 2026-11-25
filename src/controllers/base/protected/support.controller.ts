@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import assistantService from "../../../services/assistant.service";
 import BaseController from "../base-controller";
 import supportService, { type TicketKind } from "../../../services/support.service";
 
@@ -16,6 +17,10 @@ class SupportController extends BaseController {
     }
 
     protected setupRoutes(): void {
+        // The assistant: instant answers from our help articles (before "/:id")
+        this.router.get("/assistant/suggestions", this.handle(async () => assistantService.suggestions()));
+        this.router.get("/assistant/articles/:id", this.handle(async (req) => assistantService.byId(String(req.params.id))));
+        this.router.post("/assistant", this.handle(async (req) => assistantService.answer(req.body?.message)));
         this.router.get("/", this.handle((req, res) => supportService.listMine(res.locals.user.id, this.kind(req.query.kind))));
         this.router.post("/", this.handle((req, res) => supportService.open(res.locals.user.id, req.body), 201));
         this.router.get("/:id", this.handle((req, res) => supportService.getMine(res.locals.user.id, req.params.id)));
