@@ -57,14 +57,16 @@ class ExchangeRateService {
      * currency the admin turned off (Platform controls) isn't offered.
      */
     public async listForUsers(): Promise<PublicExchangeRate[]> {
-        const rows = await exchangeRateRepository.list({});
-        const isLive = (r: { from: string; to: string }) => LIVE_PAIRS.some((p) => p.from === r.from && p.to === r.to);
-        // Manual rows only for currencies without a live price (old rows for live currencies are ignored)
-        const result: PublicExchangeRate[] = rows.filter((r) => r.isActive && !isLive(r) && !isLiveCurrency(r.from) && !isLiveCurrency(r.to)).map((r) => ({ ...r, source: "admin" as const }));
+        // RMB (no provider): the admin's manual RMB rate, the one RMB sends are charged at
+        const ops = await platformSettingsService.getOperations();
+        const rmbRate = Number(ops.manual.rates.RMB) || 0;
+        const now = new Date();
+        const result: PublicExchangeRate[] = rmbRate > 0 && !ops.currencies.off.includes("RMB")
+            ? [{ id: "manual-NGN-RMB", from: "NGN" as CurrencyCode, to: "RMB" as CurrencyCode, rate: Number((1 / rmbRate).toPrecision(8)), isActive: true, createdAt: now, updatedAt: now, source: "admin" } as PublicExchangeRate]
+            : [];
 
         // Currencies the admin turned off for everyone aren't offered
-        const { currencies } = await platformSettingsService.getOperations();
-        const live = await Promise.all(LIVE_PAIRS.filter((p) => !currencies.off.includes(p.currency)).map(async (pair) => {
+        const live = await Promise.all(LIVE_PAIRS.filter((p) => !ops.currencies.off.includes(p.currency)).map(async (pair) => {
             try {
                 const { rate: ngnPerUnit, source } = await fxRateService.ngnPerUnit(pair.currency, pair.side);
                 if (!(ngnPerUnit > 0)) throw new Error("no rate");

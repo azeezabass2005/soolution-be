@@ -694,7 +694,8 @@ describe("GHS through Fincra", () => {
             } }, ADMIN);
             await addLegacyRow("NGN", "GHS", 121);
             await addLegacyRow("GHS", "NGN", 113);
-            await addAdminRate("NGN", "RMB", 0.005);
+            // RMB has no provider: it uses the admin's manual RMB rate (₦200 per yuan)
+            await platformSettingsService.updateSettings({ operations: { manual: { rates: { RMB: 200 } } } }, ADMIN);
             // Manual rates can't be added for a live currency any more
             await expect(addAdminRate("NGN", "KES", 0.09)).rejects.toMatchObject({ response_code: 400 });
 
@@ -705,7 +706,7 @@ describe("GHS through Fincra", () => {
             expect(pair("NGN", "GHS")?.source).toBe("live");
             expect(pair("NGN", "GHS")?.rate).toBeCloseTo(1 / 103, 8);
             expect(pair("GHS", "NGN")).toMatchObject({ rate: 97, source: "live" });
-            // Fincra doesn't price RMB, so the admin's rate stands
+            // Fincra doesn't price RMB: the manual RMB rate, as yuan per naira
             expect(pair("NGN", "RMB")).toMatchObject({ rate: 0.005, source: "admin" });
         });
 

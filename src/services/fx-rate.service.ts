@@ -1,4 +1,3 @@
-import exchangeRateRepository from "../repositories/exchange-rate.repository";
 import yellowCardService from "./yellowcard.service";
 import ghsRateService from "./ghs-rate.service";
 import platformSettingsService from "./platform-settings.service";
@@ -57,20 +56,20 @@ class FxRateService {
     }
 
     /** Admin table rows are "units of `to` per 1 `from`" */
+    /**
+     * Currencies without a provider (RMB) use the admin's manual rate, naira
+     * per unit, set under Pricing → Manual payments: the rate RMB sends are
+     * charged at. There's no rate for turning them back into naira.
+     */
     private async adminRate(currency: string, side: FxSide): Promise<FxRate> {
-        const row = side === "buy"
-            ? await exchangeRateRepository.findPair(BASE_WALLET_CURRENCY, currency, { activeOnly: true })
-            : await exchangeRateRepository.findPair(currency, BASE_WALLET_CURRENCY, { activeOnly: true });
-        if (!row || !(row.rate > 0)) {
+        const rate = Number((await platformSettingsService.getOperations()).manual.rates[currency]) || 0;
+        if (side !== "buy" || !(rate > 0)) {
             throw errorResponseMessage.createError(
                 400,
-                side === "buy"
-                    ? `Exchanging into ${currency} isn't available right now.`
-                    : `Exchanging ${currency} back to NGN isn't available right now.`,
+                side === "buy" ? `Exchanging into ${currency} isn't available right now.` : `Exchanging ${currency} back to NGN isn't available right now.`,
                 ErrorSeverity.LOW
             );
         }
-        const rate = side === "buy" ? 1 / row.rate : row.rate;
         return { rate, providerRate: rate, source: "admin" };
     }
 }
