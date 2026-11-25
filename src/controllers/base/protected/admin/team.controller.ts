@@ -1,4 +1,6 @@
 import { Request, Response, NextFunction } from "express";
+import adminActivityService from "../../../../services/admin-activity.service";
+const q = (v: unknown) => (typeof v === "string" ? v : undefined);
 import BaseController from "../../base-controller";
 import RoleMiddleware from "../../../../middlewares/role.middleware";
 import adminAccessService from "../../../../services/admin-access.service";
@@ -38,6 +40,10 @@ class AdminTeamController extends BaseController {
         this.router.get("/invites", this.handle(() => adminAccessService.listInvites()));
         this.router.post("/invites", this.handle((req, res) => adminAccessService.invite(req.body, res.locals.user.id), 201));
         this.router.delete("/invites/:id", this.handle((req, res) => adminAccessService.revokeInvite(req.params.id, res.locals.user.id)));
+        // What admins did, and where they're signed in
+        this.router.get("/activity", this.handle((req) => adminActivityService.list({ adminId: q(req.query.adminId), from: q(req.query.from), to: q(req.query.to), before: q(req.query.before), limit: Number(req.query.limit) || undefined })));
+        this.router.get("/sessions", this.handle(() => adminActivityService.sessions()));
+        this.router.post("/sessions/:userId/sign-out", this.handle((req, res) => adminActivityService.signOutEverywhere(req.params.userId, res.locals.user.id)));
     }
 
     private handle(fn: (req: Request, res: Response) => Promise<unknown> | unknown, status = 200) {

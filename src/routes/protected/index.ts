@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import authMiddleware from "../../middlewares/auth.middleware";
 import { moneyGuard } from "../../middlewares/operations.middleware";
 import { featureGuard } from "../../middlewares/features.middleware";
+import { adminActivityLogger } from "../../middlewares/admin-activity.middleware";
 import featuresController from "../../controllers/base/protected/features.controller";
 import exchangeRateController from "../../controllers/base/protected/exchange-rate-controller";
 import logsController from "../../controllers/base/protected/logs.controller";
@@ -53,6 +54,8 @@ protectedRouter.use(path, async (req: Request, res: Response, next: NextFunction
 protectedRouter.use(path, moneyGuard);
 // Features an admin has turned off or kept to beta users
 protectedRouter.use(path, featureGuard);
+// Every change an admin makes goes in the activity log
+protectedRouter.use(path, adminActivityLogger);
 
 protectedRouter.use(`${path}/exchange-rates`, exchangeRateController);
 protectedRouter.use(`${path}/logs`, logsController);

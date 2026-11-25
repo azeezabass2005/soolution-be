@@ -155,3 +155,26 @@ export const supportMessages = pgTable(
     },
     (t) => [index("support_messages_ticket_idx").on(t.ticket, t.createdAt)]
 );
+
+/**
+ * Everything an admin changes: each POST/PUT/PATCH/DELETE they make, with the
+ * outcome, where from, and the request (secrets removed). Super admins read it
+ * under Roles & staff → Activity.
+ */
+export const adminActivity = pgTable(
+    "admin_activity",
+    {
+        id: id(),
+        adminId: uuid("admin_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+        method: text("method").notNull(),
+        path: text("path").notNull(),
+        /** What it was, in words, when we know the route */
+        action: text("action"),
+        status: integer("status").notNull(),
+        ipAddress: text("ip_address"),
+        userAgent: text("user_agent"),
+        body: jsonb("body"),
+        createdAt: timestamptz("created_at").notNull().defaultNow(),
+    },
+    (t) => [index("admin_activity_admin_idx").on(t.adminId, t.createdAt), index("admin_activity_created_idx").on(t.createdAt)]
+);

@@ -218,6 +218,39 @@ describe("admin roles and permissions", () => {
         expect(other.body.message).toContain("Sign in to accept");
     });
 
+    it("logs every change an admin makes (secrets removed), and shows super admins where admins are signed in", async () => {
+        const { exec } = await import("../src/repositories/utils");
+        const { refreshTokens } = await import("../src/db/schema");
+        const { user: agent } = await staffWith("Logged agent", ["support"]);
+
+        // A change and a read: only the change is logged, with the password removed
+        await call("POST", "/protected/admin/team/roles", superAdmin, { name: "Logged role", permissions: ["support"], password: "hunter2-secret" });
+        await call("GET", "/protected/admin/team/roles", superAdmin);
+        await new Promise((r) => setTimeout(r, 150));
+        const log = (await call("GET", `/protected/admin/team/activity?adminId=${superAdmin.id}`, superAdmin)).body.data;
+        const entry = log.items.find((i: any) => i.action === "Created a role");
+        expect(entry).toMatchObject({ method: "POST", ok: true, body: { name: "Logged role", password: "[removed]" } });
+        expect(log.items.some((i: any) => i.method === "GET")).toBe(false);
+        // Staff can't read it
+        expect((await call("GET", "/protected/admin/team/activity", agent)).status).toBe(403);
+
+        // Two live sessions for the agent, one used up
+        const soon = new Date(Date.now() + 3600_000);
+        await exec().insert(refreshTokens).values([
+            { userId: agent.id, token: "t-live-1", expiresAt: soon, userAgent: "Mozilla/5.0 (Windows NT 10.0) Chrome/120 Safari/537", ipAddress: "102.89.1.1" },
+            { userId: agent.id, token: "t-live-2", expiresAt: soon, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17) Safari/604", ipAddress: "41.58.2.2" },
+            { userId: agent.id, token: "t-used", expiresAt: soon, isRevoked: true, ipAddress: "1.1.1.1" },
+        ] as any);
+        const people = (await call("GET", "/protected/admin/team/sessions", superAdmin)).body.data;
+        const mine = people.find((p: any) => p.id === agent.id);
+        expect(mine).toMatchObject({ devices: 2, ipAddresses: 2 });
+        expect(mine.sessions.map((x: any) => x.device).sort()).toEqual(["Chrome on Windows", "Safari on iPhone"]);
+
+        expect((await call("POST", `/protected/admin/team/sessions/${agent.id}/sign-out`, superAdmin)).status).toBe(200);
+        const after = (await call("GET", "/protected/admin/team/sessions", superAdmin)).body.data.find((p: any) => p.id === agent.id);
+        expect(after.sessions).toEqual([]);
+    });
+
     it("tells the app what an admin can do on /users/current", async () => {
         const { user: staff } = await staffWith("Ops", ["dashboard", "transactions"]);
         const me = (await call("GET", "/protected/users/current", staff)).body.data.user;

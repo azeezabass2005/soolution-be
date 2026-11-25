@@ -9,9 +9,9 @@ describe("migrations", () => {
     afterAll(stopTestDatabase);
 
     it("creates every table", async () => {
-        // 28 + admin_roles and admin_invites (staff roles) + notifications + payout_holds + support_tickets and support_messages + treasury_expenses
+        // 28 + admin_roles and admin_invites (staff roles) + notifications + payout_holds + support_tickets and support_messages + treasury_expenses + admin_activity
         const result: any = await db.execute(sql`select count(*)::int as n from pg_tables where schemaname = 'public'`);
         const rows = result.rows ?? result;
-        expect(rows[0].n).toBe(35);
+        expect(rows[0].n).toBe(36);
     });
 });
