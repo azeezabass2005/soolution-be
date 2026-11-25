@@ -23,6 +23,7 @@ import {
 } from "../common/constant";
 import { BASE_WALLET_CURRENCY, FX_QUOTE_TTL_MS, OPENABLE_WALLET_CURRENCIES, WALLETS_UNAVAILABLE_CODE, fxPositionCode, isWalletCurrency } from "../common/wallet.constants";
 import logger from "../utils/logger.utils";
+import { assertNotHeld } from "../common/wallet-holds";
 
 /** Smallest exchange, in NGN, so quotes aren't dominated by rounding */
 export const MIN_EXCHANGE_NGN = 100;
@@ -168,6 +169,7 @@ class FxExchangeService {
 
             const debited = await walletRepository.debit(fromWallet.id, fromAmount, tx, { alsoLedger: true });
             if (!debited) {
+                assertNotHeld(fromWallet, fromAmount);
                 throw errorResponseMessage.createError(
                     400,
                     `Insufficient ${fromCurrency} balance for this exchange`,

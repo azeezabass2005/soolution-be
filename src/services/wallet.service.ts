@@ -38,6 +38,7 @@ import platformSettingsService from "./platform-settings.service";
 import AuditLogService from "./audit-log.service";
 import { withoutProviderName } from "../utils/provider-names.utils";
 import type { PageRequest } from "../db/pagination";
+import { assertNotHeld, availableOf } from "../common/wallet-holds";
 
 const auditLogService = new AuditLogService();
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -165,6 +166,9 @@ class WalletService {
                 currency: w.currency,
                 balance: w.balance,
                 ledgerBalance: w.ledgerBalance,
+                // Large receives still being checked, and what can leave now
+                pendingBalance: Number(w.heldBalance) || 0,
+                withdrawableBalance: availableOf(w),
                 status: w.status,
                 isDVAProvisioned: w.isDVAProvisioned,
                 dvaBankName: w.dvaBankName,
@@ -583,7 +587,8 @@ class WalletService {
         // The admin's withdrawal fee (Fincra's passed on + SolutionPay's) is charged on top
         const fee = (await platformSettingsService.priceFees("withdrawal", amount)).total;
         const charge = round2(amount + fee);
-        if (wallet.balance < charge) {
+        assertNotHeld(wallet, charge);
+        if (availableOf(wallet) < charge) {
             throw errorResponseMessage.createError(
                 400,
                 fee > 0 ? `Insufficient wallet balance. This withdrawal costs ₦${charge.toLocaleString("en-NG")} including the ₦${fee.toLocaleString("en-NG")} fee.` : "Insufficient wallet balance",
@@ -1024,6 +1029,8 @@ class WalletService {
         return {
             balance: wallet.balance,
             ledgerBalance: wallet.ledgerBalance,
+            pendingBalance: Number(wallet.heldBalance) || 0,
+            withdrawableBalance: availableOf(wallet),
             currency: wallet.currency,
             status: wallet.status,
         };

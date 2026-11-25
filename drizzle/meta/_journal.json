@@ -169,6 +169,13 @@
       "when": 1795601125383,
       "tag": "0023_remove_live_manual_rates",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1795641124080,
+      "tag": "0024_receive_holds",
+      "breakpoints": true
     }
   ]
 }

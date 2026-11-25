@@ -14,6 +14,12 @@ export const wallets = pgTable(
         currency: text("currency").$type<WalletCurrency>().notNull().default("NGN"),
         balance: decimal("balance").notNull().default(0),
         ledgerBalance: decimal("ledger_balance").notNull().default(0),
+        /**
+         * Part of `balance` that can't leave yet: large receives waiting for an
+         * admin's checks. Withdrawals, sends and exchanges can use only
+         * balance − heldBalance.
+         */
+        heldBalance: decimal("held_balance").notNull().default(0),
         status: text("status").$type<WalletStatus>().notNull().default("active"),
 
         // Paystack customer & dedicated virtual account (NGN wallet only)
@@ -40,6 +46,7 @@ export const wallets = pgTable(
         index("wallets_user_created_idx").on(t.user, t.createdAt),
         // Every debit is guarded in SQL; this is the last line of defence
         check("wallets_balance_non_negative", sql`${t.balance} >= 0`),
+        check("wallets_held_balance_non_negative", sql`${t.heldBalance} >= 0`),
     ]
 );
 

@@ -33,6 +33,7 @@ import bankController from "../../controllers/base/protected/bank.controller";
 import adminTeamController from "../../controllers/base/protected/admin/team.controller";
 import notificationsController from "../../controllers/base/protected/notifications.controller";
 import adminApprovalsController from "../../controllers/base/protected/admin/approvals.controller";
+import adminReceiveHoldsController from "../../controllers/base/protected/admin/receive-holds.controller";
 import supportController from "../../controllers/base/protected/support.controller";
 import adminSupportController from "../../controllers/base/protected/admin/support.controller";
 import adminInviteController from "../../controllers/base/protected/admin-invite.controller";
@@ -89,6 +90,7 @@ protectedRouter.use(`${path}/admin/hyperrails`, adminHyperRailsController);
 protectedRouter.use(`${path}/admin/insights`, adminInsightsController);
 protectedRouter.use(`${path}/admin/team`, adminTeamController);
 protectedRouter.use(`${path}/admin/approvals`, adminApprovalsController);
+protectedRouter.use(`${path}/admin/receive-holds`, adminReceiveHoldsController);
 protectedRouter.use(`${path}/admin/support`, adminSupportController);
 // Any signed-in account: accept an invitation to the admin team
 protectedRouter.use(`${path}/admin-invites`, adminInviteController);

@@ -380,6 +380,49 @@ describe("GHS through Fincra", () => {
             expect(await walletBalance(user.id)).toBe(9_850);
         });
 
+        it("holds a receive over ₦200,000 until an admin allows withdrawal; the earlier balance stays usable", async () => {
+            const { default: walletSendService } = await import("../src/services/wallet-send.service");
+            const { default: receiveHoldsService } = await import("../src/services/receive-holds.service");
+            const { default: walletRepository } = await import("../src/repositories/wallet.repository");
+            const user = await createUser();
+            await fundWallet(user.id, 10_000);
+            fincra.createCheckout.mockResolvedValue({ link: "https://checkout.fincra.com/pay/big", reference: "fcr-big" });
+            const transaction: any = await transactionService.createGhsCollectionTransaction({
+                amount: 3_000, fromCurrency: "GHS", toCurrency: "NGN", topUp: true, payer: { name: "Ada Obi", email: user.email },
+            }, user.id);
+            fincra.getCheckout.mockResolvedValue({ status: "success", amount: 3_000, currency: "GHS" });
+            await fincraWebhookService.handle({ event: "charge.successful", data: { status: "success", metadata: { reference: transaction.reference } } });
+
+            // 3,000 GHS × ₦100 less 1.5% = ₦295,500 credited, all of it held
+            expect(await walletBalance(user.id)).toBe(305_500);
+            const wallet = await walletRepository.findByUserAndCurrency(user.id, "NGN");
+            expect(Number(wallet!.heldBalance)).toBe(295_500);
+            // What was there before is still usable; the held part isn't
+            await expect(walletSendService.assertCanPay(user.id, "NGN", 10_000)).resolves.toBeTruthy();
+            await expect(walletSendService.assertCanPay(user.id, "NGN", 10_001)).rejects.toThrow("naira will be available for withdrawal shortly");
+            expect(await walletRepository.debit(wallet!.id, 10_001)).toBeUndefined();
+            expect((await receiveHoldsService.list()).map((h) => h.id)).toContain(transaction.id);
+
+            const admin = await createUser();
+            await receiveHoldsService.release(transaction.id, admin.id);
+            expect(Number((await walletRepository.findByUserAndCurrency(user.id, "NGN"))!.heldBalance)).toBe(0);
+            await expect(walletSendService.assertCanPay(user.id, "NGN", 300_000)).resolves.toBeTruthy();
+            // Once only
+            await expect(receiveHoldsService.release(transaction.id, admin.id)).rejects.toThrow("isn't held");
+        });
+
+        it("doesn't hold a receive at or under the limit", async () => {
+            const { default: walletRepository } = await import("../src/repositories/wallet.repository");
+            const user = await createUser();
+            fincra.createCheckout.mockResolvedValue({ link: "https://checkout.fincra.com/pay/small", reference: "fcr-small" });
+            const transaction: any = await transactionService.createGhsCollectionTransaction({
+                amount: 100, fromCurrency: "GHS", toCurrency: "NGN", topUp: true, payer: { name: "Ada Obi", email: user.email },
+            }, user.id);
+            fincra.getCheckout.mockResolvedValue({ status: "success", amount: 100, currency: "GHS" });
+            await fincraWebhookService.handle({ event: "charge.successful", data: { status: "success", metadata: { reference: transaction.reference } } });
+            expect(Number((await walletRepository.findByUserAndCurrency(user.id, "NGN"))!.heldBalance)).toBe(0);
+        });
+
         describe("charging the payer's phone directly", () => {
             const payer = { method: "momo", momoNetwork: "MTN Momo", momoNumber: "0241234567", momoName: "Kwame Asante", email: "kwame@example.test" };
             const link = async () => paymentLinkService.create((await createUser()).id, { currency: "GHS", amount: 100, usage: "reusable" });

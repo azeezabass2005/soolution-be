@@ -82,7 +82,10 @@ class WalletController extends BaseController {
             // What a deposit costs the user in total (Fincra's part plus ours), so the app can say it
             const funding = (await platformSettingsService.getPricing()).funding.NGN;
             const fundingFee = funding.customerFee ?? funding.platformFee;
-            return this.sendSuccess(res, { wallet: { ...wallet, dvaSetup, fundingFee } });
+            // Large receives still being checked can't leave yet: say what can
+            const pendingBalance = Number(wallet.heldBalance) || 0;
+            const withdrawableBalance = Math.max(0, Math.round(((Number(wallet.balance) || 0) - pendingBalance) * 100) / 100);
+            return this.sendSuccess(res, { wallet: { ...wallet, dvaSetup, fundingFee, pendingBalance, withdrawableBalance } });
         } catch (error) {
             return next(error);
         }
@@ -133,7 +136,7 @@ class WalletController extends BaseController {
         try {
             const wallet = await this.walletService.createWallet(res.locals.user.id, req.body?.currency);
             return this.sendSuccess(res, {
-                wallet: { id: wallet.id, currency: wallet.currency, balance: wallet.balance, ledgerBalance: wallet.ledgerBalance, status: wallet.status, createdAt: wallet.createdAt },
+                wallet: { id: wallet.id, currency: wallet.currency, balance: wallet.balance, ledgerBalance: wallet.ledgerBalance, pendingBalance: Number(wallet.heldBalance) || 0, withdrawableBalance: Math.max(0, Math.round(((Number(wallet.balance) || 0) - (Number(wallet.heldBalance) || 0)) * 100) / 100), status: wallet.status, createdAt: wallet.createdAt },
                 message: `${wallet.currency} wallet created`,
             }, 201);
         } catch (error) {

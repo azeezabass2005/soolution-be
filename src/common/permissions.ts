@@ -28,6 +28,7 @@ export const PERMISSIONS = [
     // Transactions
     { key: "transactions", group: "Transactions", label: "Transaction history", description: "Every transaction and deposit; confirming or rejecting manual payments." },
     { key: "transactions.disputes", group: "Transactions", label: "Disputes", description: "Disputes users raise on their transactions." },
+    { key: "transactions.release_holds", group: "Transactions", label: "Allow withdrawal of large receives", description: "Release a large receive held for checks, so its naira can be withdrawn." },
 
     // Single units, super admin only
     { key: "platform_controls", group: "Platform controls", label: "Platform controls", description: "The platform controls page.", superAdminOnly: true },

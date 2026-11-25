@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { wallets } from "../db/schema";
 import type { Executor } from "../db/client";
 import type { Wallet } from "../types/entities";
@@ -93,7 +93,8 @@ class WalletRepository {
                 balance: sql`${wallets.balance} - ${n(amount)}`,
                 ...(options.alsoLedger ? { ledgerBalance: sql`${wallets.ledgerBalance} - ${n(amount)}` } : {}),
             })
-            .where(and(eq(wallets.id, id), eq(wallets.status, WALLET_STATUS.ACTIVE as "active"), gte(wallets.balance, amount)))
+            // Only what isn't held for checks can leave (balance − heldBalance)
+            .where(and(eq(wallets.id, id), eq(wallets.status, WALLET_STATUS.ACTIVE as "active"), sql`${wallets.balance} - ${wallets.heldBalance} >= ${n(amount)}`))
             .returning();
         return row ? stripNulls(row) : undefined;
     }
@@ -119,6 +120,18 @@ class WalletRepository {
             })
             .where(where)
             .returning();
+        return row ? stripNulls(row) : undefined;
+    }
+
+    /** Hold part of the balance (a large receive, until an admin allows withdrawal) */
+    async hold(id: string, amount: number, tx?: Executor): Promise<Wallet | undefined> {
+        const [row] = await exec(tx).update(wallets).set({ heldBalance: sql`${wallets.heldBalance} + ${n(amount)}` }).where(eq(wallets.id, id)).returning();
+        return row ? stripNulls(row) : undefined;
+    }
+
+    /** Release a hold (never below zero) */
+    async release(id: string, amount: number, tx?: Executor): Promise<Wallet | undefined> {
+        const [row] = await exec(tx).update(wallets).set({ heldBalance: sql`greatest(0, ${wallets.heldBalance} - ${n(amount)})` }).where(eq(wallets.id, id)).returning();
         return row ? stripNulls(row) : undefined;
     }
 

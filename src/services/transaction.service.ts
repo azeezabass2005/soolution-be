@@ -5,6 +5,7 @@ import transactionRepository, { type TransactionListFilter } from "../repositori
 import transactionDetailRepository from "../repositories/transaction-detail.repository";
 import userRepository from "../repositories/user.repository";
 import walletTransactionRepository from "../repositories/wallet-transaction.repository";
+import walletRepository from "../repositories/wallet.repository";
 import { withTransaction } from "../db/transaction";
 import type { Executor } from "../db/client";
 import type { PageRequest, Paginated } from "../db/pagination";
@@ -1769,6 +1770,19 @@ class TransactionService {
      * Credit user's wallet when a YellowCard collection completes.
      * The NGN amount is stored in detail.fromAmount (for receive: fromAmount is the NGN equivalent).
      */
+    /**
+     * A receive above the admin's limit (₦200,000 by default) is credited but
+     * held: it shows in the balance, and can't be withdrawn, sent or exchanged
+     * until an admin allows it. Whatever the user had before stays usable.
+     */
+    private holdLargeReceive = async (transaction: Transaction, walletId: string, ngnAmount: number, tx: Executor) => {
+        const limit = (await platformSettingsService.getOperations()).approvals.receiveHoldNgn;
+        if (!(limit > 0) || !(ngnAmount > limit)) return;
+        await walletRepository.hold(walletId, ngnAmount, tx);
+        await transactionRepository.update(transaction.id, { heldAmount: ngnAmount }, tx);
+        logger.info("Large receive held for checks", { transactionId: transaction.id, reference: transaction.reference, ngnAmount, limit });
+    };
+
     private creditWalletFromCollection = async (transaction: Transaction, detail: TransactionDetail) => {
         const userId = transaction.user;
         // detail.fromAmount is the NET NGN amount credited to the user (fee
@@ -1792,6 +1806,7 @@ class TransactionService {
                 // Credit wallet in the same transaction as the journal posting.
                 const credited = await this.walletService.creditBalance(wallet.id, ngnAmount, tx);
                 if (!credited) throw errorResponseMessage.createError(500, "Wallet not found for collection credit", ErrorSeverity.CRITICAL);
+                await this.holdLargeReceive(transaction, wallet.id, ngnAmount, tx);
 
                 // Post journal: YellowCard float decreases by the gross; the
                 // user's wallet receives the net; the fee lands in FEES_NGN.
@@ -2609,6 +2624,7 @@ class TransactionService {
 
         const credited = await this.walletService.creditBalance(walletId, ngnAmount, tx);
         if (!credited) throw errorResponseMessage.createError(500, "Wallet not found for collection credit", ErrorSeverity.CRITICAL);
+        await this.holdLargeReceive(transaction, walletId, ngnAmount, tx);
 
         const legs: Array<{ accountCode: string; direction: any; amount: number }> = [
             { accountCode: rail.cash, direction: JOURNAL_DIRECTION.DEBIT, amount: grossNgn },

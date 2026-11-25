@@ -14,6 +14,7 @@ const MAX_BODY = 4000;
 const ACTIONS: Array<[string, RegExp, string]> = [
     ["POST", /^\/admin\/approvals\/[^/]+\/approve$/, "Approved a held payout"],
     ["POST", /^\/admin\/approvals\/[^/]+\/reject$/, "Rejected a held payout"],
+    ["POST", /^\/admin\/receive-holds\/[^/]+\/release$/, "Allowed withdrawal of a held receive"],
     ["PUT", /^\/admin\/platform-settings\/?$/, "Changed platform settings"],
     ["POST", /^\/admin\/team\/roles$/, "Created a role"],
     ["PUT", /^\/admin\/team\/roles\/[^/]+$/, "Changed a role"],

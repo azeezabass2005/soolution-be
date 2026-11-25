@@ -55,6 +55,13 @@ export const transactions = pgTable(
         completedAt: timestamptz("completed_at"),
         failedAt: timestamptz("failed_at"),
         cancelReason: text("cancel_reason"),
+        /**
+         * A large receive's naira, credited but held for checks: the amount
+         * held, and when / by whom it was released for withdrawal.
+         */
+        heldAmount: decimal("held_amount"),
+        heldReleasedAt: timestamptz("held_released_at"),
+        heldReleasedBy: uuid("held_released_by"),
         // FX snapshot captured when the transaction is created
         lockedRate: decimal("locked_rate"),
         /** USD value at creation; counts towards the user's daily tier limit */

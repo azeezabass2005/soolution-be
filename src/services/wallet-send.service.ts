@@ -21,6 +21,7 @@ import {
 } from "../common/constant";
 import { BASE_WALLET_CURRENCY, fxPositionCode, isWalletCurrency, manualPayoutPendingCode, type WalletCurrency } from "../common/wallet.constants";
 import logger from "../utils/logger.utils";
+import { assertNotHeld, availableOf } from "../common/wallet-holds";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 /** What the user pays is rounded up so the platform never books less than it charged */
@@ -112,7 +113,8 @@ class WalletSendService {
         if (wallet.status !== WALLET_STATUS.ACTIVE) {
             throw errorResponseMessage.createError(400, "Your wallet is not active. Please contact support.", ErrorSeverity.HIGH);
         }
-        if (wallet.balance < total) {
+        assertNotHeld(wallet, total);
+        if (availableOf(wallet) < total) {
             throw errorResponseMessage.createError(
                 400,
                 `Insufficient ${walletCurrency} balance. You need ${money(total, walletCurrency)} but your balance is ${money(wallet.balance, walletCurrency)}.`,

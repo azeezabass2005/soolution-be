@@ -38,6 +38,8 @@ export interface CurrenciesConfig {
 /** Large payouts wait for an admin: anything above this (NGN) is held; 0 = off */
 export interface ApprovalsConfig {
     thresholdNgn: number;
+    /** Receives above this (NGN credited) are held until an admin allows withdrawal; 0 = off */
+    receiveHoldNgn: number;
 }
 
 /** Alert the team when a provider balance (after payouts already on their way) falls below these; 0 = no alert */
@@ -65,7 +67,7 @@ export const DEFAULT_OPERATIONS: OperationsConfig = {
     manual: { rates: {}, days: [1, 2, 3, 4, 5], open: "08:00", close: "20:00", closedDates: [] },
     pause: { payments: false, logins: false, message: "" },
     currencies: { off: [] },
-    approvals: { thresholdNgn: 500_000 },
+    approvals: { thresholdNgn: 500_000, receiveHoldNgn: 200_000 },
     liquidity: { yellowcardNgnMin: 0, fincraNgnMin: 0 },
     features: {},
 };
@@ -130,6 +132,11 @@ export function mergeOperations(current: OperationsConfig, patch: unknown): Oper
         const n = Number(p.approvals.thresholdNgn);
         if (!(n >= 0) || n > 100_000_000_000) throw new OperationsError("Enter the approval limit in naira (0 turns approvals off)");
         next.approvals.thresholdNgn = Math.round(n * 100) / 100;
+    }
+    if (p.approvals?.receiveHoldNgn !== undefined) {
+        const n = Number(p.approvals.receiveHoldNgn);
+        if (!(n >= 0) || n > 100_000_000_000) throw new OperationsError("Enter the receive hold limit in naira (0 turns it off)");
+        next.approvals.receiveHoldNgn = Math.round(n * 100) / 100;
     }
 
     if (p.manual) {
