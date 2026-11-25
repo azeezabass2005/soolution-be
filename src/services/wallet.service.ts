@@ -1,3 +1,4 @@
+import featuresService from "./features.service";
 import type { Executor } from "../db/client";
 import payoutHoldsService from "./payout-holds.service";
 import { lockKey, withTransaction } from "../db/transaction";
@@ -126,24 +127,6 @@ class WalletService {
         this.pinService = new PinService();
     }
 
-    /** Emails the user that their wallet was funded (best effort: never undoes the credit) */
-    private async notifyFunded(userId: string, walletTransaction: WalletTransaction): Promise<void> {
-        try {
-            const user = await userRepository.findById(userId);
-            if (!user) return;
-            this.notifications ??= new NotificationService();
-            const amount = Number(walletTransaction.amount).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-            await this.notifications.sendNotification(user as any, {
-                title: "Your wallet has been funded",
-                message: `${walletTransaction.currency} ${amount} has been added to your ${walletTransaction.currency} wallet. ${walletTransaction.description || ""}`.trim()
-                    + ` Reference: ${walletTransaction.reference}. Your balance is now ${walletTransaction.currency} ${Number(walletTransaction.balanceAfter).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`,
-                actionUrl: `${config.FRONTEND_URL}/dashboard/user/wallet`,
-                buttonText: "View wallet",
-            });
-        } catch (error) {
-            logger.warn("Funding email failed", { reference: walletTransaction.reference, error: error instanceof Error ? error.message : String(error) });
-        }
-    }
 
     // ===================== WALLET MANAGEMENT =====================
 
@@ -200,7 +183,9 @@ class WalletService {
                 supported: WALLET_CURRENCIES,
             });
         }
-        if (code !== BASE_WALLET_CURRENCY && !OPENABLE_WALLET_CURRENCIES.includes(code)) {
+        // Other wallets open with wallet exchange (Platform controls → Beta features), or where listed here
+        if (code !== BASE_WALLET_CURRENCY && !OPENABLE_WALLET_CURRENCIES.includes(code)
+            && !(await featuresService.has("wallet_exchange", (await userRepository.findById(userId)) ?? { id: userId }))) {
             throw errorResponseMessage.createError(403, "Other wallets aren't available yet.", ErrorSeverity.LOW, { code: WALLETS_UNAVAILABLE_CODE });
         }
         const existing = await walletRepository.findByUserAndCurrency(userId, code);
@@ -498,7 +483,7 @@ class WalletService {
             });
         }
 
-        await this.notifyFunded(target.user, walletTransaction);
+        // The user hears about it from the notifier (user-notices.service), once
 
         return walletTransaction;
     }

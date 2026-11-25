@@ -75,6 +75,14 @@ class PayoutHoldsService {
             buttonText: "Review it",
         } as any, config.ADMIN_PHONE_NUMBERS)).catch(() => undefined);
         logger.info("Payout held for approval", { holdId: row.id, kind: input.kind, reference: input.reference, amountNgn: input.amountNgn });
+        // The customer knows why it isn't instant
+        await inboxService.toUser(input.userId, {
+            type: "approval.waiting",
+            title: input.kind === "withdrawal" ? "Your withdrawal is being reviewed" : "Your transfer is being reviewed",
+            body: `${input.reference} is over the amount we review before sending. It goes out as soon as it's approved; we'll tell you.`,
+            link: input.kind === "withdrawal" ? "/dashboard/user/wallet" : "/dashboard/user/transactions",
+            data: { reference: input.reference },
+        }).catch(() => undefined);
         return row;
     }
 
@@ -109,7 +117,7 @@ class PayoutHoldsService {
     }
 
     /** The customer hears what happened */
-    async tellUser(hold: PayoutHold, outcome: "approved" | "rejected" | "failed", reason?: string) {
+    async tellUser(hold: PayoutHold, outcome: "approved", reason?: string) {
         const what = hold.kind === "withdrawal" ? "withdrawal" : "transfer";
         await inboxService.toUser(hold.user, {
             type: `approval.${outcome}`,

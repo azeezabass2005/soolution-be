@@ -141,6 +141,13 @@
       "when": 1795562896254,
       "tag": "0019_beta_features",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1795563438503,
+      "tag": "0020_user_notices",
+      "breakpoints": true
     }
   ]
 }

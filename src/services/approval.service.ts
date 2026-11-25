@@ -39,7 +39,7 @@ class ApprovalService {
             // The payout code already refunded the wallet when the provider refused
             const reason = error?.message || "The provider refused it";
             await payoutHoldsService.finish(hold.id, "failed", reason);
-            await payoutHoldsService.tellUser(hold, "failed", reason);
+            // The user hears it failed (with the reason) from the notifier, once
             logger.error("Approved payout failed at the provider; refunded", { holdId, reference: hold.reference, error: error?.message });
             return { id: hold.id, outcome: "failed" as const, message: `Approved, but it couldn't be sent: ${reason}. The money went back to the customer's wallet.` };
         }
@@ -85,7 +85,7 @@ class ApprovalService {
                 : { providerAccountCode: fincraPayoutInflightCode("GHS"), externalRef: { provider: WEBHOOK_PROVIDER.FINCRA, id: hold.reference } });
         }
         await payoutHoldsService.finish(hold.id, "rejected", reason);
-        await payoutHoldsService.tellUser(hold, "rejected", reason);
+        // The user hears it was rejected (with the reason) from the notifier, once
         return { id: hold.id, outcome: "rejected" as const, message: "Rejected. The money went back to the customer's wallet." };
     }
 

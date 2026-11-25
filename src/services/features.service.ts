@@ -1,3 +1,4 @@
+import { YELLOWCARD_FLOW_CURRENCIES } from "../common/payment-link.constants";
 import { and, asc, eq } from "drizzle-orm";
 import { users } from "../db/schema";
 import { exec, isUuid } from "../repositories/utils";
@@ -16,7 +17,7 @@ type Who = { id?: string; role?: number; betaTester?: boolean | null };
 class FeaturesService {
     async modes(): Promise<Record<string, FeatureMode>> {
         const { features } = await platformSettingsService.getOperations();
-        return Object.fromEntries(FEATURES.map((f) => [f.key, features[f.key] ?? "on"]));
+        return Object.fromEntries(FEATURES.map((f) => [f.key, features[f.key] ?? f.defaultMode ?? "on"]));
     }
 
     allows(mode: FeatureMode, user: Who) {
@@ -40,6 +41,27 @@ class FeaturesService {
         if (this.allows(mode, user)) return;
         const label = FEATURES.find((f) => f.key === key)?.label ?? "This feature";
         throw errorResponseMessage.createError(403, mode === "beta" ? `${label} is in beta and not open to your account yet.` : `${label} isn't available right now.`, ErrorSeverity.LOW, { code: "FEATURE_UNAVAILABLE", feature: key });
+    }
+
+    /** Whether the user gets `key` (no throw) */
+    async has(key: string, user: Who) {
+        return this.allows((await this.modes())[key] ?? "on", user);
+    }
+
+    /** The feature a currency needs to be received (other African currencies), if any */
+    receiveFeatureFor(currency: string) {
+        return (YELLOWCARD_FLOW_CURRENCIES as readonly string[]).includes(String(currency).toUpperCase()) ? "african_receives" : null;
+    }
+
+    /** The feature a currency needs to be sent to, if any */
+    sendFeatureFor(currency: string) {
+        return (YELLOWCARD_FLOW_CURRENCIES as readonly string[]).includes(String(currency).toUpperCase()) ? "african_sends" : null;
+    }
+
+    /** Throws when receiving `currency` (directly or on a payment link) isn't open to the user */
+    async assertReceive(user: Who, currency: string) {
+        const key = this.receiveFeatureFor(currency);
+        if (key) await this.assert(key, user);
     }
 
     /** For the admin page: the registry with modes, and the beta users */

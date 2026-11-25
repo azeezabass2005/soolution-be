@@ -577,6 +577,12 @@ class KycApplicationService {
         } catch (error) {
             logger.error("Failed to send KYC submission email to applicant", { email: user.email, error });
         }
+        await inboxService.toUser(user.id, {
+            type: application.type === "business" ? "kyb.received" : "kyc.received",
+            title: `${label} documents received`,
+            body: "We'll review them and update you within 72 hours.",
+            link: "/kyc",
+        });
     }
 
     /**

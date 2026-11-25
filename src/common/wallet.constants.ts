@@ -36,8 +36,8 @@ export const fxPositionCode = (currency: string): string => `FX_POSITION_${curre
 export const manualPayoutPendingCode = (currency: string): string => `MANUAL_PAYOUT_PENDING_${currency}`;
 
 /**
- * Wallets users may open besides NGN. Empty while YellowCard is off: no new
- * wallets and no exchanges (an exchange would open the other wallet).
+ * Wallets anyone may open besides NGN. Empty: other wallets open only for
+ * users who have wallet exchange (a beta feature, off until an admin opens it).
  */
 export const OPENABLE_WALLET_CURRENCIES: readonly string[] = [];
 export const WALLETS_UNAVAILABLE_CODE = "WALLETS_UNAVAILABLE";

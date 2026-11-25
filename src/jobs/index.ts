@@ -1,3 +1,4 @@
+import userNoticesService from '../services/user-notices.service';
 import logger from '../utils/logger.utils';
 import reconciliationService from '../services/reconciliation.service';
 import { runStaleTransactionSweep } from './sweeper.job';
@@ -40,6 +41,9 @@ export function registerJobs(): void {
         logger.warn('registerJobs called twice — ignoring second call');
         return;
     }
+
+    // Users hear how each send, receive, deposit and withdrawal ended — every 15 seconds.
+    timers.push(setInterval(safe('user-notices', async () => { await userNoticesService.run(); }), 15 * 1000));
 
     // Stale transaction sweep — every 5 minutes.
     const sweepFn = safe('stale-transaction-sweep', runStaleTransactionSweep);

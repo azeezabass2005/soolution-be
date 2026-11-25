@@ -4,20 +4,25 @@ import type { CurrencyCode } from "../types/enums";
 import errorResponseMessage from "../common/messages/error-response-message";
 import { isUniqueViolation } from "../db/errors";
 import fxRateService from "./fx-rate.service";
+import platformSettingsService from "./platform-settings.service";
+import { YELLOWCARD_FLOW_CURRENCIES } from "../common/payment-link.constants";
 import logger from "../utils/logger.utils";
 
 /** A rate as users see it: live from the provider where there is one, else the admin's */
-export type PublicExchangeRate = ExchangeRate & { source: "fincra" | "admin" };
+export type PublicExchangeRate = ExchangeRate & { source: "live" | "admin" };
 
 /**
- * Pairs priced live by Fincra, with the admin's buffer for that direction.
- * Like every row in the table, the rate is units of `to` per 1 `from`:
- * NGN→GHS is cedis per naira, GHS→NGN is naira per cedi.
+ * Currencies priced live, the same way a wallet exchange quote prices them
+ * (fxRateService: GHS from Fincra, the rest from YellowCard, each with the
+ * admin's buffer), so the rates users read are the rates they get. Like every
+ * row in the table, a rate is units of `to` per 1 `from`: NGN→GHS is cedis per
+ * naira (we sell cedis: "buy" side), GHS→NGN is naira per cedi ("sell" side).
  */
-const LIVE_PAIRS: Array<{ from: CurrencyCode; to: CurrencyCode; side: "buy" | "sell" }> = [
-    { from: "NGN" as CurrencyCode, to: "GHS" as CurrencyCode, side: "buy" },
-    { from: "GHS" as CurrencyCode, to: "NGN" as CurrencyCode, side: "sell" },
-];
+const LIVE_CURRENCIES = ["GHS", ...YELLOWCARD_FLOW_CURRENCIES] as const;
+const LIVE_PAIRS: Array<{ from: CurrencyCode; to: CurrencyCode; side: "buy" | "sell"; currency: string }> = LIVE_CURRENCIES.flatMap((c) => [
+    { from: "NGN" as CurrencyCode, to: c as CurrencyCode, side: "buy" as const, currency: c },
+    { from: c as CurrencyCode, to: "NGN" as CurrencyCode, side: "sell" as const, currency: c },
+]);
 
 /** Admin-managed exchange rates (units of `to` per 1 `from`) */
 class ExchangeRateService {
@@ -48,12 +53,15 @@ class ExchangeRateService {
         const isLive = (r: { from: string; to: string }) => LIVE_PAIRS.some((p) => p.from === r.from && p.to === r.to);
         const result: PublicExchangeRate[] = rows.filter((r) => r.isActive && !isLive(r)).map((r) => ({ ...r, source: "admin" as const }));
 
-        const live = await Promise.all(LIVE_PAIRS.map(async (pair) => {
+        // Currencies the admin turned off for everyone aren't offered
+        const { currencies } = await platformSettingsService.getOperations();
+        const live = await Promise.all(LIVE_PAIRS.filter((p) => !currencies.off.includes(p.currency)).map(async (pair) => {
             const row = rows.find((r) => r.from === pair.from && r.to === pair.to);
             if (row && !row.isActive) return null;
             try {
-                const { rate: ngnPerGhs } = await fxRateService.ngnPerUnit("GHS", pair.side);
-                const rate = pair.to === "GHS" ? 1 / ngnPerGhs : ngnPerGhs;
+                const { rate: ngnPerUnit, source } = await fxRateService.ngnPerUnit(pair.currency, pair.side);
+                if (!(ngnPerUnit > 0)) throw new Error("no rate");
+                const rate = pair.from === "NGN" ? 1 / ngnPerUnit : ngnPerUnit;
                 const now = new Date();
                 return {
                     ...(row ?? { id: `live-${pair.from}-${pair.to}`, isActive: true, createdAt: now }),
@@ -61,10 +69,11 @@ class ExchangeRateService {
                     to: pair.to,
                     rate: Number(rate.toPrecision(8)),
                     updatedAt: now,
-                    source: "fincra" as const,
+                    // Provider names never reach customers
+                    source: source === "admin" ? "admin" : "live",
                 } as PublicExchangeRate;
             } catch (error: any) {
-                logger.warn("Live GHS rate unavailable; showing the admin rate", { pair: `${pair.from}-${pair.to}`, error: error?.message });
+                logger.warn("Live rate unavailable; showing the admin rate", { pair: `${pair.from}-${pair.to}`, error: error?.message });
                 return row ? { ...row, source: "admin" as const } : null;
             }
         }));

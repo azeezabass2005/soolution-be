@@ -11,6 +11,8 @@ export interface FeatureDef {
     label: string;
     description: string;
     routes: Array<{ method: string; path: RegExp }>;
+    /** The mode until an admin sets one (on when not given) */
+    defaultMode?: FeatureMode;
 }
 
 export const FEATURES: FeatureDef[] = [
@@ -35,8 +37,9 @@ export const FEATURES: FeatureDef[] = [
     {
         key: "wallet_exchange",
         label: "Wallet exchange",
-        description: "Converting between the user's own wallets.",
+        description: "Opening other currency wallets and converting between them. Off until you open it.",
         routes: [{ method: "POST", path: /^\/wallet\/exchange(\/quote)?\/?$/ }],
+        defaultMode: "off",
     },
     {
         key: "marketplace",

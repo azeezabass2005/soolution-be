@@ -1,3 +1,4 @@
+import inboxService from "./inbox.service";
 import { createHmac } from "crypto";
 import userRepository from "../repositories/user.repository";
 import verificationRepository, { ENCRYPTED_IDS_CLEARED } from "../repositories/verification.repository";
@@ -745,6 +746,9 @@ class IdentityService {
         } catch (error: any) {
             logger.error("Failed to send BVN verification email", { userId: user.id, error: error?.message });
         }
+        await inboxService.toUser(user.id, outcome.passed
+            ? { type: "identity.verified", title: "Your identity is verified", body: `Your account is now on Tier 1 (${TIER_NAME[USER_TIER.INDIVIDUAL]}). You can start sending and receiving money.`, link: "/dashboard/user" }
+            : { type: "identity.failed", title: "We couldn't verify your identity", body: outcome.reason, link: "/dashboard/user?verify=bvn" }).catch(() => undefined);
     }
 
     /** For the admin user page: state, attempts and recent checks */

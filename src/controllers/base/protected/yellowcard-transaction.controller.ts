@@ -1,3 +1,4 @@
+import featuresService from "../../../services/features.service";
 import BaseController from "../base-controller";
 import currencyAccessService from "../../../services/currency-access.service";
 import ycRateService, { isYellowCardCurrency } from "../../../services/yc-rate.service";
@@ -108,13 +109,22 @@ class YellowCardTransactionController extends BaseController {
     private async getCurrencies(_req: Request, res: Response, next: NextFunction) {
         try {
             // Currencies turned off for this user (or everyone) aren't offered; `off` lets the app hide GHS and RMB too
-            const [flow, off] = await Promise.all([yellowCardService.flowCurrencies(), currencyAccessService.offFor(res.locals.user?.id)]);
+            // Sending to / receiving these currencies can also be off or beta-only for this user
+            const user = res.locals.user;
+            const [flow, off, canSend, canReceive] = await Promise.all([
+                yellowCardService.flowCurrencies(),
+                currencyAccessService.offFor(user?.id),
+                featuresService.has("african_sends", user ?? {}),
+                featuresService.has("african_receives", user ?? {}),
+            ]);
             const on = (c: string) => !off.has(c);
+            const send = (c: string) => on(c) && canSend;
+            const receive = (c: string) => on(c) && canReceive;
             return this.sendSuccess(res, {
                 ...flow,
-                send: flow.send.filter(on),
-                receive: flow.receive.filter(on),
-                markets: { send: flow.markets.send.filter((m) => on(m.currency)), receive: flow.markets.receive.filter((m) => on(m.currency)) },
+                send: flow.send.filter(send),
+                receive: flow.receive.filter(receive),
+                markets: { send: flow.markets.send.filter((m) => send(m.currency)), receive: flow.markets.receive.filter((m) => receive(m.currency)) },
                 off: [...off],
             });
         } catch (error: any) {

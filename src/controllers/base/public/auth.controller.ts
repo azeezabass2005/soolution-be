@@ -1,3 +1,4 @@
+import inboxService from "../../../services/inbox.service";
 import {NextFunction, Request, Response} from "express";
 import BaseController from "../base-controller";
 import { passwordProblem } from "../../../common/password-policy";
@@ -631,6 +632,7 @@ class AuthController extends BaseController {
             await this.userService.endAllSessions(user.id);
             this.logger.info("Password reset", { userId: user.id });
 
+            inboxService.toUser(user.id, { type: "security.password_changed", title: "Your password was changed", body: "You've been signed out on every device. If this wasn't you, contact support straight away." }).catch(() => undefined);
             this.notificationService.emailService.sendNotificationEmail(user.email, {
                 name: user.firstName || 'there',
                 eyebrow: 'Security',

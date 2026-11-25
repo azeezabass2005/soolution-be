@@ -66,6 +66,7 @@ class NotificationService {
             title: scrubNotification(config).title,
             body: scrubNotification(config).message,
             link: config.actionUrl,
+            data: (config as any).data,
         });
 
         // Skip notifications on localhost/development

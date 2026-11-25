@@ -92,6 +92,8 @@ export const walletTransactions = pgTable(
         paystackRecipientCode: text("paystack_recipient_code"),
 
         failureReason: text("failure_reason"),
+        /** The last status the user was told about (the notifier tells them once per final status) */
+        notifiedStatus: text("notified_status"),
         reversedTransactionId: uuid("reversed_transaction_id"),
 
         /** The wallet's currency */

@@ -680,9 +680,9 @@ describe("GHS through Fincra", () => {
             const pair = (from: string, to: string) => rates.find((r) => r.from === from && r.to === to);
             // Fincra says ₦100 per GHS: sends pay ₦100 + 2% + ₦1 per cedi, receives get ₦100 − 3%.
             // Rates are units of `to` per 1 `from`, so NGN→GHS is cedis per naira
-            expect(pair("NGN", "GHS")?.source).toBe("fincra");
+            expect(pair("NGN", "GHS")?.source).toBe("live");
             expect(pair("NGN", "GHS")?.rate).toBeCloseTo(1 / 103, 8);
-            expect(pair("GHS", "NGN")).toMatchObject({ rate: 97, source: "fincra" });
+            expect(pair("GHS", "NGN")).toMatchObject({ rate: 97, source: "live" });
             // Fincra doesn't price RMB, so the admin's rate stands
             expect(pair("NGN", "RMB")).toMatchObject({ rate: 0.005, source: "admin" });
         });
@@ -690,7 +690,7 @@ describe("GHS through Fincra", () => {
         it("shows live GHS rates even with no admin row, and hides a pair the admin switched off", async () => {
             await addAdminRate("GHS", "NGN", 113, false);
             const rates = await listForUsers();
-            expect(rates.find((r) => r.from === "NGN" && r.to === "GHS")?.source).toBe("fincra");
+            expect(rates.find((r) => r.from === "NGN" && r.to === "GHS")?.source).toBe("live");
             expect(rates.find((r) => r.from === "GHS" && r.to === "NGN")).toBeUndefined();
         });
 

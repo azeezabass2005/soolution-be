@@ -1,3 +1,4 @@
+import userNoticesService from "./user-notices.service";
 import { canonicalBankKey } from '../common/ghana-banks.constants';
 import transactionRepository, { type TransactionListFilter } from "../repositories/transaction.repository";
 import transactionDetailRepository from "../repositories/transaction-detail.repository";
@@ -872,7 +873,9 @@ class TransactionService {
             }
         }
 
-        // Send transaction completed email and WhatsApp notification to user
+        // Send transaction completed email and WhatsApp notification to user (with the payout receipt),
+        // and mark it told so the notifier doesn't repeat it
+        await userNoticesService.markTold("transaction", transaction.id, TRANSACTION_STATUS.COMPLETED);
         const user = await userRepository.findById(transaction.user);
         const details = await transactionDetailRepository.findByTransactionId(transaction.id);
         if (user) {
@@ -1420,24 +1423,7 @@ class TransactionService {
                     logger.info("Wallet transfer marked successful via poll", { walletTxId: walletTx.id, amount: walletTx.amount });
                 }
 
-                // Notify user
-                const user = await userRepository.findById(transaction.user);
-                if (user?.email) {
-                    try {
-                        await this.notificationService.sendTransactionNotification(
-                            user,
-                            "payment_completed",
-                            {
-                                amount: `${transaction.amount} ${transaction.currency}`,
-                                reference: transaction.reference,
-                                recipient: detail.accountName || "Recipient",
-                                actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
-                            }
-                        );
-                    } catch (e) {
-                        logger.warn("Failed to send YC poll completion notification", { error: e });
-                    }
-                }
+                // The user hears about it from the notifier (user-notices.service), once
             } else {
                 logger.info("YellowCard poll: already settled elsewhere", { transactionId, ycStatus });
             }
@@ -1775,24 +1761,7 @@ class TransactionService {
 
                 logger.info("YellowCard collection completed, wallet credited", { transactionId });
 
-                // Notify user
-                const user = await userRepository.findById(transaction.user);
-                if (user?.email) {
-                    try {
-                        await this.notificationService.sendTransactionNotification(
-                            user,
-                            "payment_completed",
-                            {
-                                amount: `${detail.fromAmount || transaction.amount} NGN`,
-                                reference: transaction.reference,
-                                recipient: "Your Wallet",
-                                actionUrl: `${config.FRONTEND_URL}/dashboard/user/wallet`,
-                            }
-                        );
-                    } catch (e) {
-                        logger.warn("Failed to send collection completion notification", { error: e });
-                    }
-                }
+                // The user hears about it from the notifier (user-notices.service), once
             }
         } else if (ycStatus === "failed" || ycStatus === "expired" || ycStatus === "cancelled") {
             const newStatus = ycStatus === "cancelled" ? TRANSACTION_STATUS.CANCELLED : TRANSACTION_STATUS.FAILED;
@@ -2851,19 +2820,7 @@ class TransactionService {
         });
         if (!credited) return { outcome: 'ignored', note: 'already credited' };
         logger.info("Wallet credited from GHS account", { userId: transaction.user, transactionId: transaction.id, ghsAmount: transaction.amount });
-        try {
-            const user = await userRepository.findById(transaction.user);
-            if (user) {
-                await this.notificationService.sendTransactionNotification(user, "payment_completed", {
-                    amount: `GHS ${transaction.amount}`,
-                    reference: transaction.reference,
-                    recipient: "your NGN wallet",
-                    actionUrl: `${config.FRONTEND_URL}/dashboard/user/transactions`,
-                });
-            }
-        } catch (error: any) {
-            logger.warn("GHS account credit notification failed", { error: error?.message });
-        }
+        // The user hears about it from the notifier (user-notices.service), once
         return { outcome: 'credited' };
     };
 
@@ -2965,21 +2922,7 @@ class TransactionService {
                 }
                 return true;
             });
-            if (settled) {
-                const user = await userRepository.findById(transaction.user);
-                if (user?.email) {
-                    try {
-                        await this.notificationService.sendTransactionNotification(user, "payment_completed", {
-                            amount: `${transaction.amount} GHS`,
-                            reference: transaction.reference,
-                            recipient: detail.accountName || "Recipient",
-                            actionUrl: `${config.FRONTEND_URL}/dashboard/user/payments`,
-                        });
-                    } catch (e) {
-                        logger.warn("Failed to send GHS payout notification", { error: e });
-                    }
-                }
-            }
+            // The user hears about it from the notifier (user-notices.service), once
             return true;
         }
 

@@ -29,6 +29,7 @@ import TransactionService from "../src/services/transaction.service";
 import adminProfitService from "../src/services/admin-profit.service";
 import userRepository from "../src/repositories/user.repository";
 import { exec } from "../src/repositories/utils";
+import { eq } from "drizzle-orm";
 import { transactionDetails, transactions } from "../src/db/schema";
 
 const ADMIN = "00000000-0000-4000-8000-000000000001";
@@ -158,5 +159,26 @@ describe("YellowCard currencies priced like GHS", () => {
         expect(totals.averages.daily.profitPercent).toBe(10);
         expect(totals.averages.weekly).toMatchObject({ periods: 2, profitNgn: 300 });
         expect(totals.averages.monthly).toMatchObject({ periods: 1, profitNgn: 600 });
+    });
+
+    it("shows on the public rates feed (the landing page calculator) the exact rate a wallet exchange quote charges", async () => {
+        const { default: exchangeRateService } = await import("../src/services/exchange-rate.service").then((m) => ({ default: new (m.default as any)() }));
+        const { default: fxExchangeService } = await import("../src/services/fx-exchange.service");
+        const { wallets } = await import("../src/db/schema");
+        const user = await createUser();
+        await fundWallet(user.id, 100_000);
+        const [ngnWallet] = await exec().select().from(wallets).where(eq(wallets.user, user.id));
+        await exec().insert(wallets).values({ ...ngnWallet, id: undefined, currency: "KES", balance: 500, createdAt: undefined, updatedAt: undefined } as any);
+
+        const feed = await exchangeRateService.listForUsers();
+        const buy = feed.find((r: any) => r.from === "NGN" && r.to === "KES");
+        const sell = feed.find((r: any) => r.from === "KES" && r.to === "NGN");
+        expect(buy?.source).toBe("live");
+
+        const buying = await fxExchangeService.quote(user.id, { fromCurrency: "NGN", toCurrency: "KES", amount: 10_000, side: "from" } as any);
+        const selling = await fxExchangeService.quote(user.id, { fromCurrency: "KES", toCurrency: "NGN", amount: 100, side: "from" } as any);
+        // Feed rows are `to` per 1 `from`; quotes are naira per KES
+        expect(1 / buy!.rate).toBeCloseTo(buying.rate, 4);
+        expect(sell!.rate).toBeCloseTo(selling.rate, 4);
     });
 });

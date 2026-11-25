@@ -139,6 +139,10 @@ describe("WalletService", () => {
             const user = await userWithAccount("va-mail");
             await fincraWebhookService.handle(deposit("fc-mail", "va-mail", 4950, 50));
             await fincraWebhookService.handle(deposit("fc-mail", "va-mail", 4950, 50));
+            // The notifier tells the user (once, however often it runs or the webhook repeats)
+            const { default: userNoticesService } = await import("../src/services/user-notices.service");
+            await userNoticesService.run({ graceSeconds: 0 });
+            await userNoticesService.run({ graceSeconds: 0 });
             expect(send).toHaveBeenCalledTimes(1);
             const [to, message] = send.mock.calls[0] as any[];
             expect(to.id).toBe(user.id);

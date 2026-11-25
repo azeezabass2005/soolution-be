@@ -1,3 +1,4 @@
+import featuresService from "./features.service";
 import crypto from "crypto";
 import currencyAccessService from "./currency-access.service";
 import paymentLinkRepository from "../repositories/payment-link.repository";
@@ -123,8 +124,10 @@ class PaymentLinkService {
         // Same rule as receiving directly: verify your BVN first
         await transactionLimitService.assertCanTransact(userId);
         const data = parse<{ currency: string; country?: string; amount?: number; title?: string; description?: string; usage: "single" | "reusable"; redirectUrl?: string; collect: PaymentLinkCollectField[] }>(ZCreatePaymentLink, body);
-        // A currency turned off for this user (or everyone) can't be put on a link
+        // A currency turned off for this user (or everyone) can't be put on a link,
+        // nor one whose receiving is off or kept to beta users
         await currencyAccessService.assertOn(userId, data.currency);
+        await featuresService.assertReceive((await userRepository.findById(userId)) ?? { id: userId }, data.currency);
         // YellowCard collects every currency except GHS and needs the owner's KYC details
         if (data.currency !== "GHS") await identityService.assertTransferDetails(userId);
         // Fincra's GHS checkout takes whole cedis
@@ -181,6 +184,10 @@ class PaymentLinkService {
         if (active) {
             await transactionLimitService.assertCanTransact(userId);
             const existing = await paymentLinkRepository.findOwned(id, userId);
+            // Turning a link back on needs payment links (and its currency's receiving) open to the user
+            const me = (await userRepository.findById(userId)) ?? { id: userId };
+            await featuresService.assert("payment_links", me);
+            if (existing) await featuresService.assertReceive(me, existing.currency);
             if (existing && (await this.isUsedUp(existing))) {
                 throw errorResponseMessage.createError(409, "This single-use link has already been paid. Create a new link instead.", ErrorSeverity.LOW);
             }
@@ -250,6 +257,18 @@ class PaymentLinkService {
         return { link, owner };
     }
 
+    /**
+     * Whether what the admin controls lets this link take payments now: its
+     * currency on for the owner, payment links (and receiving that currency)
+     * open to them, even after they were taken off beta or the feature was turned off.
+     */
+    private async openToOwner(link: IPaymentLink, owner: IUser) {
+        if ((await currencyAccessService.offFor(owner.id)).has(link.currency)) return false;
+        if (!(await featuresService.has("payment_links", owner as any))) return false;
+        const receive = featuresService.receiveFeatureFor(link.currency);
+        return !receive || (await featuresService.has(receive, owner as any));
+    }
+
     private canTakePayments(link: IPaymentLink, owner: IUser) {
         // A frozen account takes nothing in (its links are off while it's on hold)
         return link.active && owner.status === "active" && (owner.freeze ?? "none") !== "account" && (owner.tier ?? USER_TIER.UNVERIFIED) >= USER_TIER.INDIVIDUAL;
@@ -262,9 +281,7 @@ class PaymentLinkService {
         const methods = await this.payMethods(link.currency, link.country);
         // No way to pay in this currency right now (e.g. YellowCard has collections off)
         const paused = (await platformSettingsService.getOperations()).pause.payments;
-        // Turned off for the owner (or everyone): the link can't take payments
-        const currencyOff = (await currencyAccessService.offFor(owner.id)).has(link.currency);
-        const payable = !paused && !currencyOff && this.canTakePayments(link, owner) && methods.length > 0;
+        const payable = !paused && (await this.openToOwner(link, owner)) && this.canTakePayments(link, owner) && methods.length > 0;
         return {
             slug: link.slug,
             payee: (owner.tier >= USER_TIER.BUSINESS ? await approvedBusinessName(owner.id) : undefined) || ownerName(owner),
@@ -311,7 +328,7 @@ class PaymentLinkService {
         const { link, owner } = await this.findPayable(slug);
         const { pause } = await platformSettingsService.getOperations();
         if (pause.payments) throw pausedError(pause.message);
-        if (!this.canTakePayments(link, owner)) {
+        if (!this.canTakePayments(link, owner) || !(await this.openToOwner(link, owner))) {
             throw errorResponseMessage.createError(409, link.active ? UNAVAILABLE : "This payment link has been turned off.", ErrorSeverity.LOW, { code: "PAYMENT_LINK_UNAVAILABLE" });
         }
         const input = parse<PayPaymentLinkInput>(ZPayPaymentLink, body);

@@ -72,6 +72,8 @@ export const transactions = pgTable(
         payerPhone: text("payer_phone"),
         /** Why the money moved, where the type alone doesn't say: "top_up" = the user paid GHS in themselves */
         purpose: text("purpose").$type<"top_up">(),
+        /** The last status the user was told about (the notifier tells them once per final status) */
+        notifiedStatus: text("notified_status"),
         ...timestamps(),
     },
     (t) => [

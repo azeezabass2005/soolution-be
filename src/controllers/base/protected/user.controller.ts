@@ -1,3 +1,4 @@
+import inboxService from "../../../services/inbox.service";
 import BaseController from "../base-controller";
 import {Request, Response, NextFunction} from "express";
 import errorResponseMessage from "../../../common/messages/error-response-message";
@@ -93,6 +94,7 @@ class UserController extends BaseController {
             clearAuthCookies(res);
             logger.info("Password changed", { userId: user.id });
 
+            inboxService.toUser(user.id, { type: "security.password_changed", title: "Your password was changed", body: "You've been signed out on every device. If this wasn't you, contact support straight away." }).catch(() => undefined);
             new NotificationService().emailService.sendNotificationEmail(user.email, {
                 name: user.firstName || "there",
                 eyebrow: "Security",
