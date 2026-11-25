@@ -1,5 +1,5 @@
 import { and, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
-import { fxConversions, transactionDetails, transactions, users, walletTransactions } from "../db/schema";
+import { fxConversions, fxQuotes, transactionDetails, transactions, users, walletTransactions } from "../db/schema";
 import { exec } from "../repositories/utils";
 import platformSettingsService from "./platform-settings.service";
 
@@ -8,8 +8,8 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 const rate = (v: number) => Math.round(v * 10_000) / 10_000;
 const n = (v: unknown) => Number(v) || 0;
 
-export type ProfitKind = "fund" | "send" | "receive" | "withdraw";
-export const PROFIT_KINDS: ProfitKind[] = ["fund", "send", "receive", "withdraw"];
+export type ProfitKind = "fund" | "send" | "receive" | "withdraw" | "exchange";
+export const PROFIT_KINDS: ProfitKind[] = ["fund", "send", "receive", "withdraw", "exchange"];
 
 /** One money movement and what SolutionPay made on it, in naira */
 export interface ProfitRow {
@@ -98,6 +98,15 @@ class AdminProfitService {
                 if (t.detailType === "yellowcard" && (d?.type ?? "yellowcard") === "yellowcard") {
                     const units = n(t.amount);
                     const markup = n(d?.markupPercent) / 100;
+                    // Paid from a wallet in the send's own currency: nothing was converted here (the
+                    // spread was earned when the user exchanged into it), so only the wallet fee counts
+                    if (kinds.includes("send") && d?.fundingCurrency && d.fundingCurrency !== "NGN") {
+                        const unitCost = n(d?.providerRate);
+                        const walletFee = n(d?.fundingFee);
+                        const feeNgn = r2(walletFee * unitCost);
+                        out.push({ ...this.base(t, "send"), feeNgn, spreadNgn: 0, profitNgn: unitCost > 0 ? feeNgn : null, userRate: null, providerRate: unitCost > 0 ? rate(unitCost) : null, volumeNgn: unitCost > 0 ? r2(units * unitCost) : undefined, note: `Paid from ${d.fundingCurrency} wallet: no conversion` });
+                        continue;
+                    }
                     if (t.fromCurrency === "NGN" && t.currency !== "NGN" && kinds.includes("send")) {
                         const charged = n(d?.fromAmount);
                         const subtotal = charged - fee;
@@ -192,6 +201,42 @@ class AdminProfitService {
             }
         }
 
+        // Wallet exchanges: the spread between our rate and the provider's, on the naira side
+        if (kinds.includes("exchange")) {
+            const quotes = await exec()
+                .select({ q: fxQuotes, w: walletTransactions })
+                .from(walletTransactions)
+                .innerJoin(fxQuotes, eq(fxQuotes.id, walletTransactions.fxQuoteId))
+                .where(and(
+                    eq(walletTransactions.type, "exchange" as any),
+                    eq(walletTransactions.status, "successful" as any),
+                    // One row per exchange: the money leaving
+                    sql`${walletTransactions.reference} like '%-OUT'`,
+                    filter.userId ? eq(walletTransactions.user, filter.userId) : undefined,
+                    filter.from ? gte(walletTransactions.createdAt, filter.from) : undefined,
+                    filter.to ? lte(walletTransactions.createdAt, filter.to) : undefined,
+                ))
+                .orderBy(desc(walletTransactions.createdAt))
+                .limit(5_000);
+            for (const { q, w } of quotes) {
+                const userRate = n(q.rate);
+                const providerRate = n(q.providerRate);
+                const buying = q.fromCurrency === "NGN";
+                const foreignUnits = buying ? n(q.toAmount) : n(q.fromAmount);
+                const ngn = buying ? n(q.fromAmount) : n(q.toAmount);
+                // Rates are naira per foreign unit: buying, the user paid more than it cost us; selling, got less than it was worth
+                const profit = providerRate > 0 ? r2(buying ? ngn - foreignUnits * providerRate : foreignUnits * providerRate - ngn) : null;
+                out.push({
+                    id: w.id, userId: w.user, userName: "", userEmail: "", reference: w.reference.replace(/-OUT$/, ""), at: w.createdAt,
+                    // Shown on the foreign side, so the rates read "₦ per unit"
+                    amount: foreignUnits, currency: buying ? q.toCurrency : q.fromCurrency, kind: "exchange",
+                    feeNgn: 0, spreadNgn: profit, profitNgn: profit,
+                    userRate: userRate > 0 ? rate(userRate) : null, providerRate: providerRate > 0 ? rate(providerRate) : null,
+                    volumeNgn: r2(ngn),
+                } as ProfitRow);
+            }
+        }
+
         // Names and emails
         const ids = [...new Set(out.map((r) => r.userId))];
         if (ids.length) {
@@ -210,6 +255,8 @@ class AdminProfitService {
         type Flow = { userId: string; userName: string; userEmail: string; flow: "fund_send" | "receive_withdraw"; count: number; volumeNgn: number; feeNgn: number; spreadNgn: number; profitNgn: number; pending: number };
         const map = new Map<string, Flow>();
         for (const r of rows) {
+            // Exchanges are neither flow
+            if (r.kind === "exchange") continue;
             const flow = r.kind === "fund" || r.kind === "send" ? "fund_send" : "receive_withdraw";
             const key = `${r.userId}:${flow}`;
             const f = map.get(key) ?? { userId: r.userId, userName: r.userName, userEmail: r.userEmail, flow, count: 0, volumeNgn: 0, feeNgn: 0, spreadNgn: 0, profitNgn: 0, pending: 0 };

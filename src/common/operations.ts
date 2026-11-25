@@ -43,7 +43,8 @@ export interface ApprovalsConfig {
 /** Alert the team when a provider balance (after payouts already on their way) falls below these; 0 = no alert */
 export interface LiquidityConfig {
     /** YellowCard's USD balance */
-    yellowcardUsdMin: number;
+    /** YellowCard's NGN balance (it settles in naira) */
+    yellowcardNgnMin: number;
     /** Fincra's NGN balance */
     fincraNgnMin: number;
 }
@@ -65,7 +66,7 @@ export const DEFAULT_OPERATIONS: OperationsConfig = {
     pause: { payments: false, logins: false, message: "" },
     currencies: { off: [] },
     approvals: { thresholdNgn: 500_000 },
-    liquidity: { yellowcardUsdMin: 0, fincraNgnMin: 0 },
+    liquidity: { yellowcardNgnMin: 0, fincraNgnMin: 0 },
     features: {},
 };
 
@@ -96,7 +97,8 @@ export function withOperationDefaults(stored: unknown): OperationsConfig {
         pause: { ...DEFAULT_OPERATIONS.pause, ...(s.pause ?? {}) },
         currencies: { off: Array.isArray(s.currencies?.off) ? [...s.currencies!.off] : [] },
         approvals: { ...DEFAULT_OPERATIONS.approvals, ...(s.approvals ?? {}) },
-        liquidity: { ...DEFAULT_OPERATIONS.liquidity, ...(s.liquidity ?? {}) },
+        // The old USD alert level (YellowCard used to settle in dollars) doesn't carry over to naira
+        liquidity: { yellowcardNgnMin: Number(s.liquidity?.yellowcardNgnMin) || 0, fincraNgnMin: Number(s.liquidity?.fincraNgnMin) || 0 },
         features: { ...(s.features ?? {}) },
     };
 }
@@ -116,7 +118,7 @@ export function mergeOperations(current: OperationsConfig, patch: unknown): Oper
     }
 
     if (p.liquidity) {
-        for (const key of ["yellowcardUsdMin", "fincraNgnMin"] as const) {
+        for (const key of ["yellowcardNgnMin", "fincraNgnMin"] as const) {
             if (p.liquidity[key] === undefined) continue;
             const n = Number(p.liquidity[key]);
             if (!(n >= 0) || n > 100_000_000_000) throw new OperationsError("Enter a low-balance alert amount (0 turns it off)");

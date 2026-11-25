@@ -203,4 +203,35 @@ describe("YellowCard currencies priced like GHS", () => {
         const [row] = await exec().select().from(transactions).where((await import("drizzle-orm")).eq(transactions.id, tx.id ?? tx._id));
         expect(row).toMatchObject({ reason: "school-fees", narration: "Term 2 fees" });
     });
+
+    it("counts an exchange's spread in profit, and a send paid from the KES wallet only for its wallet fee", async () => {
+        const { default: fxExchangeService } = await import("../src/services/fx-exchange.service");
+        const { wallets } = await import("../src/db/schema");
+        const { eq } = await import("drizzle-orm");
+        // Our rates over YellowCard's: +5% when we sell KES, so there's a spread to count
+        await platformSettingsService.updateSettings({ pricing: { send: { "NGN-KES": { rate: { percent: 5, fixed: 0 }, providerFee: { percent: 0, fixed: 0, min: 0, cap: 0 }, platformFee: { percent: 0, fixed: 0, min: 0, cap: 0 } } } } }, ADMIN);
+        ycRateService.clearCache();
+        const user = await createUser();
+        await fundWallet(user.id, 100_000);
+        const [ngnWallet] = await exec().select().from(wallets).where(eq(wallets.user, user.id));
+        await exec().insert(wallets).values({ ...ngnWallet, id: undefined, currency: "KES", balance: 0, createdAt: undefined, updatedAt: undefined } as any);
+
+        const quote: any = await fxExchangeService.quote(user.id, { fromCurrency: "NGN", toCurrency: "KES", amount: 500, side: "to" } as any);
+        await fxExchangeService.execute(user.id, quote.id, TEST_PIN);
+        const [row] = await adminProfitService.rows({ userId: user.id, kinds: ["exchange"] });
+        // KES 500 at ₦10.50 (₦10 + 5%) costs ₦5,250; it cost us ₦5,000 at YellowCard
+        expect(row).toMatchObject({ kind: "exchange", amount: 500, currency: "KES", providerRate: 10, volumeNgn: 5250, profitNgn: 250, spreadNgn: 250 });
+        expect(row.userRate).toBeCloseTo(10.5, 4);
+
+        // Paying KES 100 from that KES wallet: no conversion, so no spread on the send
+        const yc: any = (await import("../src/services/yellowcard.service")).default;
+        yc.submitPaymentRequest.mockResolvedValue({ id: "pay-w", status: "processing" });
+        const tx: any = await new TransactionService().createYellowCardTransaction({
+            amount: 100, fromCurrency: "NGN", toCurrency: "KES", pin: TEST_PIN, reason: "gift", walletCurrency: "KES",
+            destination: { accountName: "Wanjiru", accountNumber: "+254712345678", accountType: "momo", country: "KE", network: "Mpesa" },
+        } as any, user.id);
+        await exec().update(transactions).set({ status: "completed" as any }).where(eq(transactions.id, tx.id ?? tx._id));
+        const [send] = await adminProfitService.rows({ userId: user.id, kinds: ["send"] });
+        expect(send).toMatchObject({ spreadNgn: 0, userRate: null, providerRate: 10, note: "Paid from KES wallet: no conversion" });
+    });
 });

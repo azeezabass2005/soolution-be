@@ -124,11 +124,10 @@ class TreasuryService {
     // ─────────────── Liquidity ───────────────
 
     async liquidity(): Promise<LiquidityLine[]> {
-        const [{ liquidity }, usd] = await Promise.all([platformSettingsService.getOperations(), this.ngnPerUsd()]);
-        const ngnPerUsd = usd.rate;
+        const { liquidity } = await platformSettingsService.getOperations();
         const inProgress = ["pending", "processing", "awaiting_approval"];
 
-        // YellowCard pays sends from our USD and credits collections to it
+        // YellowCard now settles in naira: sends are paid from our NGN balance there and collections credit it
         const [yc] = await exec()
             .select({
                 out: sql<string>`coalesce(sum(case when ${transactions.fromCurrency} = 'NGN' then coalesce(${transactionDetails.fromAmount}, 0) - coalesce(${transactionDetails.feeAmount}, 0) end), 0)`,
@@ -141,14 +140,13 @@ class TreasuryService {
         try {
             const account: any = await yellowCardService.getAccount();
             const list: any[] = Array.isArray(account?.accounts) ? account.accounts : Array.isArray(account?.balances) ? account.balances : [account];
-            const usdRow = list.find((a) => String(a?.currency || "USD").toUpperCase() === "USD");
-            ycLive = usdRow ? r2(n(usdRow.available ?? usdRow.availableBalance ?? usdRow.balance)) : null;
+            const ngnRow = list.find((a) => String(a?.currency || "").toUpperCase() === "NGN");
+            ycLive = ngnRow ? r2(n(ngnRow.available ?? ngnRow.availableBalance ?? ngnRow.balance)) : null;
         } catch (error: any) {
             logger.warn("Liquidity: YellowCard balance unavailable", { error: error?.message });
         }
-        const toUsd = (ngn: number) => (ngnPerUsd ? r2(ngn / ngnPerUsd) : 0);
-        const ycOut = toUsd(n(yc?.out));
-        const ycIn = toUsd(n(yc?.in));
+        const ycOut = r2(n(yc?.out));
+        const ycIn = r2(n(yc?.in));
 
         // Fincra NGN pays withdrawals and GHS sends; GHS received is on its way to naira
         const [withdrawals] = await exec().select({ total: sql<string>`coalesce(sum(${walletTransactions.amount}), 0)` }).from(walletTransactions)
@@ -172,7 +170,7 @@ class TreasuryService {
             return { provider, currency, live, committedOut: out, expectedIn: inn, projected, minimum, low: minimum > 0 && projected !== null && projected < minimum };
         };
         return [
-            line("yellowcard", "USD", ycLive, ycOut, ycIn, liquidity.yellowcardUsdMin),
+            line("yellowcard", "NGN", ycLive, ycOut, ycIn, liquidity.yellowcardNgnMin),
             line("fincra", "NGN", fincraLive, fincraOut, fincraIn, liquidity.fincraNgnMin),
         ];
     }

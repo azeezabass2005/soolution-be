@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 vi.mock("../src/services/yellowcard.service", () => ({
     default: {
         getRates: vi.fn(async () => ({ rates: [{ code: "NGN", buy: 1500, sell: 1480 }, { code: "KES", buy: 150, sell: 150 }] })),
-        getAccount: vi.fn(async () => ({ accounts: [{ currency: "USD", available: 1000 }] })),
+        getAccount: vi.fn(async () => ({ accounts: [{ currency: "USD", available: 0 }, { currency: "NGN", available: 1_000_000 }] })),
     },
 }));
 vi.mock("../src/services/fincra.service", async (importOriginal) => {
@@ -59,21 +59,20 @@ describe("treasury", () => {
 
     it("projects balances after money in motion, and alerts once when one is running low", async () => {
         const user = await createUser();
-        // A ₦30,000 YellowCard send on its way (≈ USD 20 at ₦1,480) and a ₦50,000 withdrawal in flight
+        // A ₦30,000 YellowCard send on its way (YellowCard settles in naira) and a ₦50,000 withdrawal in flight
         const [send] = await exec().insert(transactions).values({ user: user.id, reference: "YC-OUT", amount: 200, currency: "KES", fromCurrency: "NGN", detailType: "yellowcard" as any, status: "processing" as any }).returning();
         await exec().insert(transactionDetails).values({ transactionId: send.id, type: "yellowcard" as any, fromAmount: 30_300, feeAmount: 300 });
         const [wallet] = await exec().select().from(wallets).where(eq(wallets.user, user.id));
         await exec().insert(walletTransactions).values({ wallet: wallet.id, user: user.id, type: "withdrawal" as any, status: "processing" as any, amount: 50_000, currency: "NGN", reference: "WDR-1", balanceBefore: 0, balanceAfter: 0 });
 
-        await platformSettingsService.updateSettings({ operations: { liquidity: { yellowcardUsdMin: 990, fincraNgnMin: 100_000 } } }, ADMIN);
+        await platformSettingsService.updateSettings({ operations: { liquidity: { yellowcardNgnMin: 990_000, fincraNgnMin: 100_000 } } }, ADMIN);
         const [yc, fincra] = await treasuryService.liquidity();
-        expect(yc).toMatchObject({ provider: "yellowcard", currency: "USD", live: 1000, minimum: 990 });
-        expect(yc.committedOut).toBeCloseTo(30_000 / 1480, 2);
+        expect(yc).toMatchObject({ provider: "yellowcard", currency: "NGN", live: 1_000_000, committedOut: 30_000, projected: 970_000, minimum: 990_000 });
         expect(yc.low).toBe(true);
         expect(fincra).toMatchObject({ live: 200_000, committedOut: 50_000, projected: 150_000, low: false });
 
         expect(await treasuryService.checkLiquidity()).toBe(1);
-        expect(alerts[0]).toMatchObject({ type: "liquidity.low", permission: "profit_balances", title: "YellowCard USD balance is running low" });
+        expect(alerts[0]).toMatchObject({ type: "liquidity.low", permission: "profit_balances", title: "YellowCard NGN balance is running low" });
         // Not again within six hours
         expect(await treasuryService.checkLiquidity()).toBe(0);
     });
