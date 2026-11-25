@@ -32,6 +32,8 @@ export interface YcPrice {
     platformFee: number;
     /** The whole fee in NGN */
     feeAmount: number;
+    /** The same fee in the foreign currency (as set when the admin prices in it, else feeAmount at the user's rate) */
+    feeInCurrency: number;
     /** feeAmount as a % of the subtotal */
     feePercent: number;
     /** YellowCard's part of the fee as a % of the subtotal (kept on the transaction for reports) */
@@ -143,6 +145,7 @@ class YcRateService {
             providerFee: fees.providerFee,
             platformFee: fees.platformFee,
             feeAmount: fees.total,
+            feeInCurrency: fees.feeCurrency !== "NGN" ? round2(fees.inFeeCurrency) : (userRate > 0 ? round2(fees.total / userRate) : 0),
             feePercent: pct(fees.total),
             providerFeePercent: pct(fees.providerFee),
             markupPercent: rules?.rate.percent ?? 0,

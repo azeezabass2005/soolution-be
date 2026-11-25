@@ -84,6 +84,18 @@ describe("YellowCard currencies priced like GHS", () => {
         expect((await ycRateService.providerRate("receive", "KES")).rate).toBeCloseTo(1450 / 152, 6);
     });
 
+    it("applies a pair's minimum fee to small amounts and gives the fee in both currencies", async () => {
+        await platformSettingsService.updateSettings({
+            pricing: { send: { "NGN-KES": { rate: { percent: 0, fixed: 0 }, providerFee: ZERO, platformFee: { percent: 1, fixed: 0, min: 20, cap: 0 }, feeCurrency: "KES", limits: { min: 0, max: 0 } } } },
+        }, ADMIN);
+        const small = await ycRateService.price("send", "KES", 100);
+        // 1% of KES 100 is KES 1, raised to the KES 20 minimum
+        expect(small.feeInCurrency).toBe(20);
+        expect(small.feeAmount).toBeCloseTo(20 * small.userRate, 2);
+        const large = await ycRateService.price("send", "KES", 5_000);
+        expect(large.feeInCurrency).toBe(50);
+    });
+
     it("refuses our USD mode without both rates", async () => {
         await expect(platformSettingsService.updateSettings({ pricing: { usd: { mode: "ours", buyNgn: 1600 } } }, ADMIN)).rejects.toThrow("Enter both of our USD rates");
     });

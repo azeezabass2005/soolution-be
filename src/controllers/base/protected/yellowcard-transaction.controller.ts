@@ -188,6 +188,9 @@ class YellowCardTransactionController extends BaseController {
                     rate: price.userRate,
                     convertedAmount: price.subtotalNgn,
                     feeAmount: price.feeAmount,
+                    // The fee in the foreign currency too, so it can show in both
+                    feeInCurrency: price.feeInCurrency,
+                    feeCurrency: foreign,
                     feePercent: price.feePercent,
                     providerFeePercent: price.providerFeePercent,
                     totalAmount: price.totalNgn,
