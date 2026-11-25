@@ -72,6 +72,9 @@ export const transactions = pgTable(
         payerPhone: text("payer_phone"),
         /** Why the money moved, where the type alone doesn't say: "top_up" = the user paid GHS in themselves */
         purpose: text("purpose").$type<"top_up">(),
+        /** Why the money moved (YellowCard's reason list) and the user's note */
+        reason: text("reason"),
+        narration: text("narration"),
         /** The last status the user was told about (the notifier tells them once per final status) */
         notifiedStatus: text("notified_status"),
         ...timestamps(),

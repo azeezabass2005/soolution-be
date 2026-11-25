@@ -72,6 +72,7 @@ describe("TransactionService", () => {
         const send = (userId: string) =>
             transactionService.createYellowCardTransaction(
                 {
+                    reason: "gift",
                     amount: 1000, // KES
                     fromCurrency: "NGN",
                     toCurrency: "KES",
@@ -141,6 +142,7 @@ describe("TransactionService", () => {
             await fundWallet(user.id, 50_000);
             yc.submitPaymentRequest.mockResolvedValue({ id: "pay-3", status: "processing" });
             const params = {
+                reason: "gift",
                 amount: 100,
                 fromCurrency: "NGN",
                 toCurrency: "KES",

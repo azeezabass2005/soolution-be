@@ -60,6 +60,7 @@ const transactionService = new TransactionService();
 
 const send = (userId: string, overrides: Record<string, unknown> = {}) =>
     transactionService.createGhsPayoutTransaction({
+        reason: "bills",
         amount: 100,
         fromCurrency: "NGN",
         toCurrency: "GHS",
@@ -249,6 +250,7 @@ describe("GHS through Fincra", () => {
 
     describe("manual GHS sends (from ₦500,000, no fee, paid by ops)", () => {
         const manual = (userId: string, amount: number) => transactionService.createManualGhsSend({
+            reason: "bills",
             amount,
             destination: { accountType: "bank", accountName: "Kofi Mensah", accountNumber: "1234567890", bank: "GCB Bank" },
             pin: TEST_PIN,

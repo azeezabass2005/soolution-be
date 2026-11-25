@@ -1,3 +1,4 @@
+import { paymentReasonOf } from "../common/payment-reasons";
 import userNoticesService from "./user-notices.service";
 import { canonicalBankKey } from '../common/ghana-banks.constants';
 import transactionRepository, { type TransactionListFilter } from "../repositories/transaction.repository";
@@ -972,6 +973,8 @@ class TransactionService {
         ipAddress?: string,
         userAgent?: string
     ) => {
+        // Why the money moves (YellowCard's list); required for sends
+        const purposeOf = paymentReasonOf(params, { required: true });
         await currencyAccessService.assertOn(userId, params.toCurrency);
         const { amount, fromCurrency, toCurrency, destination, idempotencyKey, pin } = params;
         const walletCurrency = walletSendService.resolveWalletCurrency(params.walletCurrency, toCurrency);
@@ -1100,6 +1103,7 @@ class TransactionService {
         let transactionDetails: any;
         try {
             transaction = await transactionRepository.create({
+                reason: purposeOf.reason, narration: purposeOf.narration,
                 ngnValue: txNgnValue ?? undefined,
                 user: userId,
                 reference: sequenceId,
@@ -1241,6 +1245,7 @@ class TransactionService {
                     networkId: network.id,
                     country: destination.country,
                 },
+                reason: transaction.reason || "other",
                 forceAccept: true,
             });
 
@@ -1507,6 +1512,8 @@ class TransactionService {
         },
         userId: string,
     ) => {
+        // Why the money moves (YellowCard's list); optional for receives
+        const purposeOf = paymentReasonOf(params, { required: false });
         await currencyAccessService.assertOn(userId, params.fromCurrency);
         const { amount, fromCurrency, toCurrency, destination, idempotencyKey, paymentLinkId } = params;
         const topUp = params.topUp === true && !paymentLinkId;
@@ -1584,6 +1591,7 @@ class TransactionService {
         let transactionDetails: any;
         try {
             transaction = await transactionRepository.create({
+                reason: purposeOf.reason, narration: purposeOf.narration,
             ...(topUp ? { purpose: 'top_up' as const } : {}),
                 ngnValue: txNgnValue ?? undefined,
                 user: userId,
@@ -1968,6 +1976,8 @@ class TransactionService {
         },
         userId: string,
     ) => {
+        // Why the money moves (YellowCard's list); required for sends
+        const purposeOf = paymentReasonOf(params, { required: true });
         await currencyAccessService.assertOn(userId, 'GHS');
         const { destination, idempotencyKey, pin } = params;
         const amount = Math.round(Number(params.amount) * 100) / 100;
@@ -2080,6 +2090,7 @@ class TransactionService {
         let transactionDetails: any;
         try {
             transaction = await transactionRepository.create({
+                reason: purposeOf.reason, narration: purposeOf.narration,
                 ngnValue: txNgnValue ?? undefined,
                 user: userId,
                 reference,
@@ -2201,7 +2212,8 @@ class TransactionService {
                 amount: quoteSourceNgn,
                 quoteReference: quote.reference,
                 paymentDestination: isMomo ? 'mobile_money_wallet' : 'bank_account',
-                description: `Payment from ${params.senderName || 'Solution Pay'}`.slice(0, 100),
+                // The user's note when they wrote one, else who it's from
+                description: (transaction.narration || `Payment from ${params.senderName || 'Solution Pay'}`).slice(0, 100),
                 senderName: params.senderName || 'Solution Pay',
                 beneficiary: {
                     ...splitFullName(destination.accountName),
@@ -2252,6 +2264,8 @@ class TransactionService {
         },
         userId: string,
     ) => {
+        // Why the money moves (YellowCard's list); required for sends
+        const purposeOf = paymentReasonOf(params, { required: true });
         await currencyAccessService.assertOn(userId, 'GHS');
         const amount = Math.round(Number(params.amount) * 100) / 100;
         if (!(amount > 0)) throw errorResponseMessage.payloadIncorrect("Amount must be a positive number");
@@ -2300,6 +2314,7 @@ class TransactionService {
 
         const detailType = (isMomo ? DETAIL_TYPE.MOBILE_MONEY : DETAIL_TYPE.BANK_TRANSFER) as DetailType;
         const transaction = await transactionRepository.create({
+                reason: purposeOf.reason, narration: purposeOf.narration,
             ngnValue: txNgnValue ?? undefined,
             user: userId,
             reference: this.generateBankTransferTransactionReference('GHS'),
@@ -2419,6 +2434,8 @@ class TransactionService {
         },
         userId: string,
     ) => {
+        // Why the money moves (YellowCard's list); optional for receives
+        const purposeOf = paymentReasonOf(params, { required: false });
         await currencyAccessService.assertOn(userId, 'GHS');
         const { idempotencyKey, paymentLinkId } = params;
         const amount = Number(params.amount);
@@ -2473,6 +2490,7 @@ class TransactionService {
         if (!payerEmail) throw errorResponseMessage.payloadIncorrect("Enter the payer's email address");
 
         const transaction = await transactionRepository.create({
+                reason: purposeOf.reason, narration: purposeOf.narration,
             ngnValue: txNgnValue ?? undefined,
             user: userId,
             reference,

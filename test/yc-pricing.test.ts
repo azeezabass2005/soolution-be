@@ -95,7 +95,7 @@ describe("YellowCard currencies priced like GHS", () => {
         const yc: any = (await import("../src/services/yellowcard.service")).default;
         yc.submitPaymentRequest.mockResolvedValue({ id: "pay-1", status: "processing" });
         const tx: any = await service.createYellowCardTransaction({
-            amount: 100, fromCurrency: "NGN", toCurrency: "KES", pin: TEST_PIN,
+            amount: 100, fromCurrency: "NGN", toCurrency: "KES", pin: TEST_PIN, reason: "gift",
             destination: { accountName: "Wanjiru", accountNumber: "+254712345678", accountType: "momo", country: "KE", network: "Mpesa" },
         } as any, user.id);
         const [d] = await exec().select().from(transactionDetails).where((await import("drizzle-orm")).eq(transactionDetails.transactionId, tx.id ?? tx._id));
@@ -118,7 +118,7 @@ describe("YellowCard currencies priced like GHS", () => {
         yc.submitPaymentRequest.mockClear();
         yc.submitPaymentRequest.mockResolvedValue({ id: "pay-h", channelId: "ch-1", status: "processing" });
         const held: any = await service.createYellowCardTransaction({
-            amount: 100, fromCurrency: "NGN", toCurrency: "KES", pin: TEST_PIN,
+            amount: 100, fromCurrency: "NGN", toCurrency: "KES", pin: TEST_PIN, reason: "gift",
             destination: { accountName: "Wanjiru", accountNumber: "+254712345678", accountType: "momo", country: "KE", network: "Mpesa" },
         } as any, user.id);
         expect(held.status).toBe("awaiting_approval");
@@ -180,5 +180,27 @@ describe("YellowCard currencies priced like GHS", () => {
         // Feed rows are `to` per 1 `from`; quotes are naira per KES
         expect(1 / buy!.rate).toBeCloseTo(buying.rate, 4);
         expect(sell!.rate).toBeCloseTo(selling.rate, 4);
+    });
+
+    it("needs a reason on a send from YellowCard's list, keeps the user's note, and tells YellowCard the reason", async () => {
+        const service = new TransactionService();
+        const user = await createUser();
+        await fundWallet(user.id, 50_000);
+        const yc: any = (await import("../src/services/yellowcard.service")).default;
+        yc.submitPaymentRequest.mockClear();
+        yc.submitPaymentRequest.mockResolvedValue({ id: "pay-r", status: "processing" });
+        const send = (extra: Record<string, unknown>) => service.createYellowCardTransaction({
+            amount: 100, fromCurrency: "NGN", toCurrency: "KES", pin: TEST_PIN, ...extra,
+            destination: { accountName: "Wanjiru", accountNumber: "+254712345678", accountType: "momo", country: "KE", network: "Mpesa" },
+        } as any, user.id);
+
+        await expect(send({})).rejects.toMatchObject({ response_code: 400, message: "Choose a reason for this payment" });
+        await expect(send({ reason: "rent" })).rejects.toMatchObject({ response_code: 400 });
+        expect(yc.submitPaymentRequest).not.toHaveBeenCalled();
+
+        const tx: any = await send({ reason: "school-fees", narration: "  Term 2 <b>fees</b>  " });
+        expect(yc.submitPaymentRequest).toHaveBeenCalledWith(expect.objectContaining({ reason: "school-fees" }));
+        const [row] = await exec().select().from(transactions).where((await import("drizzle-orm")).eq(transactions.id, tx.id ?? tx._id));
+        expect(row).toMatchObject({ reason: "school-fees", narration: "Term 2 fees" });
     });
 });

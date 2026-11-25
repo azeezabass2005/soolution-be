@@ -88,12 +88,14 @@ class UserNoticesService {
     /** Sends whatever hasn't been told yet; returns how many notices went out. Runs every few seconds. */
     async run(options: { graceSeconds?: number } = {}): Promise<number> {
         if (this.running) return 0;
-        const GRACE = sql`now() - make_interval(secs => ${options.graceSeconds ?? GRACE_SECONDS})`;
+        const graceSeconds = options.graceSeconds ?? GRACE_SECONDS;
+        // Zero (tests): no wait at all; otherwise compare on the database clock
+        const settled = (column: unknown) => (graceSeconds > 0 ? sql`${column} < clock_timestamp() - make_interval(secs => ${graceSeconds})` : undefined);
         this.running = true;
         let sent = 0;
         try {
             const due = await exec().select({ id: transactions.id }).from(transactions)
-                .where(and(inArray(transactions.status, FINAL_TX as any), or(isNull(transactions.notifiedStatus), ne(transactions.notifiedStatus, transactions.status)), sql`coalesce(${transactions.completedAt}, ${transactions.failedAt}, ${transactions.initiatedAt}) > ${LOOKBACK}`, sql`coalesce(${transactions.updatedAt}, ${transactions.initiatedAt}) < ${GRACE}`))
+                .where(and(inArray(transactions.status, FINAL_TX as any), or(isNull(transactions.notifiedStatus), ne(transactions.notifiedStatus, transactions.status)), sql`coalesce(${transactions.completedAt}, ${transactions.failedAt}, ${transactions.initiatedAt}) > ${LOOKBACK}`, settled(sql`coalesce(${transactions.updatedAt}, ${transactions.initiatedAt})`)))
                 .limit(100);
             for (const { id } of due) {
                 // Claim it: only one notice per final status, however many workers run
@@ -105,7 +107,7 @@ class UserNoticesService {
             }
 
             const dueWallet = await exec().select({ id: walletTransactions.id, told: walletTransactions.notifiedStatus }).from(walletTransactions)
-                .where(and(inArray(walletTransactions.type, ["funding", "withdrawal"] as any), inArray(walletTransactions.status, FINAL_WALLET as any), or(isNull(walletTransactions.notifiedStatus), ne(walletTransactions.notifiedStatus, walletTransactions.status)), sql`${walletTransactions.createdAt} > ${LOOKBACK}`, sql`coalesce(${walletTransactions.updatedAt}, ${walletTransactions.createdAt}) < ${GRACE}`))
+                .where(and(inArray(walletTransactions.type, ["funding", "withdrawal"] as any), inArray(walletTransactions.status, FINAL_WALLET as any), or(isNull(walletTransactions.notifiedStatus), ne(walletTransactions.notifiedStatus, walletTransactions.status)), sql`${walletTransactions.createdAt} > ${LOOKBACK}`, settled(sql`coalesce(${walletTransactions.updatedAt}, ${walletTransactions.createdAt})`)))
                 .limit(100);
             for (const { id, told } of dueWallet) {
                 const [w] = await exec().update(walletTransactions).set({ notifiedStatus: sql`${walletTransactions.status}` as any })
