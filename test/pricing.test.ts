@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_PRICING, PricingError, applyFeeRule, applyRateRule, legacyNgnFeePairs, limitProblem, parsePricing, priceFees, priceFunding, withDefaults } from "../src/common/pricing";
+import { DEFAULT_PRICING, PricingError, rulesForAmount, tierFor, applyFeeRule, applyRateRule, legacyNgnFeePairs, limitProblem, parsePricing, priceFees, priceFunding, withDefaults } from "../src/common/pricing";
 import { pairFees } from "../src/services/ghs-rate.service";
 
 describe("pricing rules", () => {
@@ -75,6 +75,42 @@ describe("pricing rules", () => {
 });
 
 import { environmentMismatch } from "../src/utils/environment-check.utils";
+describe("pricing by amount range", () => {
+    const Z = { percent: 0, fixed: 0, min: 0, cap: 0 };
+    const pair = (tiers: unknown) => parsePricing({ send: { "NGN-KES": { providerFee: Z, platformFee: { ...Z, percent: 2 }, rate: { percent: 1, fixed: 0 }, feeCurrency: "KES", tiers } } }, DEFAULT_PRICING).send["NGN-KES"];
+
+    it("prices each amount by the band it falls in, from 'from' up to (not including) 'to'", () => {
+        const rules = pair([
+            { min: 5_000, max: 0, platformFee: { ...Z, fixed: 100 } },
+            { min: 0, max: 5_000, platformFee: { ...Z, percent: 3 }, rate: { percent: 2, fixed: 0 } },
+        ]);
+        // Saved in order
+        expect(rules.tiers!.map((t) => t.min)).toEqual([0, 5_000]);
+        expect(tierFor(rules, 4_999.99)!.min).toBe(0);
+        expect(tierFor(rules, 5_000)!.min).toBe(5_000);
+        // A band's buffer replaces the pair's; without one the pair's stays
+        expect(rulesForAmount(rules, 100)!.rate.percent).toBe(2);
+        expect(rulesForAmount(rules, 10_000)!.rate.percent).toBe(1);
+        expect(applyFeeRule(rulesForAmount(rules, 1_000)!.platformFee, 1_000)).toBe(30);
+        expect(applyFeeRule(rulesForAmount(rules, 10_000)!.platformFee, 10_000)).toBe(100);
+    });
+
+    it("falls back to the pair's own pricing outside every band", () => {
+        const rules = pair([{ min: 100, max: 200, platformFee: { ...Z, fixed: 5 } }]);
+        expect(rulesForAmount(rules, 50)!.platformFee.percent).toBe(2);
+        expect(rulesForAmount(rules, 250)!.platformFee.percent).toBe(2);
+        expect(rulesForAmount(rules, 150)!.platformFee.fixed).toBe(5);
+    });
+
+    it("refuses bands that overlap or don't make sense", () => {
+        expect(() => pair([{ min: 0, max: 1_000 }, { min: 500, max: 2_000 }])).toThrow(PricingError);
+        expect(() => pair([{ min: 0, max: 0 }, { min: 500, max: 2_000 }])).toThrow("overlap");
+        expect(() => pair([{ min: 1_000, max: 500 }])).toThrow('"to" must be more than "from"');
+        // Touching ends are fine
+        expect(pair([{ min: 0, max: 1_000 }, { min: 1_000, max: 0 }]).tiers).toHaveLength(2);
+    });
+});
+
 describe("staging and production stay apart", () => {
     it("flags an API whose FRONTEND_URL is the other environment", () => {
         expect(environmentMismatch("api.solutionpay.co", "https://www.solutionpay.co")).toBeNull();

@@ -1,6 +1,6 @@
 import fincraService from "./fincra.service";
 import platformSettingsService, { type RateDirection } from "./platform-settings.service";
-import { NO_LIMITS, limitProblem, priceFees, type FxPricing, type TxLimits } from "../common/pricing";
+import { NO_LIMITS, applyRateRule, limitProblem, priceFees, rulesForAmount, type FxPricing, type TxLimits } from "../common/pricing";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -85,8 +85,10 @@ class GhsRateService {
 
     /** The full price of sending or receiving `ghsAmount` GHS */
     async price(direction: RateDirection, ghsAmount: number): Promise<GhsPrice> {
-        const { providerRate, userRate } = await this.getUserFacingRate("NGN", "GHS", direction);
-        const rules = await platformSettingsService.pairPricing(direction, ghsPair(direction));
+        const { providerRate } = await this.getUserFacingRate("NGN", "GHS", direction);
+        // The admin's band for this amount, if there is one (its fees, and its buffer when set)
+        const rules = rulesForAmount(await platformSettingsService.pairPricing(direction, ghsPair(direction)), ghsAmount);
+        const userRate = applyRateRule(rules?.rate, providerRate, direction);
         const fees = pairFees(rules, ghsAmount, userRate);
         return {
             direction,
@@ -112,8 +114,11 @@ class GhsRateService {
      */
     async quoteRate(source: string, destination: string, amount: number) {
         const direction: RateDirection = source === "GHS" ? "receive" : "send";
-        const { providerRate, userRate } = await this.getUserFacingRate(source, destination, direction);
-        const rules = await platformSettingsService.pairPricing(direction, ghsPair(direction));
+        const { providerRate, userRate: baseRate } = await this.getUserFacingRate(source, destination, direction);
+        const pairRules = await platformSettingsService.pairPricing(direction, ghsPair(direction));
+        // The band for this amount (in GHS: for naira in, roughly what it buys at the pair's own rate)
+        const rules = rulesForAmount(pairRules, source === "GHS" ? amount : amount / baseRate);
+        const userRate = applyRateRule(rules?.rate, providerRate, direction);
         // The GHS side of the conversion: what's paid in (receive) or what the NGN buys (send)
         const ghsAmount = source === "GHS" ? amount : round2(amount / userRate);
         const fees = source === "GHS" ? pairFees(rules, ghsAmount, userRate) : pairFees(rules, amount / userRate, userRate);

@@ -50,11 +50,39 @@ export interface TxLimits {
     max: number;
 }
 
+/**
+ * Pricing for one amount band of a pair: from `min` (inclusive) up to `max`
+ * (exclusive; 0 = no upper end), in the pair's foreign currency like the
+ * limits. Its fees replace the pair's own, and its rate buffer too when set.
+ */
+export interface PriceTier {
+    min: number;
+    max: number;
+    providerFee: FeeRule;
+    platformFee: FeeRule;
+    rate?: RateRule;
+}
+
 export interface FxPricing extends FeePricing {
     rate: RateRule;
     /** Currency of the fee rules' fixed / min / cap amounts (see above) */
     feeCurrency: string;
     limits: TxLimits;
+    /** Optional amount bands, each priced on its own; amounts outside every band use the pair's own pricing */
+    tiers?: PriceTier[];
+}
+
+/** The band of a pair's pricing an amount (foreign currency) falls in, or null */
+export function tierFor(rules: FxPricing | undefined, amount: number): PriceTier | null {
+    if (!rules?.tiers?.length || !(amount >= 0)) return null;
+    return rules.tiers.find((t) => amount >= t.min && (t.max === 0 || amount < t.max)) ?? null;
+}
+
+/** A pair's pricing for this exact amount: its band's fees (and buffer, when the band sets one) */
+export function rulesForAmount(rules: FxPricing | undefined, amount: number): FxPricing | undefined {
+    const tier = tierFor(rules, amount);
+    if (!rules || !tier) return rules;
+    return { ...rules, providerFee: tier.providerFee, platformFee: tier.platformFee, rate: tier.rate ?? rules.rate };
 }
 
 export interface FundingPricing extends FeePricing {
@@ -231,6 +259,34 @@ function rateRule(value: any, path: string): RateRule {
     return { percent: num(value.percent ?? 0, `${path}.percent`, MAX_PERCENT), fixed: num(value.fixed ?? 0, `${path}.fixed`, MAX_NGN) };
 }
 
+const MAX_TIERS = 20;
+
+/** Bands in order, none overlapping; each must be a real range */
+function tiersRule(value: any, path: string): PriceTier[] {
+    if (value === undefined || value === null) return [];
+    if (!Array.isArray(value)) throw new PricingError(`${path} must be a list`);
+    if (value.length > MAX_TIERS) throw new PricingError(`${path}: at most ${MAX_TIERS} amount ranges`);
+    const tiers = value.map((t: any, i: number): PriceTier => {
+        if (!t || typeof t !== "object") throw new PricingError(`${path}[${i}] is missing`);
+        const tier: PriceTier = {
+            min: num(t.min ?? 0, `${path}[${i}].min`, MAX_LIMIT),
+            max: num(t.max ?? 0, `${path}[${i}].max`, MAX_LIMIT),
+            providerFee: feeRule(t.providerFee ?? ZERO_FEE, `${path}[${i}].providerFee`),
+            platformFee: feeRule(t.platformFee ?? ZERO_FEE, `${path}[${i}].platformFee`),
+        };
+        if (t.rate !== undefined && t.rate !== null) tier.rate = rateRule(t.rate, `${path}[${i}].rate`);
+        if (tier.max > 0 && tier.max <= tier.min) throw new PricingError(`Range ${i + 1}: "to" must be more than "from"`);
+        return tier;
+    }).sort((a, b) => a.min - b.min);
+    for (let i = 1; i < tiers.length; i++) {
+        const prev = tiers[i - 1];
+        if (prev.max === 0 || prev.max > tiers[i].min) {
+            throw new PricingError(`Amount ranges overlap: ${prev.min}–${prev.max || "and up"} and ${tiers[i].min}–${tiers[i].max || "and up"}`);
+        }
+    }
+    return tiers;
+}
+
 const PAIR = /^[A-Z]{3}-[A-Z]{3}$/;
 
 /** A complete, checked config from admin input; anything left out keeps `current` */
@@ -282,6 +338,7 @@ export function parsePricing(input: any, current: PricingConfig): PricingConfig 
                 rate: rateRule(src?.rate ?? base.rate, `${op}.${pair}.rate`),
                 feeCurrency,
                 limits: limitsRule(src?.limits ?? base.limits, `${op}.${pair}.limits`),
+                tiers: tiersRule(src?.tiers !== undefined ? src.tiers : base.tiers, `${op}.${pair}.tiers`),
             };
         }
     }

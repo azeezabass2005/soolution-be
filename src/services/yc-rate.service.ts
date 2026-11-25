@@ -1,7 +1,7 @@
 import yellowCardService from "./yellowcard.service";
 import platformSettingsService, { type RateDirection } from "./platform-settings.service";
 import { pairFees } from "./ghs-rate.service";
-import { NO_LIMITS, applyRateRule, limitProblem, type FxPricing, type TxLimits, type UsdPricing } from "../common/pricing";
+import { NO_LIMITS, applyRateRule, limitProblem, type FxPricing, type TxLimits, type UsdPricing, rulesForAmount } from "../common/pricing";
 import { YELLOWCARD_FLOW_CURRENCIES } from "../common/payment-link.constants";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -130,7 +130,9 @@ class YcRateService {
     /** The full price of sending or receiving `amount` of a YellowCard currency */
     async price(direction: RateDirection, currency: string, amount: number): Promise<YcPrice> {
         const cur = currency.toUpperCase();
-        const [{ rate: providerRate, usdSource }, rules] = await Promise.all([this.providerRate(direction, cur), this.rules(direction, cur)]);
+        const [{ rate: providerRate, usdSource }, pairRules] = await Promise.all([this.providerRate(direction, cur), this.rules(direction, cur)]);
+        // The admin's band for this amount, if there is one
+        const rules = rulesForAmount(pairRules, amount);
         const userRate = applyRateRule(rules?.rate, providerRate, direction);
         const fees = pairFees(rules, amount, userRate);
         const pct = (n: number) => (fees.subtotalNgn > 0 ? Math.round((n / fees.subtotalNgn) * 100 * 10_000) / 10_000 : 0);
