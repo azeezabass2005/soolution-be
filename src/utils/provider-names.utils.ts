@@ -3,7 +3,7 @@
  * matches any of their names (and YellowCard's collection-account name and
  * the networks it reports) so a message can be checked before it leaves.
  */
-export const PROVIDER_NAME_PATTERN = /yellow[\s_-]*card|yellow[\s_-]*pay|o[\s_-]*gateway|paystack|smile[\s_-]*id(entity)?|sasapay|fincra|spot[\s_-]*flow|\bdaya\b|hyper[\s_-]*rails?/i;
+export const PROVIDER_NAME_PATTERN = /yellow[\s_-]*card|yellow[\s_-]*pay|o[\s_-]*gateway|paystack|smile[\s_-]*id(entity)?|sasapay|fincra|spot[\s_-]*flow|hyper[\s_-]*rails?/i;
 
 export const mentionsProvider = (text: unknown): boolean =>
     typeof text === "string" && PROVIDER_NAME_PATTERN.test(text);

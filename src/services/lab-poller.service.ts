@@ -2,7 +2,6 @@ import config from "../config/env.config";
 import logger from "../utils/logger.utils";
 import fincraService, { FINCRA_CHECKOUT_FINAL, FincraError } from "./fincra.service";
 import spotflowService, { SPOTFLOW_CURRENCIES } from "./spotflow.service";
-import dayaService from "./daya.service";
 
 /**
  * Checks the lab providers after something is done in a lab tab, so nothing
@@ -22,7 +21,7 @@ import dayaService from "./daya.service";
  * database); the provider stays the source of truth.
  */
 
-export type LabProvider = "fincra" | "spotflow" | "daya";
+export type LabProvider = "fincra" | "spotflow";
 
 export interface LabEvent {
     id: number;
@@ -97,7 +96,6 @@ class LabPollerService {
     private state: Record<LabProvider, ProviderState> = {
         fincra: this.blank(),
         spotflow: this.blank(),
-        daya: this.blank(),
     };
     /** Fincra VA id → account number */
     private fincraNumbers = new Map<string, string>();
@@ -113,12 +111,6 @@ class LabPollerService {
     private spotflowKnown = new Set<string>();
     /** Payment links created from the tab since the backend started */
     private checkouts = new Map<string, LabCheckout>();
-    /** Daya watch key (fa:<funding account id> or va:<virtual account id>) → account number shown */
-    private dayaLabels = new Map<string, string>();
-    /** Daya deposit id → last status seen */
-    private dayaDeposits = new Map<string, string>();
-    /** Daya watch keys whose existing deposits have been learnt */
-    private dayaKnown = new Set<string>();
     /** Accounts opened from the tab: everything paid into them is new, so they count from zero */
     private fresh = new Set<string>();
 
@@ -136,7 +128,6 @@ class LabPollerService {
 
     private enabled(provider: LabProvider) {
         if (provider === "fincra") return config.FINCRA_LAB_ENABLED && fincraService.configured;
-        if (provider === "daya") return config.DAYA_LAB_ENABLED && dayaService.configured && !!dayaService.mode;
         return config.SPOTFLOW_LAB_ENABLED && spotflowService.configured && !!spotflowService.mode;
     }
 
@@ -155,18 +146,6 @@ class LabPollerService {
         if (accountNumber) this.spotflowLabels.set(id, accountNumber);
         if (isNew) this.fresh.add(`spotflow:${id}`);
         this.arm("spotflow", id, this.spotflowLabels.get(id) || id);
-    }
-
-    /**
-     * A Daya NGN funding account ("fa") or USD/EUR virtual account ("va").
-     * The label is the account number people pay into.
-     */
-    watchDayaAccount(kind: "fa" | "va", id: string, label?: string, { isNew = false } = {}) {
-        if (!id) return;
-        const key = `${kind}:${id}`;
-        if (label) this.dayaLabels.set(key, label);
-        if (isNew) this.fresh.add(`daya:${key}`);
-        this.arm("daya", key, this.dayaLabels.get(key) || id);
     }
 
     /** A just-created payment link; watched until it's paid, failed or expired */
@@ -255,7 +234,7 @@ class LabPollerService {
 
     /** A timer exists only while something is being watched */
     private syncTimer() {
-        const any = this.state.fincra.watches.size + this.state.spotflow.watches.size + this.state.daya.watches.size > 0;
+        const any = this.state.fincra.watches.size + this.state.spotflow.watches.size > 0;
         if (any && !this.timer) {
             this.timer = setInterval(() => void this.tick(), this.intervalSeconds * 1000);
             logger.info("Lab watch started", { everySeconds: this.intervalSeconds });
@@ -274,7 +253,7 @@ class LabPollerService {
     /* ---------------- polling ---------------- */
 
     async tick() {
-        for (const provider of ["fincra", "spotflow", "daya"] as LabProvider[]) {
+        for (const provider of ["fincra", "spotflow"] as LabProvider[]) {
             this.expire(provider);
             if (this.state[provider].watches.size) await this.run(provider, () => this.poll(provider, false));
         }
@@ -320,7 +299,6 @@ class LabPollerService {
 
     private poll(provider: LabProvider, all: boolean) {
         if (provider === "fincra") return this.pollFincra(all);
-        if (provider === "daya") return this.pollDaya(all);
         return this.pollSpotflow(all);
     }
 
@@ -431,80 +409,6 @@ class LabPollerService {
         });
     }
 
-    /**
-     * New Daya deposits, and deposits whose status moves (received →
-     * completed). NGN deposits come from one list (Daya can't filter it by
-     * account), USD/EUR ones from each virtual account. The first look at an
-     * account only learns what's there, unless it was just opened from the tab.
-     */
-    private async pollDaya(all: boolean) {
-        let keys = [...this.state.daya.watches.keys()];
-        if (all) {
-            const [fas, vas] = await Promise.all([dayaService.listFundingAccounts(), dayaService.listVirtualAccounts()]);
-            for (const a of fas) {
-                const n = (a.instructions || []).find((i: any) => i.account_number)?.account_number;
-                if (n) this.dayaLabels.set(`fa:${a.id}`, n);
-            }
-            for (const v of vas) {
-                const n = v.deposit_instructions?.bank_account_number || v.deposit_instructions?.iban;
-                if (n) this.dayaLabels.set(`va:${v.id}`, n);
-            }
-            keys = [...fas.map((a: any) => `fa:${a.id}`), ...vas.map((v: any) => `va:${v.id}`)];
-        }
-
-        const byKey = new Map<string, any[]>();
-        if (keys.some((k) => k.startsWith("fa:"))) {
-            // Three days back covers anything still settling
-            const from = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
-            for (const d of await dayaService.listDeposits(from)) {
-                if (!d.funding_account_id) continue;
-                const k = `fa:${d.funding_account_id}`;
-                byKey.set(k, [...(byKey.get(k) || []), d]);
-            }
-        }
-        await eachLimited(keys.filter((k) => k.startsWith("va:")), async (k) => {
-            byKey.set(k, await dayaService.listVirtualAccountDeposits(k.slice(3)));
-        });
-
-        for (const key of keys) {
-            const known = this.dayaKnown.has(key) || this.fresh.has(`daya:${key}`);
-            let pending = false;
-            for (const d of byKey.get(key) || []) {
-                if (!d.id) continue;
-                const status = String(d.status || "unknown");
-                if (!["COMPLETED", "FAILED", "REVERSED"].includes(status)) pending = true;
-                const seen = this.dayaDeposits.get(d.id);
-                this.dayaDeposits.set(d.id, status);
-                if (!known || seen === status) continue;
-                const currency = d.currency || (key.startsWith("va:") ? "USD" : "NGN");
-                const depositFee = d.fees?.deposit_fee;
-                const notes = [
-                    d.source_amount ? `paid ${d.source_amount} ${d.source_currency}` : "",
-                    d.settled_amount && d.settled_currency && d.settled_currency !== currency ? `settled ${d.settled_amount} ${d.settled_currency}` : "",
-                    depositFee && depositFee.currency !== currency ? `fee ${depositFee.amount} ${depositFee.currency}` : "",
-                    !depositFee && d.fees?.total_fee_usd ? `fee ${d.fees.total_fee_usd} USD` : "",
-                    d.flag_message || "",
-                ].filter(Boolean);
-                this.record({
-                    provider: "daya",
-                    kind: seen === undefined ? "deposit" : "status_change",
-                    account: this.dayaLabels.get(key) || key.slice(3),
-                    currency,
-                    amount: num(d.amount),
-                    fee: depositFee && depositFee.currency === currency ? num(depositFee.amount) : undefined,
-                    settled: d.settled_currency === currency ? num(d.settled_amount) : undefined,
-                    status,
-                    previousStatus: seen,
-                    reference: d.id,
-                    sender: d.sender?.name,
-                    note: notes.join(" · ") || undefined,
-                });
-            }
-            this.dayaKnown.add(key);
-            const watch = this.state.daya.watches.get(key);
-            if (pending && watch) watch.until = Math.max(watch.until, Math.min(Date.now() + this.windowMs, Date.now() + PENDING_CAP_MS));
-        }
-    }
 }
 
 export default new LabPollerService();

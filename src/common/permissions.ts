@@ -55,7 +55,7 @@ export const PERMISSIONS = [
 
     // Others
     { key: "support", group: "Support", label: "Support channel", description: "Answering users' support conversations." },
-    { key: "labs", group: "Labs", label: "Labs", description: "The provider test pages (Fincra, Spotflow, Daya, HyperRails)." },
+    { key: "labs", group: "Labs", label: "Labs", description: "The provider test pages (Fincra, Spotflow, HyperRails)." },
 
     // Not singled out: super admin only
     { key: "technical", group: "Technical", label: "Technical", description: "Reconciliation, ledger, webhooks, suspense and GHS conversions.", superAdminOnly: true },
