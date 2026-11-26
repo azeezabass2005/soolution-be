@@ -246,8 +246,10 @@ class UserRepository {
 
     /** `createdFrom` / `createdTo`: only users who signed up in that window */
     /** `verified`: identity verified, i.e. on Tier 1 or above (BVN checks set the tier, not isKYCDone) */
-    async count(filter: { isKYCDone?: boolean; verified?: boolean; createdFrom?: Date; createdTo?: Date } = {}): Promise<number> {
+    async count(filter: { isKYCDone?: boolean; verified?: boolean; transacted?: boolean; createdFrom?: Date; createdTo?: Date } = {}): Promise<number> {
         const where: SQL[] = [];
+        // Has ever had money come in: a bank deposit, or a receive credited to their wallet (both are funding entries)
+        if (filter.transacted) where.push(sql`exists (select 1 from wallet_transactions wt where wt.user_id = ${users.id} and wt.type = 'funding' and wt.status = 'successful')`);
         if (filter.isKYCDone !== undefined) where.push(eq(users.isKYCDone, filter.isKYCDone));
         if (filter.verified !== undefined) where.push(filter.verified ? gte(users.tier, 1) : lt(users.tier, 1));
         if (filter.createdFrom) where.push(gte(users.createdAt, filter.createdFrom));

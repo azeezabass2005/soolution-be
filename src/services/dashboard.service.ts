@@ -102,10 +102,12 @@ class DashboardService {
      */
     async getAdminDashboard(range: DateRange = {}) {
         const created = { createdFrom: range.from, createdTo: range.to };
-        const [totalUsers, totalKYCVerified, flows, manual, pending, recentTransactions, outsideWallet] = await Promise.all([
+        const [totalUsers, totalKYCVerified, totalTransacted, flows, manual, pending, recentTransactions, outsideWallet] = await Promise.all([
             userRepository.count(created),
             // Verified identity (Tier 1+): a BVN check verifies without an application, so isKYCDone misses them
             userRepository.count({ verified: true, ...created }),
+            // Unique users who have ever funded or received
+            userRepository.count({ transacted: true, ...created }),
             this.walletFlows(range),
             this.manualTotals(range),
             this.pendingNow(),
@@ -118,6 +120,15 @@ class DashboardService {
         return {
             totalUsers,
             totalKYCVerified,
+            totalTransacted,
+            // Signed up → verified → transacted, each with its share of sign-ups
+            funnel: {
+                signedUp: totalUsers,
+                kyc: totalKYCVerified,
+                transacted: totalTransacted,
+                kycPercent: totalUsers > 0 ? Math.round((totalKYCVerified / totalUsers) * 1000) / 10 : 0,
+                transactedPercent: totalUsers > 0 ? Math.round((totalTransacted / totalUsers) * 1000) / 10 : 0,
+            },
             flows,
             amountTransactedNgn,
             transactionsCount: c.funded + c.received + c.sent + c.paidOut + outsideWallet,
