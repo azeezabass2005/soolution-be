@@ -12,6 +12,8 @@ import errorResponseMessage, { ErrorSeverity } from "../common/messages/error-re
 import config from "../config/env.config";
 import logger from "../utils/logger.utils";
 import type { ProfitRow } from "./admin-profit.service";
+import { attentionService } from "./attention.service";
+import { hasPermission } from "../common/permissions";
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 const n = (v: unknown) => Number(v) || 0;
@@ -48,6 +50,16 @@ export interface LiquidityLine {
 class TreasuryService {
     private notifications = new NotificationService();
     private lastAlert = new Map<string, number>();
+    /** How many balances are below their alert level, kept briefly (reading them asks the providers) */
+    private lowCache: { at: number; count: number } | null = null;
+
+    /** Balances below their alert level right now (cached for 2 minutes); 0 when they can't be read */
+    async lowLiquidityCount(): Promise<number> {
+        if (this.lowCache && Date.now() - this.lowCache.at < 2 * 60_000) return this.lowCache.count;
+        const count = (await this.liquidity().catch(() => [] as LiquidityLine[])).filter((l) => l.low).length;
+        this.lowCache = { at: Date.now(), count };
+        return count;
+    }
 
     // ─────────────── Expenses ───────────────
 
@@ -178,6 +190,7 @@ class TreasuryService {
     /** Alerts the team about any balance running low (at most every 6 hours per balance); run by the sweeper */
     async checkLiquidity(): Promise<number> {
         const lines = await this.liquidity();
+        this.lowCache = { at: Date.now(), count: lines.filter((l) => l.low).length };
         let alerted = 0;
         for (const l of lines.filter((x) => x.low)) {
             const key = `${l.provider}:${l.currency}`;
@@ -223,4 +236,10 @@ class TreasuryService {
     }
 }
 
-export default new TreasuryService();
+const treasuryService = new TreasuryService();
+
+// Admins who see balances get a red dot on the bell while any balance is below its alert level
+attentionService.register(async (access): Promise<Record<string, number>> =>
+    (hasPermission(access, "profit_balances") ? { lowLiquidity: await treasuryService.lowLiquidityCount() } : {}));
+
+export default treasuryService;

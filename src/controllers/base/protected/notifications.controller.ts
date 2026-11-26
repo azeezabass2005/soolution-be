@@ -21,6 +21,8 @@ class NotificationsController extends BaseController {
         this.router.get("/", this.list.bind(this));
         this.router.get("/summary", this.summary.bind(this));
         this.router.post("/read", this.read.bind(this));
+        // Clear one notification, or all of them ({ all: true })
+        this.router.post("/clear", this.clear.bind(this));
     }
 
     private async list(req: Request, res: Response, next: NextFunction) {
@@ -40,6 +42,15 @@ class NotificationsController extends BaseController {
             const unread = await inboxService.unreadCount(user.id);
             const attention = user.role === ROLE_MAP.ADMIN ? await attentionService.forAdmin(await accessOf(res)) : {};
             this.sendSuccess(res, { unread, attention });
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    private async clear(req: Request, res: Response, next: NextFunction) {
+        try {
+            const ids = req.body?.all ? "all" : Array.isArray(req.body?.ids) ? req.body.ids.map(String).slice(0, 200) : [];
+            this.sendSuccess(res, await inboxService.clear(res.locals.user.id, ids));
         } catch (error) {
             next(error);
         }

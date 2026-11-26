@@ -66,6 +66,23 @@ describe("in-app notifications", () => {
         expect(more.hasMore).toBe(false);
     });
 
+    it("clears one notification or all of them, only the person's own", async () => {
+        const user = await createUser();
+        const other = await createUser();
+        for (let i = 0; i < 3; i++) await inboxService.toUser(user.id, { type: "transaction.completed", title: `Payment ${i}` });
+        await inboxService.toUser(other.id, { type: "transaction.completed", title: "Someone else's" });
+        const [first] = (await inboxService.list(user.id)).items;
+        // Someone else's id does nothing
+        await inboxService.clear(other.id, [first.id]);
+        expect((await inboxService.list(user.id)).items).toHaveLength(3);
+        const after = await inboxService.clear(user.id, [first.id]);
+        expect(after.unread).toBe(2);
+        expect((await inboxService.list(user.id)).items.map((n) => n.id)).not.toContain(first.id);
+        await inboxService.clear(user.id, "all");
+        expect((await inboxService.list(user.id)).items).toHaveLength(0);
+        expect((await inboxService.list(other.id)).items).toHaveLength(1);
+    });
+
     it("alerts the admins whose role covers it, and never someone else's inbox", async () => {
         const boss = await createUser({ role: ROLE_MAP.ADMIN } as any);
         const kycRole = await adminAccessService.createRole({ name: "KYC desk", permissions: ["kyc"] }, boss.id);

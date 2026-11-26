@@ -96,6 +96,18 @@ class InboxService {
         return Number(row?.n ?? 0);
     }
 
+    /** Clears (deletes) the given notifications, or all of them, for this person only */
+    async clear(userId: string, ids: string[] | "all") {
+        if (!isUuid(userId)) return { unread: 0 };
+        if (ids === "all") {
+            await exec().delete(notifications).where(eq(notifications.user, userId));
+        } else {
+            const valid = ids.filter((id) => isUuid(id));
+            if (valid.length) await exec().delete(notifications).where(and(eq(notifications.user, userId), inArray(notifications.id, valid)));
+        }
+        return { unread: await this.unreadCount(userId) };
+    }
+
     /** Marks the given notifications read (or all of them) */
     async markRead(userId: string, ids?: string[] | "all") {
         const where = ids === "all" || !ids
