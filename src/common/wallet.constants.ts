@@ -15,10 +15,13 @@ export const MANUAL_PAYOUT_CURRENCIES = ["RMB", "GHS", "KES", "XAF"] as const;
 /** Wallets a manual payout can be held from: the matching ones, and NGN (manual GHS sends paid in naira) */
 export const MANUAL_HOLD_CURRENCIES = [...MANUAL_PAYOUT_CURRENCIES, "NGN"] as const;
 
+/** Smallest manual send across all manual currencies (GHS, KES, XAF, RMB), in naira */
+export const MANUAL_SEND_MIN_NGN = 500_000;
+
 /** Manual GHS sends, paid from the NGN wallet at the buffered rate with no fee */
 export const MANUAL_GHS_SEND = {
     /** Smallest manual send, in naira */
-    MIN_NGN: 500_000,
+    MIN_NGN: MANUAL_SEND_MIN_NGN,
 } as const;
 
 /** How long an exchange quote can be accepted */

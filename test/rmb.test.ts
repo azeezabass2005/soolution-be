@@ -39,30 +39,35 @@ describe("RMB sends", () => {
 
     it("takes the naira from the NGN wallet at the manual rate, with no transfer to us, and goes straight to our team", async () => {
         const user = await createUser();
-        await fundWallet(user.id, 100_000);
-        const tx: any = await send(user.id, 200);
+        await fundWallet(user.id, 1_000_000);
+        const tx: any = await send(user.id, 2_500);
 
-        // ¥200 × ₦220 = ₦44,000 taken from the wallet; nothing to transfer or upload
-        expect(await walletBalance(user.id)).toBe(56_000);
+        // ¥2,500 × ₦220 = ₦550,000 taken from the wallet; nothing to transfer or upload
+        expect(await walletBalance(user.id)).toBe(450_000);
         expect(tx.status).toBe("awaiting_confirmation");
         const details = await transactionDetailRepository.findByTransactionId(tx.id ?? tx._id);
-        expect(details).toMatchObject({ fundingCurrency: "NGN", fundingAmount: 44_000 });
+        expect(details).toMatchObject({ fundingCurrency: "NGN", fundingAmount: 550_000 });
         expect(Object.keys((details as any).bankAccountDetails ?? {})).toHaveLength(0);
         expect(notices.at(-1)).toMatchObject({ title: "Your RMB payment is on its way" });
         expect(notices.at(-1)!.message).toContain("taken from your NGN wallet");
     });
 
-    it("refuses when the NGN wallet doesn't cover it, and refunds the wallet when ops rejects it", async () => {
+    it("refuses amounts under ₦500,000, refuses when NGN wallet doesn't cover it, and refunds on rejection", async () => {
+        const rich = await createUser();
+        await fundWallet(rich.id, 1_000_000);
+        await expect(send(rich.id, 200)).rejects.toMatchObject({ response_code: 400, message: "Manual payments start at ₦500,000." });
+        expect(await walletBalance(rich.id)).toBe(1_000_000);
+
         const poor = await createUser();
-        await fundWallet(poor.id, 10_000);
-        await expect(send(poor.id, 200)).rejects.toBeTruthy();
-        expect(await walletBalance(poor.id)).toBe(10_000);
+        await fundWallet(poor.id, 100_000);
+        await expect(send(poor.id, 2_500)).rejects.toBeTruthy();
+        expect(await walletBalance(poor.id)).toBe(100_000);
 
         const user = await createUser();
-        await fundWallet(user.id, 100_000);
-        const tx: any = await send(user.id, 100);
-        expect(await walletBalance(user.id)).toBe(78_000);
+        await fundWallet(user.id, 1_000_000);
+        const tx: any = await send(user.id, 2_500);
+        expect(await walletBalance(user.id)).toBe(450_000);
         await new TransactionService().rejectManualTransaction(tx.id ?? tx._id, "Recipient's Alipay is closed", ADMIN);
-        expect(await walletBalance(user.id)).toBe(100_000);
+        expect(await walletBalance(user.id)).toBe(1_000_000);
     });
 });

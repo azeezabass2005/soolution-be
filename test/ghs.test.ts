@@ -333,6 +333,37 @@ describe("GHS through Fincra", () => {
             await expect(manual(user.id, 5_000)).rejects.toBeTruthy();
             expect(await walletBalance(user.id)).toBe(400_000);
         });
+
+        it("lets users save both bank and mobile money GHS beneficiaries", async () => {
+            const { default: beneficiaryService } = await import("../src/services/beneficiary.service");
+            const user = await createUser();
+            const bank = await beneficiaryService.create(user.id, {
+                currency: "GHS",
+                kind: "bank",
+                bankName: "GCB Bank",
+                bankCode: "GCB Bank",
+                accountNumber: "1234567890123",
+                accountName: "Ama Owusu",
+            });
+            expect(bank).toMatchObject({ currency: "GHS", kind: "bank", bankName: "GCB Bank", accountNumber: "1234567890123" });
+
+            const momo = await beneficiaryService.create(user.id, {
+                currency: "GHS",
+                kind: "momo",
+                momoNetwork: "MTN Momo",
+                momoNumber: "+233241234567",
+                momoName: "Kofi Mensah",
+            });
+            expect(momo).toMatchObject({ currency: "GHS", kind: "momo", momoNetwork: "MTN Momo" });
+
+            await expect(beneficiaryService.create(user.id, {
+                currency: "SLL",
+                kind: "bank",
+                bankName: "Sierra Bank",
+                accountNumber: "1234567890",
+                accountName: "Mariama",
+            })).rejects.toMatchObject({ response_code: 400, message: "SLL payouts go to mobile money only" });
+        });
     });
 
     describe("receiving through a payment link", () => {

@@ -20,9 +20,8 @@ export const BENEFICIARY_CURRENCIES = [
     "RMB", "NGN", "GHS", "KES", "XAF", "XOF", "ZAR", "TZS", "UGX", "RWF", "BWP", "ZMW", "MWK", "ETB", "CDF", "SLL",
 ] as const;
 
-/** Currencies that only pay out to mobile money */
-// GHS: our Ghana providers only move cedis by mobile money
-export const MOMO_ONLY_CURRENCIES = ["GHS", "XAF", "RWF", "SLL", "MWK"];
+/** Currencies that only pay out to mobile money (GHS supports bank payouts via manual sends; XAF, RWF and MWK have banks too) */
+export const MOMO_ONLY_CURRENCIES = ["SLL"];
 
 export const ALIPAY_TYPES = ["nigerian", "chinese"] as const;
 

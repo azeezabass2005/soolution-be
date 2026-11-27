@@ -17,7 +17,7 @@ import errorResponseMessage, { ErrorSeverity } from "../../../common/messages/er
 import transactionLimitService from "../../../services/transaction-limit.service";
 import platformSettingsService from "../../../services/platform-settings.service";
 import { isManualSendCurrency, MANUAL_SEND_CURRENCIES, manualWindow } from "../../../common/operations";
-import { MANUAL_GHS_SEND } from "../../../common/wallet.constants";
+import { MANUAL_SEND_MIN_NGN } from "../../../common/wallet.constants";
 /**
  * GHS routes: send to Ghana mobile money or banks, and receive GHS through a
  * payment link, both through Fincra. Mounted at /protected/ogateway (the path
@@ -149,8 +149,8 @@ class OGatewayTransactionController extends BaseController {
                 hours: window.hours,
                 /** Every manual currency's rate, so the app can price any manual send */
                 rates: Object.fromEntries(MANUAL_SEND_CURRENCIES.map((c) => [c, ops.manual.rates[c] > 0 ? ops.manual.rates[c] : null])),
-                // The ₦500,000 floor is for manual GHS only
-                minNgn: currency === "GHS" ? MANUAL_GHS_SEND.MIN_NGN : 0,
+                /** Minimum NGN equivalent for all manual sends (GHS, KES, XAF, RMB) */
+                minNgn: MANUAL_SEND_MIN_NGN,
             });
         } catch (error) {
             return next(error);

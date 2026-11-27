@@ -88,7 +88,7 @@ import {
 import WalletService from "./wallet.service";
 import WalletTransactionService from "./wallet-transaction.service";
 import walletSendService from "./wallet-send.service";
-import { BASE_WALLET_CURRENCY, MANUAL_GHS_SEND, MANUAL_PAYOUT_CURRENCIES } from "../common/wallet.constants";
+import { BASE_WALLET_CURRENCY, MANUAL_GHS_SEND, MANUAL_PAYOUT_CURRENCIES, MANUAL_SEND_MIN_NGN } from "../common/wallet.constants";
 import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
 import { pickYellowCardNetwork } from "../utils/momo-network.utils";
@@ -345,6 +345,20 @@ class TransactionService {
             { amount: calculatedFromAmount, currency: fromCurrency },
             { amount, currency: toCurrency },
         ]);
+
+        // All manual sends start at ₦500,000 equivalent
+        const manualNgnAmount = fromWallet === BASE_WALLET_CURRENCY
+            ? calculatedFromAmount
+            : (manual.rate > 0 ? Math.round(amount * manual.rate * 100) / 100 : (txNgnValue ?? calculatedFromAmount));
+        if (!(manualNgnAmount >= MANUAL_SEND_MIN_NGN)) {
+            throw errorResponseMessage.createError(
+                400,
+                `Manual payments start at ₦${MANUAL_SEND_MIN_NGN.toLocaleString('en-US')}. For smaller amounts, use instant.`,
+                ErrorSeverity.LOW,
+                { code: "MANUAL_MINIMUM", minNgn: MANUAL_SEND_MIN_NGN },
+            );
+        }
+
         const holdAmount = fromWallet === BASE_WALLET_CURRENCY ? calculatedFromAmount : Math.round(amount * 100) / 100;
         await walletSendService.assertCanPay(user, fromWallet, holdAmount);
 
@@ -547,6 +561,16 @@ class TransactionService {
                 400,
                 amountValidation.error || "Transaction amount is outside allowed limits",
                 ErrorSeverity.HIGH
+            );
+        }
+
+        // All manual sends start at ₦500,000 equivalent
+        if (!(ngnEquivalent >= MANUAL_SEND_MIN_NGN)) {
+            throw errorResponseMessage.createError(
+                400,
+                `Manual payments start at ₦${MANUAL_SEND_MIN_NGN.toLocaleString('en-US')}.`,
+                ErrorSeverity.LOW,
+                { code: "MANUAL_MINIMUM", minNgn: MANUAL_SEND_MIN_NGN },
             );
         }
 
