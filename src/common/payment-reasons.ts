@@ -1,21 +1,45 @@
 import errorResponseMessage, { ErrorSeverity } from "./messages/error-response-message";
 
 /**
- * Why money is being sent or received. The values are YellowCard's own
- * (https://docs.yellowcard.engineering/docs/payment-reasons-api): sends must
- * carry one for compliance, so the same list is used everywhere.
+ * YellowCard's accepted /payments reason enum
+ * (https://docs.yellowcard.engineering/docs/payment-reasons-api).
+ */
+export const YELLOWCARD_PAYMENT_REASONS = [
+    "gift",
+    "bills",
+    "groceries",
+    "travel",
+    "health",
+    "entertainment",
+    "housing",
+    "school-fees",
+    "other",
+] as const;
+export type YellowCardPaymentReason = (typeof YELLOWCARD_PAYMENT_REASONS)[number];
+
+/**
+ * Why money is being sent or received. Sends must carry one for compliance.
+ * Business and family/friends options are stored as-is on our transaction and
+ * mapped to a YellowCard-accepted value via `yellowCardReasonOf` when routing
+ * through YellowCard.
  */
 export const PAYMENT_REASONS = [
-    { value: "gift", label: "Gift" },
-    { value: "bills", label: "Bills" },
-    { value: "groceries", label: "Groceries" },
-    { value: "travel", label: "Travel" },
-    { value: "health", label: "Health" },
-    { value: "entertainment", label: "Entertainment" },
-    { value: "housing", label: "Housing" },
-    { value: "school-fees", label: "School fees" },
-    { value: "other", label: "Other" },
-] as const;
+    { value: "family-friends", label: "Family & Friends", yc: "gift" },
+    { value: "business", label: "Business", yc: "other" },
+    { value: "supplier-payment", label: "Supplier payment", yc: "other" },
+    { value: "customer-payment", label: "Customer payment", yc: "other" },
+    { value: "goods-restock", label: "Goods restock", yc: "other" },
+    { value: "staff-payment", label: "Staff payment", yc: "other" },
+    { value: "gift", label: "Gift", yc: "gift" },
+    { value: "bills", label: "Bills", yc: "bills" },
+    { value: "groceries", label: "Groceries", yc: "groceries" },
+    { value: "travel", label: "Travel", yc: "travel" },
+    { value: "health", label: "Health", yc: "health" },
+    { value: "entertainment", label: "Entertainment", yc: "entertainment" },
+    { value: "housing", label: "Housing", yc: "housing" },
+    { value: "school-fees", label: "School fees", yc: "school-fees" },
+    { value: "other", label: "Other", yc: "other" },
+] as const satisfies readonly { value: string; label: string; yc: YellowCardPaymentReason }[];
 export type PaymentReason = (typeof PAYMENT_REASONS)[number]["value"];
 const VALUES = PAYMENT_REASONS.map((r) => r.value) as readonly string[];
 export const NARRATION_MAX = 100;
@@ -36,3 +60,7 @@ export const paymentReasonOf = (body: any, options: { required: boolean }): { re
 };
 
 export const paymentReasonLabel = (value?: string | null) => PAYMENT_REASONS.find((r) => r.value === value)?.label ?? null;
+
+/** Maps a stored payment reason to a value accepted by YellowCard's /payments API */
+export const yellowCardReasonOf = (value?: string | null): YellowCardPaymentReason =>
+    PAYMENT_REASONS.find((r) => r.value === value)?.yc ?? "other";

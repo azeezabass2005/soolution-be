@@ -258,6 +258,17 @@ describe("YellowCard currencies priced like GHS", () => {
         expect(yc.submitPaymentRequest).toHaveBeenCalledWith(expect.objectContaining({ reason: "school-fees" }));
         const [row] = await exec().select().from(transactions).where((await import("drizzle-orm")).eq(transactions.id, tx.id ?? tx._id));
         expect(row).toMatchObject({ reason: "school-fees", narration: "Term 2 fees" });
+
+        // Business & family/friends reasons are stored as-is and mapped to YellowCard-accepted values
+        const bizTx: any = await send({ reason: "supplier-payment", narration: "Invoice 42" });
+        expect(yc.submitPaymentRequest).toHaveBeenLastCalledWith(expect.objectContaining({ reason: "other" }));
+        const [bizRow] = await exec().select().from(transactions).where((await import("drizzle-orm")).eq(transactions.id, bizTx.id ?? bizTx._id));
+        expect(bizRow).toMatchObject({ reason: "supplier-payment", narration: "Invoice 42" });
+
+        const famTx: any = await send({ reason: "family-friends" });
+        expect(yc.submitPaymentRequest).toHaveBeenLastCalledWith(expect.objectContaining({ reason: "gift" }));
+        const [famRow] = await exec().select().from(transactions).where((await import("drizzle-orm")).eq(transactions.id, famTx.id ?? famTx._id));
+        expect(famRow).toMatchObject({ reason: "family-friends" });
     });
 
     it("counts an exchange's spread in profit, and a send paid from the KES wallet only for its wallet fee", async () => {

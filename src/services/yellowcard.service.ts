@@ -4,6 +4,7 @@ import axios, { AxiosInstance } from "axios";
 import logger from "../utils/logger.utils";
 import errorResponseMessage, { ErrorResponseCode, ErrorSeverity } from "../common/messages/error-response-message";
 import { CURRENCY_COUNTRY, MULTI_COUNTRY_CURRENCIES, YELLOWCARD_FLOW_CURRENCIES } from "../common/payment-link.constants";
+import { yellowCardReasonOf } from "../common/payment-reasons";
 
 /** The KYC person on a payment (sender) or collection (recipient) */
 export type YellowCardChannelType = "bank" | "momo";
@@ -785,7 +786,7 @@ class YellowCardService {
                 sequenceId: params.sequenceId,
                 sender: this.kycPerson(params.sender),
                 destination: params.destination,
-                reason: params.reason || "other",
+                reason: yellowCardReasonOf(params.reason),
                 forceAccept: params.forceAccept ?? true,
             };
             if (params.amount != null) body.amount = params.amount;

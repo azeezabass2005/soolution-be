@@ -31,7 +31,7 @@ export class LoginOtpError extends Error {
 const hashCode = (challengeId: string, code: string) =>
     crypto.createHmac("sha256", config.JWT_SECRET).update(`login-otp:${challengeId}:${code}`).digest("hex");
 
-const newCode = () => crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
+const newCode = () => (config.IS_LOCAL ? "000000" : crypto.randomInt(0, 1_000_000).toString().padStart(6, "0"));
 
 const sameHash = (a: string, b: string) => {
     const x = Buffer.from(a, "hex");

@@ -281,9 +281,9 @@ class EmailService {
      * @param {EmailConfig} config Email configuration
      * @returns {Promise<any>} Result of the send operation
      */
-    public async send(config: EmailConfig): Promise<any> {
+    public async send(emailConfig: EmailConfig): Promise<any> {
         return this.executeWithErrorHandling(async () => {
-            const { to, subject, template, data, html, text, cc, bcc, attachments } = config;
+            const { to, subject, template, data, html, text, cc, bcc, attachments } = emailConfig;
 
             let emailHtml = html;
             let emailText = text;
@@ -320,8 +320,8 @@ class EmailService {
                 attachments,
             };
 
-            // In development, log the email instead of sending it
-            if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'dev') {
+            // In development / local mode, log the email instead of sending it
+            if (config.IS_LOCAL || config.NODE_ENV === 'development' || config.NODE_ENV === 'dev') {
                 console.log('\n========== EMAIL (DEV MODE - NOT SENT) ==========');
                 console.log('To:', mailOptions.to);
                 console.log('From:', mailOptions.from);

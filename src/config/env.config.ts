@@ -11,6 +11,8 @@ import logger from '../utils/logger.utils';
 interface EnvConfig {
     /** Node environment (development, production, test) */
     NODE_ENV: string;
+    /** Local machine dev mode: uses fixed 000000 sign-in codes and skips SMTP (ignored outside development) */
+    IS_LOCAL: boolean;
     /** Server port number */
     PORT: number;
     /** PostgreSQL connection string, e.g. postgres://user:pass@host:5432/db */
@@ -198,6 +200,7 @@ const loadEnvConfig = (): EnvConfig => {
 
     const config = {
         NODE_ENV: env,
+        IS_LOCAL: process.env.IS_LOCAL === 'true' && (env === 'development' || env === 'dev'),
         PORT: parseInt(process.env.PORT || '3500', 10),
         DATABASE_URL: process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/solution_pay',
         DATABASE_SSL: process.env.DATABASE_SSL === 'true',
@@ -212,7 +215,7 @@ const loadEnvConfig = (): EnvConfig => {
         LEGACY_COOKIE_DOMAINS: (process.env.LEGACY_COOKIE_DOMAINS || '').split(',').map((d) => d.trim()).filter(Boolean),
         // Timers can't wait longer than 2^31−1 ms (~24.8 days); a larger value would fire every 1 ms
         RATE_LIMIT_WINDOW_MS: Math.min(parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10), 2_147_483_647),
-        RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX || '100', 10),
+        RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX || '1000', 10),
         REDIS_URL: process.env.REDIS_URL,
         LOG_LEVEL: process.env.LOG_LEVEL || 'info',
         LOG_RETENTION_DAYS: parseInt(process.env.LOG_RETENTION_DAYS || '30', 10),

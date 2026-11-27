@@ -77,6 +77,8 @@ class App {
         const limiter = rateLimit({
             windowMs: config.RATE_LIMIT_WINDOW_MS,
             limit: config.RATE_LIMIT_MAX,
+            standardHeaders: true,
+            legacyHeaders: false,
             handler: (req: Request, res: Response) => {
                 logger.warn('Rate limit exceeded', {
                     ip: req.ip,

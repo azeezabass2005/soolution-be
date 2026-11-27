@@ -238,13 +238,11 @@ describe("TransactionService", () => {
         });
     });
 
-    describe("bank transfer paid by the customer", () => {
-        beforeEach(() => openManual({ KES: 10 }));
-        it("shows the company's default account and lists the transaction with details and owner", async () => {
+    describe("manual sends paid from the NGN wallet", () => {
+        beforeEach(() => openManual({ KES: 10, XAF: 2.5 }));
+        it("takes NGN from the user's wallet at the manual rate (never our bank account) and refunds on rejection", async () => {
             const user = await createUser();
-            const banks = new BankAccountDetailsService();
-            await banks.createAccountDetails({ currency: "NGN", accountNumber: "0011223344", accountName: "Solution Pay", bankName: "Zenith" });
-            await exchangeRateRepository.create({ from: "NGN", to: "KES", rate: 0.1, isActive: true });
+            await fundWallet(user.id, 10_000, "NGN");
 
             const created: any = await transactionService.createBankTransferTransaction(
                 {
@@ -253,19 +251,48 @@ describe("TransactionService", () => {
                 },
                 user.id
             );
-            expect(created.status).toBe("pending_input");
-            expect(created.details.bankAccountDetails.accountNumber).toBe("0011223344");
+            expect(created.status).toBe("awaiting_confirmation");
+            expect(Object.keys(created.details.bankAccountDetails ?? {})).toHaveLength(0);
+            expect(created.details.fundingCurrency).toBe("NGN");
+            expect(created.details.fundingAmount).toBe(5000);
             expect(created.details.fromAmount).toBe(5000);
+            expect(await walletBalance(user.id, "NGN")).toBe(5000);
+            expect(await accountBalance(manualPayoutPendingCode("NGN"))).toBe(5000);
 
             const page = await transactionService.listTransactions({ user: user.id, currency: ["KES", "GHS"] }, { page: 1, limit: 10 }, created.reference.slice(0, 8));
             expect(page.paginator.itemsCount).toBe(1);
             expect(page.data[0].details?.accountName).toBe("Wanjiku");
             expect((page.data[0].user as any).firstName).toBe("Ada");
+
+            const rejected = await transactionService.rejectManualTransaction(created.id, "Invalid recipient account");
+            expect(rejected.refundedToWallet).toBe(true);
+            expect(await walletBalance(user.id, "NGN")).toBe(10_000);
+            await expectLedgerClean();
+        });
+
+        it("refuses when the NGN wallet balance does not cover the manual send (KES and XAF)", async () => {
+            const poor = await createUser();
+            await fundWallet(poor.id, 1_000, "NGN");
+            await expect(transactionService.createBankTransferTransaction(
+                {
+                    amount: 500, fromCurrency: "NGN", toCurrency: "KES", paymentMethod: "bank_transfer", institutionType: "bank",
+                    bankName: "KCB", accountNumber: "123456", accountName: "Wanjiku", transactionType: "send", pin: TEST_PIN,
+                },
+                poor.id
+            )).rejects.toMatchObject({ response_code: 400 });
+            await expect(transactionService.createBankTransferTransaction(
+                {
+                    amount: 2000, fromCurrency: "NGN", toCurrency: "XAF", paymentMethod: "mobile_money", institutionType: "momo",
+                    momoNetwork: "MTN", momoNumber: "670000000", momoName: "Paul", transactionType: "send", pin: TEST_PIN,
+                },
+                poor.id
+            )).rejects.toMatchObject({ response_code: 400 });
+            expect(await walletBalance(poor.id, "NGN")).toBe(1_000);
         });
 
         it("prices from the admin's manual rate, whatever amount the client sends", async () => {
             const user = await createUser();
-            await new BankAccountDetailsService().createAccountDetails({ currency: "NGN", accountNumber: "0011223344", accountName: "Solution Pay", bankName: "Zenith" });
+            await fundWallet(user.id, 20_000, "NGN");
             const created: any = await transactionService.createBankTransferTransaction(
                 {
                     amount: 500, fromAmount: 1, fromCurrency: "NGN", toCurrency: "KES", paymentMethod: "bank_transfer", institutionType: "bank",
@@ -274,7 +301,9 @@ describe("TransactionService", () => {
                 user.id
             );
             expect(created.details.fromAmount).toBe(5000);
+            expect(created.details.fundingAmount).toBe(5000);
             expect(created.lockedRate).toBe(10);
+            expect(await walletBalance(user.id, "NGN")).toBe(15_000);
         });
 
         it("only sends GHS, KES and XAF manually, and never receives", async () => {

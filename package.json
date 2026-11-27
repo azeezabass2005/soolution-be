@@ -4,7 +4,7 @@
   "description": "Solution Pay Backend",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "npx tsc && node ./dist/index.js",
+    "dev": "node scripts/dev.mjs",
     "build": "tsc",
     "start": "node dist/db/migrate.js && node dist/index.js",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.test.json",

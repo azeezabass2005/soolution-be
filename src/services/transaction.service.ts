@@ -1,4 +1,4 @@
-import { paymentReasonOf } from "../common/payment-reasons";
+import { paymentReasonOf, yellowCardReasonOf } from "../common/payment-reasons";
 import userNoticesService from "./user-notices.service";
 import { canonicalBankKey } from '../common/ghana-banks.constants';
 import transactionRepository, { type TransactionListFilter } from "../repositories/transaction.repository";
@@ -88,7 +88,7 @@ import {
 import WalletService from "./wallet.service";
 import WalletTransactionService from "./wallet-transaction.service";
 import walletSendService from "./wallet-send.service";
-import { MANUAL_GHS_SEND, MANUAL_PAYOUT_CURRENCIES } from "../common/wallet.constants";
+import { BASE_WALLET_CURRENCY, MANUAL_GHS_SEND, MANUAL_PAYOUT_CURRENCIES } from "../common/wallet.constants";
 import PinService from "./pin.service";
 import ledgerService from "./ledger.service";
 import { pickYellowCardNetwork } from "../utils/momo-network.utils";
@@ -284,10 +284,6 @@ class TransactionService {
         // A currency a super admin turned off (for everyone or this user) can't be used
         await currencyAccessService.assertOn(user, transactionData.fromCurrency, transactionData.toCurrency);
         const { amount, fromCurrency, toCurrency, paymentMethod, institutionType, bankName, accountNumber, accountName, momoNetwork, momoNumber, momoName, idempotencyKey, fromAmount, transactionType, pin } = transactionData;
-        // A send paid from the destination currency's wallet: ops pays out directly
-        const fromWallet = transactionType === 'send' && toCurrency
-            ? this.resolveManualWallet(transactionData.walletCurrency, toCurrency)
-            : null;
 
         if (!toCurrency) {
             throw errorResponseMessage.payloadIncorrect("Target currency (toCurrency) is required");
@@ -317,13 +313,16 @@ class TransactionService {
         if (toCurrency === 'RMB') {
             throw errorResponseMessage.createError(400, "RMB is sent through Alipay or WeChat.", ErrorSeverity.LOW);
         }
+        // Manual sends are always paid from the user's wallet (never by transfer to our bank):
+        // the NGN wallet at the admin's manual rate, or the destination currency wallet if chosen.
+        const fromWallet = this.resolveManualWallet(transactionData.walletCurrency, toCurrency);
         // The admin's manual rate (naira per unit) and hours; paid from the destination wallet needs no rate
-        const manual = await manualSendTerms(toCurrency, { needsRate: !fromWallet });
+        const manual = await manualSendTerms(toCurrency, { needsRate: fromWallet === BASE_WALLET_CURRENCY });
 
         // What the user pays in naira, always from the manual rate (never trusted from the client)
-        const calculatedFromAmount = fromWallet
-            ? Math.round(Number(fromAmount || amount * (manual.rate || 0)) * 100) / 100
-            : Math.round(amount * manual.rate * 100) / 100;
+        const calculatedFromAmount = fromWallet === BASE_WALLET_CURRENCY
+            ? Math.round(amount * manual.rate * 100) / 100
+            : Math.round(Number(fromAmount || amount * (manual.rate || 0)) * 100) / 100;
 
         // Determine NGN equivalent for validation
         // For receive transactions: toCurrency is NGN, so amount is already the NGN equivalent
@@ -346,17 +345,13 @@ class TransactionService {
             { amount: calculatedFromAmount, currency: fromCurrency },
             { amount, currency: toCurrency },
         ]);
-        if (fromWallet) await walletSendService.assertCanPay(user, fromWallet, Math.round(amount * 100) / 100);
+        const holdAmount = fromWallet === BASE_WALLET_CURRENCY ? calculatedFromAmount : Math.round(amount * 100) / 100;
+        await walletSendService.assertCanPay(user, fromWallet, holdAmount);
 
         // Handle idempotency key if provided
         if (idempotencyKey) {
             const duplicate = await this.findDuplicate(idempotencyKey, user);
             if (duplicate) return duplicate;
-        }
-
-        const bankAccountDetails = fromWallet ? null : await this.bankAccountDetailsService.getCompanyDefault(fromCurrency);
-        if(!fromWallet && !bankAccountDetails) {
-            throw errorResponseMessage.resourceNotFound(`Bank details for ${fromCurrency}`)
         }
 
         const transaction = await transactionRepository.create({
@@ -381,8 +376,9 @@ class TransactionService {
             transactionId: transaction.id,
             type: (paymentMethod || DETAIL_TYPE.BANK_TRANSFER) as DetailType,
             institutionType,
-            ...(bankAccountDetails ? { bankAccountDetails: { ...bankAccountDetails } } : {}),
-            ...(fromWallet ? { fundingCurrency: fromWallet, fundingAmount: transaction.amount, fundingFee: 0 } : {}),
+            fundingCurrency: fromWallet,
+            fundingAmount: holdAmount,
+            fundingFee: 0,
             fromAmount: calculatedFromAmount, // Amount in source currency (what user sends)
             ...(institutionType === 'bank' ? {
                 bankName,
@@ -395,15 +391,18 @@ class TransactionService {
             }),
         })
 
-        if (fromWallet) {
-            await this.holdManualPayoutFromWallet(transaction, user, `Payment to ${institutionType === 'bank' ? accountName : momoName || 'recipient'}`);
-        }
+        await this.holdManualPayoutFromWallet(
+            transaction,
+            user,
+            `Payment to ${institutionType === 'bank' ? accountName : momoName || 'recipient'}`,
+            { currency: fromWallet, amount: holdAmount },
+        );
 
-        // The team sees every new manual payment straight away (in the app); the email follows once the user sends their receipt
+        // The team sees every new manual payment straight away (in the app)
         await inboxService.toTeam('transactions', {
             type: 'transaction.manual',
             title: `New manual ${transaction.currency} payment`,
-            body: `${transaction.reference}: ${transaction.currency} ${Number(transaction.amount).toLocaleString('en-US')}${fromWallet ? ', paid from the customer\'s wallet' : ', waiting for the customer\'s receipt'}.`,
+            body: `${transaction.reference}: ${transaction.currency} ${Number(transaction.amount).toLocaleString('en-US')}, paid from the customer's ${fromWallet} wallet.`,
             link: '/dashboard/admin/transactions?status=in_progress',
             data: { transactionId: transaction.id },
         });
@@ -441,16 +440,17 @@ class TransactionService {
             // Don't fail transaction creation if email fails
         }
 
-        const created = fromWallet ? await transactionRepository.findById(transaction.id) : transaction;
+        const created = await transactionRepository.findById(transaction.id);
         return { ...(created ?? transaction), details: { ...transactionDetails } }
     }
 
-    /** null = pay by bank transfer (the default); otherwise the wallet currency, which must match the payout */
-    private resolveManualWallet(requested: unknown, payoutCurrency: string): string | null {
-        if (requested === undefined || requested === null || requested === "") return null;
+    /** NGN wallet (default) or the payout currency's own wallet; never bank transfer to us */
+    private resolveManualWallet(requested: unknown, payoutCurrency: string): string {
+        if (requested === undefined || requested === null || requested === "") return BASE_WALLET_CURRENCY;
         const currency = String(requested).toUpperCase();
+        if (currency === BASE_WALLET_CURRENCY) return BASE_WALLET_CURRENCY;
         if (currency !== payoutCurrency || !(MANUAL_PAYOUT_CURRENCIES as readonly string[]).includes(currency)) {
-            throw errorResponseMessage.createError(400, `${payoutCurrency} payments can be paid from your ${payoutCurrency} wallet or by bank transfer`, ErrorSeverity.LOW);
+            throw errorResponseMessage.createError(400, `${payoutCurrency} payments can only be paid from your ${BASE_WALLET_CURRENCY} or ${payoutCurrency} wallet`, ErrorSeverity.LOW);
         }
         return currency;
     }
@@ -1227,7 +1227,7 @@ class TransactionService {
                     networkId: network.id,
                     country: destination.country,
                 },
-                reason: transaction.reason || "other",
+                reason: yellowCardReasonOf(transaction.reason),
                 forceAccept: true,
             });
 
